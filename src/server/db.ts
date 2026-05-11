@@ -1,16 +1,13 @@
 import fs from "node:fs";
 import path from "node:path";
-import { createRequire } from "node:module";
 import initSqlJs, { type Database, type SqlJsStatic } from "sql.js";
 import type { MetricSnapshot, RefreshRun, ServerConfig, ServerRow } from "../shared/types";
-
-const require = createRequire(import.meta.url);
 
 let sqlPromise: Promise<SqlJsStatic> | null = null;
 
 function getSql(): Promise<SqlJsStatic> {
   sqlPromise ??= initSqlJs({
-    locateFile: () => require.resolve("sql.js/dist/sql-wasm.wasm")
+    locateFile: () => path.join(process.cwd(), "node_modules/sql.js/dist/sql-wasm.wasm")
   });
   return sqlPromise;
 }
