@@ -7,6 +7,7 @@ build/
 coverage/
 *.log
 .superpowers/
+.playwright-mcp/
 data/*.sqlite
 data/*.sqlite-*
 data/*.db
