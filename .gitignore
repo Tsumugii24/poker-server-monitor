@@ -14,4 +14,4 @@ data/*.db
 data/*.db-*
 .vite/
 
-servers.json
+/config/servers.json

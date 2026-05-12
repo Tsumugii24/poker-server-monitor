@@ -1,10 +1,10 @@
 [
   {
-    "id": "prod-01",
-    "name": "Production 01",
-    "host": "192.168.1.10",
+    "id": "1",
+    "name": "[SERVER_NAME]",
+    "host": "[SERVER_IP_ADDRESS]",
     "port": 22,
-    "group": "production",
+    "group": "[GROUP_NAME]",
     "enabled": true
   }
 ]
