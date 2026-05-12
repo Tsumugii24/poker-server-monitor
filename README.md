@@ -72,7 +72,13 @@ Useful options:
 .\start-dashboard.ps1 -Port 3001
 ```
 
-The script stops any existing listener on the selected port, optionally rebuilds the app, starts the dashboard in the background, checks `/api/overview`, and opens the browser.
+The script stops any existing listener on the selected port, optionally rebuilds the app, starts the dashboard in the current terminal, and opens the browser.
+Because the server runs in the current terminal by default, `Ctrl+C` stops the dashboard.
+Use `-Background` when you want the old background behavior:
+
+```powershell
+.\start-dashboard.ps1 -Background
+```
 
 ## Verification
 

@@ -9,7 +9,7 @@ const overview = {
   refresh: { active: false, nextRefreshAt: "2026-05-12T01:00:00.000Z", lastRun: null },
   summary: {
     total: 2,
-    online: 1,
+    online: 2,
     warning: 1,
     offline: 0,
     unknown: 0,
@@ -17,7 +17,7 @@ const overview = {
     averageMemory: 55,
     averageDisk: 60
   },
-  description: "1 of 2 servers online; 1 warning; none offline.",
+  description: "2 of 2 servers online; 1 warning; none offline.",
   servers: [
     {
       id: "prod-01",
@@ -103,9 +103,9 @@ describe("App", () => {
     render(<App />);
 
     expect(await screen.findByText("整体监控")).toBeInTheDocument();
-    expect(screen.getByText("1 / 2")).toBeInTheDocument();
+    expect(screen.getByText("2 / 2")).toBeInTheDocument();
     expect(screen.getByText("Production 02")).toBeInTheDocument();
-    expect(screen.getByText("1 of 2 servers online; 1 warning; none offline.")).toBeInTheDocument();
+    expect(screen.getByText("2 of 2 servers online; 1 warning; none offline.")).toBeInTheDocument();
   });
 
   it("opens a server detail view from the server list", async () => {

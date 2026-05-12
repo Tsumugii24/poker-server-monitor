@@ -80,7 +80,9 @@ function buildSummary(servers: ReturnType<MonitorDatabase["getServerRows"]>): Ov
 
   return {
     total: servers.length,
-    online: latest.filter((snapshot) => snapshot?.status === "online").length,
+    online: latest.filter(
+      (snapshot) => snapshot?.status === "online" || snapshot?.status === "warning"
+    ).length,
     warning: latest.filter((snapshot) => snapshot?.status === "warning").length,
     offline: latest.filter((snapshot) => snapshot?.status === "offline").length,
     unknown: latest.filter((snapshot) => !snapshot || snapshot.status === "unknown").length,

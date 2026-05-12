@@ -54,6 +54,31 @@ describe("monitor API", () => {
     expect(response.body.description).toContain("1 of 1 servers online");
   });
 
+  it("counts warning servers as online in the overview availability total", async () => {
+    const warningServer: ServerConfig = {
+      id: "prod-02",
+      name: "Production 02",
+      host: "10.0.0.2",
+      port: 22,
+      enabled: true
+    };
+    db.syncServers([...servers, warningServer]);
+    db.insertSnapshot({
+      ...snapshot,
+      id: "snap-2",
+      serverId: "prod-02",
+      status: "warning",
+      cpuUsedPercent: 85
+    });
+
+    const response = await request(createApp({ db, refreshService: service })).get("/api/overview");
+
+    expect(response.status).toBe(200);
+    expect(response.body.summary.online).toBe(2);
+    expect(response.body.summary.warning).toBe(1);
+    expect(response.body.description).toContain("2 of 2 servers online");
+  });
+
   it("returns server detail and history", async () => {
     const response = await request(createApp({ db, refreshService: service })).get(
       "/api/servers/prod-01/history?hours=24"

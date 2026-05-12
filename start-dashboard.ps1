@@ -1,6 +1,7 @@
 param(
   [switch]$SkipBuild,
   [switch]$NoOpen,
+  [switch]$Background,
   [int]$Port = 3001
 )
 
@@ -38,7 +39,27 @@ if (-not $SkipBuild) {
   npm run build
 }
 
-Write-Host "Starting dashboard on http://127.0.0.1:${Port} ..."
+$healthUrl = "http://127.0.0.1:${Port}/api/overview"
+$appUrl = "http://127.0.0.1:${Port}"
+
+if (-not $Background) {
+  if (-not $NoOpen) {
+    Start-Process powershell.exe -WindowStyle Hidden -ArgumentList @(
+      "-NoProfile",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-Command",
+      "Start-Sleep -Seconds 2; Start-Process '$appUrl'"
+    )
+  }
+
+  Write-Host "Starting dashboard in this terminal: $appUrl" -ForegroundColor Green
+  Write-Host "Press Ctrl+C to stop it."
+  npm start
+  exit $LASTEXITCODE
+}
+
+Write-Host "Starting dashboard in the background on $appUrl ..."
 $serverProcess = Start-Process `
   -FilePath "npm.cmd" `
   -ArgumentList "start" `
@@ -46,7 +67,6 @@ $serverProcess = Start-Process `
   -WindowStyle Hidden `
   -PassThru
 
-$healthUrl = "http://127.0.0.1:${Port}/api/overview"
 $ready = $false
 
 for ($i = 0; $i -lt 20; $i++) {
@@ -68,7 +88,6 @@ if (-not $ready) {
   exit 1
 }
 
-$appUrl = "http://127.0.0.1:${Port}"
 Write-Host "Dashboard is running: $appUrl" -ForegroundColor Green
 
 if (-not $NoOpen) {
