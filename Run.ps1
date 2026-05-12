@@ -19,7 +19,7 @@ if (-not (Test-Path ".env")) {
 }
 
 if (-not (Test-Path "config\servers.json")) {
-  Write-Host "Missing config\servers.json." -ForegroundColor Red
+  Write-Host "Missing config\servers.json. Create it from config\servers.json.example before starting." -ForegroundColor Red
   exit 1
 }
 
@@ -38,6 +38,8 @@ if (-not $SkipBuild) {
   Write-Host "Building dashboard..."
   npm run build
 }
+
+$env:SERVER_MONITOR_PORT = "$Port"
 
 $healthUrl = "http://127.0.0.1:${Port}/api/overview"
 $appUrl = "http://127.0.0.1:${Port}"

@@ -1,45 +1,40 @@
 # Server Monitor
 
-Local TypeScript dashboard for monitoring Linux servers over SSH.
+TypeScript dashboard for monitoring Linux servers over SSH.
 
 ## Setup
 
 1. Install dependencies:
 
-```powershell
+```bash
 npm install
 ```
 
-2. Create `.env` from `.env.example`:
+2. Create `.env` from `.env.example`, then fill in your SSH credentials:
+
+```bash
+cp .env.example .env
+```
+
+For Linux deployments that should accept direct network access, set:
 
 ```env
-SSH_USERNAME=your-ssh-username
-SSH_PASSWORD=your-ssh-password
-SERVER_MONITOR_PORT=3001
-SERVER_MONITOR_DB_PATH=data/server-monitor.sqlite
-SERVER_MONITOR_REFRESH_INTERVAL_MS=3600000
+SERVER_MONITOR_HOST=0.0.0.0
 ```
 
-3. Edit `config/servers.json`:
+Keep `SERVER_MONITOR_HOST=127.0.0.1` when running locally or behind Nginx/Caddy.
 
-```json
-[
-  {
-    "id": "prod-01",
-    "name": "Production 01",
-    "host": "192.168.1.10",
-    "port": 22,
-    "group": "production",
-    "enabled": true
-  }
-]
+3. Create the local server inventory:
+
+```bash
+cp config/servers.json.example config/servers.json
 ```
 
-Credentials are read only by the backend. Do not put passwords in `config/servers.json`.
+Then edit `config/servers.json` with your real servers. Credentials are read only by the backend. Do not put passwords in `config/servers.json`.
 
 ## Development
 
-```powershell
+```bash
 npm run dev
 ```
 
@@ -49,40 +44,55 @@ Backend API: `http://127.0.0.1:3001`
 
 ## Production Build
 
-```powershell
+```bash
 npm run build
 npm start
 ```
 
-Production app: `http://127.0.0.1:3001`
+Production app: `http://127.0.0.1:3001` by default.
 
 ## One-Click Start
+
+### Windows
 
 Run this from PowerShell:
 
 ```powershell
-.\start-dashboard.ps1
+.\Run.ps1
 ```
 
 Useful options:
 
 ```powershell
-.\start-dashboard.ps1 -SkipBuild
-.\start-dashboard.ps1 -NoOpen
-.\start-dashboard.ps1 -Port 3001
+.\Run.ps1 -SkipBuild
+.\Run.ps1 -NoOpen
+.\Run.ps1 -Port 3001
+.\Run.ps1 -Background
 ```
 
-The script stops any existing listener on the selected port, optionally rebuilds the app, starts the dashboard in the current terminal, and opens the browser.
-Because the server runs in the current terminal by default, `Ctrl+C` stops the dashboard.
-Use `-Background` when you want the old background behavior:
+### Linux
 
-```powershell
-.\start-dashboard.ps1 -Background
+Run this from a shell:
+
+```bash
+chmod +x ./Run.sh
+./Run.sh
 ```
+
+Useful options:
+
+```bash
+./Run.sh --skip-build
+./Run.sh --no-open
+./Run.sh --port 3001
+./Run.sh --background
+```
+
+Both scripts check for `.env` and `config/servers.json`, stop any existing listener on the selected port when possible, optionally rebuild the app, and start the dashboard. By default the server runs in the current terminal, so `Ctrl+C` stops it.
 
 ## Verification
 
-```powershell
+```bash
 npm run typecheck
 npm test -- --run
 npm run build
