@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { loadRuntimeConfig, loadServerInventory } from "./config";
+import { loadRuntimeConfig, loadServerInventory } from "../../src/server/config";
 
 let tempDir: string;
 
@@ -56,8 +56,19 @@ describe("runtime config loading", () => {
 
     expect(config.ssh.username).toBe("root");
     expect(config.ssh.password).toBe("secret");
+    expect(config.host).toBe("127.0.0.1");
     expect(config.port).toBe(3001);
     expect(config.refreshIntervalMs).toBe(3_600_000);
+  });
+
+  it("allows overriding the HTTP bind host for deployment", () => {
+    const config = loadRuntimeConfig({
+      SSH_USERNAME: "root",
+      SSH_PASSWORD: "secret",
+      SERVER_MONITOR_HOST: "0.0.0.0"
+    });
+
+    expect(config.host).toBe("0.0.0.0");
   });
 
   it("fails clearly when SSH credentials are missing", () => {

@@ -1,9 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { SERVER_STATUSES, type OverviewResponse } from "./types";
+import { CONNECTION_STATUSES, HEALTH_LEVELS, type OverviewResponse } from "../../src/shared/types";
 
 describe("shared monitor contracts", () => {
-  it("keeps server status values stable for API clients", () => {
-    expect(SERVER_STATUSES).toEqual(["online", "warning", "offline", "unknown"]);
+  it("keeps connection status values stable for API clients", () => {
+    expect(CONNECTION_STATUSES).toEqual(["online", "offline", "unknown"]);
+  });
+
+  it("keeps health level values stable for API clients", () => {
+    expect(HEALTH_LEVELS).toEqual(["healthy", "warning", "dangerous"]);
   });
 
   it("allows overview responses with macro summary and latest rows", () => {
@@ -17,14 +21,16 @@ describe("shared monitor contracts", () => {
       summary: {
         total: 1,
         online: 1,
-        warning: 0,
         offline: 0,
         unknown: 0,
+        healthy: 1,
+        warning: 0,
+        dangerous: 0,
         averageCpu: 12,
         averageMemory: 34,
         averageDisk: 56
       },
-      description: "1 server online. No warnings.",
+      description: "1 server online. All healthy.",
       servers: [
         {
           id: "prod-01",
@@ -36,7 +42,8 @@ describe("shared monitor contracts", () => {
             id: "snap-1",
             serverId: "prod-01",
             collectedAt: "2026-05-12T00:00:00.000Z",
-            status: "online",
+            connectionStatus: "online",
+            healthLevel: "healthy",
             cpuUsedPercent: 12,
             memoryUsedPercent: 34,
             diskUsedPercent: 56,
@@ -45,7 +52,13 @@ describe("shared monitor contracts", () => {
             load15: 0.3,
             uptimeSeconds: 3600,
             errorCode: null,
-            errorMessage: null
+            errorMessage: null,
+            cpuModel: "Intel Xeon E5-2686 v4",
+            cpuVcores: 4,
+            memoryTotalBytes: 8589934592,
+            memoryUsedBytes: 2919235584,
+            diskTotalBytes: 107374182400,
+            diskUsedBytes: 60129542144
           }
         }
       ],
@@ -53,6 +66,7 @@ describe("shared monitor contracts", () => {
     };
 
     expect(overview.summary.total).toBe(1);
-    expect(overview.servers[0]?.latest?.status).toBe("online");
+    expect(overview.servers[0]?.latest?.connectionStatus).toBe("online");
+    expect(overview.servers[0]?.latest?.healthLevel).toBe("healthy");
   });
 });

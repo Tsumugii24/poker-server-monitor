@@ -1,9 +1,9 @@
 import request from "supertest";
 import { beforeEach, describe, expect, it } from "vitest";
-import type { MetricSnapshot, ServerConfig } from "../shared/types";
-import { createApp } from "./api";
-import { MonitorDatabase } from "./db";
-import { RefreshService } from "./refreshService";
+import type { MetricSnapshot, ServerConfig } from "../../src/shared/types";
+import { createApp } from "../../src/server/api";
+import { MonitorDatabase } from "../../src/server/db";
+import { RefreshService } from "../../src/server/refreshService";
 
 const servers: ServerConfig[] = [
   { id: "prod-01", name: "Production 01", host: "10.0.0.1", port: 22, enabled: true }
@@ -13,7 +13,8 @@ const snapshot: MetricSnapshot = {
   id: "snap-1",
   serverId: "prod-01",
   collectedAt: "2026-05-12T00:00:00.000Z",
-  status: "online",
+  connectionStatus: "online",
+  healthLevel: "healthy",
   cpuUsedPercent: 20,
   memoryUsedPercent: 30,
   diskUsedPercent: 40,
@@ -22,7 +23,13 @@ const snapshot: MetricSnapshot = {
   load15: 0.3,
   uptimeSeconds: 3600,
   errorCode: null,
-  errorMessage: null
+  errorMessage: null,
+  cpuModel: "Intel Xeon E5-2686 v4",
+  cpuVcores: 4,
+  memoryTotalBytes: 8589934592,
+  memoryUsedBytes: 2576980378,
+  diskTotalBytes: 107374182400,
+  diskUsedBytes: 42949672960
 };
 
 describe("monitor API", () => {
@@ -50,11 +57,12 @@ describe("monitor API", () => {
 
     expect(response.status).toBe(200);
     expect(response.body.summary.total).toBe(1);
-    expect(response.body.servers[0].latest.status).toBe("online");
+    expect(response.body.servers[0].latest.connectionStatus).toBe("online");
+    expect(response.body.servers[0].latest.healthLevel).toBe("healthy");
     expect(response.body.description).toContain("1 of 1 servers online");
   });
 
-  it("counts warning servers as online in the overview availability total", async () => {
+  it("counts warning-health servers as online in the overview connectivity total", async () => {
     const warningServer: ServerConfig = {
       id: "prod-02",
       name: "Production 02",
@@ -67,7 +75,8 @@ describe("monitor API", () => {
       ...snapshot,
       id: "snap-2",
       serverId: "prod-02",
-      status: "warning",
+      connectionStatus: "online",
+      healthLevel: "warning",
       cpuUsedPercent: 85
     });
 
@@ -76,6 +85,7 @@ describe("monitor API", () => {
     expect(response.status).toBe(200);
     expect(response.body.summary.online).toBe(2);
     expect(response.body.summary.warning).toBe(1);
+    expect(response.body.summary.healthy).toBe(1);
     expect(response.body.description).toContain("2 of 2 servers online");
   });
 
