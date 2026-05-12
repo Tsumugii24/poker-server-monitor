@@ -13,3 +13,5 @@ data/*.sqlite-*
 data/*.db
 data/*.db-*
 .vite/
+
+servers.json
