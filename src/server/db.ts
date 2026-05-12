@@ -39,6 +39,8 @@ export class MonitorDatabase {
   }
 
   syncServers(servers: ServerConfig[]): void {
+    this.removeServersMissingFromInventory(servers.map((server) => server.id));
+
     const stmt = this.database.prepare(`
       INSERT INTO servers (id, name, host, port, group_name, enabled, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM servers WHERE id = ?), ?), ?)
@@ -69,6 +71,16 @@ export class MonitorDatabase {
       stmt.free();
     }
     this.persist();
+  }
+
+  private removeServersMissingFromInventory(serverIds: string[]): void {
+    if (serverIds.length === 0) {
+      this.database.run("DELETE FROM servers");
+      return;
+    }
+
+    const placeholders = serverIds.map(() => "?").join(", ");
+    this.database.run(`DELETE FROM servers WHERE id NOT IN (${placeholders})`, serverIds);
   }
 
   getServers(): ServerConfig[] {

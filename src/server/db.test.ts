@@ -65,6 +65,13 @@ describe("MonitorDatabase", () => {
     expect(rows[1]?.latest?.errorCode).toBe("connect_failed");
   });
 
+  it("removes servers that are no longer present in config inventory", () => {
+    db.syncServers(servers);
+    db.syncServers([servers[0]!]);
+
+    expect(db.getServers().map((server) => server.id)).toEqual(["prod-01"]);
+  });
+
   it("returns per-server history sorted by collection time", () => {
     db.syncServers(servers);
     db.insertSnapshot(snapshot("prod-01", "2026-05-12T01:00:00.000Z"));
