@@ -1,6 +1,10 @@
-export const SERVER_STATUSES = ["online", "warning", "offline", "unknown"] as const;
+/** Connectivity dimension — is the server reachable? */
+export const CONNECTION_STATUSES = ["online", "offline", "unknown"] as const;
+export type ConnectionStatus = (typeof CONNECTION_STATUSES)[number];
 
-export type ServerStatus = (typeof SERVER_STATUSES)[number];
+/** Health dimension — resource utilisation level (only meaningful when online). */
+export const HEALTH_LEVELS = ["healthy", "warning", "dangerous"] as const;
+export type HealthLevel = (typeof HEALTH_LEVELS)[number];
 
 export type RefreshTrigger = "manual" | "scheduled" | "startup";
 
@@ -19,7 +23,8 @@ export type MetricSnapshot = {
   id: string;
   serverId: string;
   collectedAt: string;
-  status: ServerStatus;
+  connectionStatus: ConnectionStatus;
+  healthLevel: HealthLevel | null; // null when offline or unknown
   cpuUsedPercent: number | null;
   memoryUsedPercent: number | null;
   diskUsedPercent: number | null;
@@ -29,6 +34,12 @@ export type MetricSnapshot = {
   uptimeSeconds: number | null;
   errorCode: string | null;
   errorMessage: string | null;
+  cpuModel: string | null;
+  cpuVcores: number | null;
+  memoryTotalBytes: number | null;
+  memoryUsedBytes: number | null;
+  diskTotalBytes: number | null;
+  diskUsedBytes: number | null;
 };
 
 export type ServerRow = ServerConfig & {
@@ -54,10 +65,15 @@ export type RefreshState = {
 
 export type OverviewSummary = {
   total: number;
+  // Connectivity counts
   online: number;
-  warning: number;
   offline: number;
   unknown: number;
+  // Health counts (among online servers only)
+  healthy: number;
+  warning: number;
+  dangerous: number;
+  // Averages (among online servers only)
   averageCpu: number | null;
   averageMemory: number | null;
   averageDisk: number | null;

@@ -1,4 +1,4 @@
-import type { MetricSnapshot, ServerStatus } from "../shared/types";
+import type { ConnectionStatus, HealthLevel, MetricSnapshot } from "../shared/types";
 
 export type ParsedMetrics = {
   cpuUsedPercent: number;
@@ -8,6 +8,12 @@ export type ParsedMetrics = {
   load5: number;
   load15: number;
   uptimeSeconds: number;
+  cpuModel: string;
+  cpuVcores: number;
+  memoryTotalBytes: number;
+  memoryUsedBytes: number;
+  diskTotalBytes: number;
+  diskUsedBytes: number;
 };
 
 export type Thresholds = {
@@ -16,11 +22,8 @@ export type Thresholds = {
   disk: number;
 };
 
-export const DEFAULT_THRESHOLDS: Thresholds = {
-  cpu: 80,
-  memory: 80,
-  disk: 80
-};
+export const WARNING_THRESHOLDS: Thresholds = { cpu: 80, memory: 80, disk: 80 };
+export const DANGEROUS_THRESHOLDS: Thresholds = { cpu: 90, memory: 90, disk: 90 };
 
 const FIELD_MAP = {
   CPU_USED_PERCENT: "cpuUsedPercent",
@@ -29,20 +32,32 @@ const FIELD_MAP = {
   LOAD_1: "load1",
   LOAD_5: "load5",
   LOAD_15: "load15",
-  UPTIME_SECONDS: "uptimeSeconds"
+  UPTIME_SECONDS: "uptimeSeconds",
+  CPU_MODEL: "cpuModel",
+  CPU_VCORES: "cpuVcores",
+  MEMORY_TOTAL_BYTES: "memoryTotalBytes",
+  MEMORY_USED_BYTES: "memoryUsedBytes",
+  DISK_TOTAL_BYTES: "diskTotalBytes",
+  DISK_USED_BYTES: "diskUsedBytes"
 } as const;
 
 export function parseCollectorOutput(output: string): ParsedMetrics {
-  const values = new Map<string, number>();
+  const values = new Map<string, string | number>();
 
   for (const line of output.split(/\r?\n/)) {
     const trimmed = line.trim();
     if (!trimmed) continue;
-    const [key, rawValue] = trimmed.split("=", 2);
+    const [key, ...rest] = trimmed.split("=");
+    const rawValue = rest.join("=");
     if (!key || rawValue === undefined) continue;
-    const value = Number(rawValue);
-    if (Number.isFinite(value)) {
-      values.set(key, value);
+    
+    if (key === "CPU_MODEL") {
+      values.set(key, rawValue);
+    } else {
+      const numValue = Number(rawValue);
+      if (Number.isFinite(numValue)) {
+        values.set(key, numValue);
+      }
     }
   }
 
@@ -52,24 +67,34 @@ export function parseCollectorOutput(output: string): ParsedMetrics {
     if (value === undefined) {
       throw new Error(`Missing metric ${sourceKey}`);
     }
+    // @ts-expect-error - dynamic assignment
     parsed[targetKey as keyof ParsedMetrics] = value;
   }
 
   return parsed as ParsedMetrics;
 }
 
-export function calculateStatus(
+/** Determine the health level of an online server based on resource utilisation. */
+export function calculateHealthLevel(
   metrics: ParsedMetrics,
-  thresholds: Thresholds = DEFAULT_THRESHOLDS
-): ServerStatus {
+  warning: Thresholds = WARNING_THRESHOLDS,
+  dangerous: Thresholds = DANGEROUS_THRESHOLDS
+): HealthLevel {
   if (
-    metrics.cpuUsedPercent >= thresholds.cpu ||
-    metrics.memoryUsedPercent >= thresholds.memory ||
-    metrics.diskUsedPercent >= thresholds.disk
+    metrics.cpuUsedPercent >= dangerous.cpu ||
+    metrics.memoryUsedPercent >= dangerous.memory ||
+    metrics.diskUsedPercent >= dangerous.disk
+  ) {
+    return "dangerous";
+  }
+  if (
+    metrics.cpuUsedPercent >= warning.cpu ||
+    metrics.memoryUsedPercent >= warning.memory ||
+    metrics.diskUsedPercent >= warning.disk
   ) {
     return "warning";
   }
-  return "online";
+  return "healthy";
 }
 
 export function buildMetricSnapshot(
@@ -81,7 +106,8 @@ export function buildMetricSnapshot(
     id: crypto.randomUUID(),
     serverId,
     collectedAt: collectedAt.toISOString(),
-    status: calculateStatus(metrics),
+    connectionStatus: "online",
+    healthLevel: calculateHealthLevel(metrics),
     cpuUsedPercent: metrics.cpuUsedPercent,
     memoryUsedPercent: metrics.memoryUsedPercent,
     diskUsedPercent: metrics.diskUsedPercent,
@@ -90,7 +116,13 @@ export function buildMetricSnapshot(
     load15: metrics.load15,
     uptimeSeconds: metrics.uptimeSeconds,
     errorCode: null,
-    errorMessage: null
+    errorMessage: null,
+    cpuModel: metrics.cpuModel,
+    cpuVcores: metrics.cpuVcores,
+    memoryTotalBytes: metrics.memoryTotalBytes,
+    memoryUsedBytes: metrics.memoryUsedBytes,
+    diskTotalBytes: metrics.diskTotalBytes,
+    diskUsedBytes: metrics.diskUsedBytes
   };
 }
 
@@ -100,14 +132,15 @@ export function buildFailureSnapshot(
   errorMessage: string,
   collectedAt = new Date()
 ): MetricSnapshot {
-  const status: ServerStatus =
+  const connectionStatus: ConnectionStatus =
     errorCode === "parse_failed" || errorCode === "no_metrics" ? "unknown" : "offline";
 
   return {
     id: crypto.randomUUID(),
     serverId,
     collectedAt: collectedAt.toISOString(),
-    status,
+    connectionStatus,
+    healthLevel: null,
     cpuUsedPercent: null,
     memoryUsedPercent: null,
     diskUsedPercent: null,
@@ -116,6 +149,12 @@ export function buildFailureSnapshot(
     load15: null,
     uptimeSeconds: null,
     errorCode,
-    errorMessage
+    errorMessage,
+    cpuModel: null,
+    cpuVcores: null,
+    memoryTotalBytes: null,
+    memoryUsedBytes: null,
+    diskTotalBytes: null,
+    diskUsedBytes: null
   };
 }

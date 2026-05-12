@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import initSqlJs, { type Database, type SqlJsStatic } from "sql.js";
-import type { MetricSnapshot, RefreshRun, ServerConfig, ServerRow } from "../shared/types";
+import type { ConnectionStatus, HealthLevel, MetricSnapshot, RefreshRun, ServerConfig, ServerRow } from "../shared/types";
 
 let sqlPromise: Promise<SqlJsStatic> | null = null;
 
@@ -118,14 +118,17 @@ export class MonitorDatabase {
   insertSnapshot(snapshot: MetricSnapshot): void {
     this.database.run(
       `INSERT INTO metric_snapshots (
-        id, server_id, collected_at, status, cpu_used_percent, memory_used_percent,
-        disk_used_percent, load_1, load_5, load_15, uptime_seconds, error_code, error_message
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        id, server_id, collected_at, connection_status, health_level,
+        cpu_used_percent, memory_used_percent, disk_used_percent,
+        load_1, load_5, load_15, uptime_seconds, error_code, error_message,
+        cpu_model, cpu_vcores, memory_total_bytes, memory_used_bytes, disk_total_bytes, disk_used_bytes
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         snapshot.id,
         snapshot.serverId,
         snapshot.collectedAt,
-        snapshot.status,
+        snapshot.connectionStatus,
+        snapshot.healthLevel,
         snapshot.cpuUsedPercent,
         snapshot.memoryUsedPercent,
         snapshot.diskUsedPercent,
@@ -134,7 +137,13 @@ export class MonitorDatabase {
         snapshot.load15,
         snapshot.uptimeSeconds,
         snapshot.errorCode,
-        snapshot.errorMessage
+        snapshot.errorMessage,
+        snapshot.cpuModel,
+        snapshot.cpuVcores,
+        snapshot.memoryTotalBytes,
+        snapshot.memoryUsedBytes,
+        snapshot.diskTotalBytes,
+        snapshot.diskUsedBytes
       ]
     );
     this.persist();
@@ -214,13 +223,20 @@ export class MonitorDatabase {
     const since = new Date(new Date(now).getTime() - hours * 60 * 60 * 1000).toISOString();
     return this.query(
       `SELECT
-        collected_at,
-        AVG(cpu_used_percent) AS average_cpu,
-        AVG(memory_used_percent) AS average_memory,
-        AVG(disk_used_percent) AS average_disk
+        COALESCE(refresh_runs.started_at, metric_snapshots.collected_at) AS collected_at,
+        AVG(metric_snapshots.cpu_used_percent) AS average_cpu,
+        AVG(metric_snapshots.memory_used_percent) AS average_memory,
+        AVG(metric_snapshots.disk_used_percent) AS average_disk
       FROM metric_snapshots
-      WHERE collected_at >= ? AND status IN ('online', 'warning')
-      GROUP BY collected_at
+      LEFT JOIN refresh_runs
+        ON metric_snapshots.collected_at >= refresh_runs.started_at
+        AND (
+          refresh_runs.finished_at IS NULL
+          OR metric_snapshots.collected_at <= refresh_runs.finished_at
+        )
+      WHERE metric_snapshots.collected_at >= ?
+        AND metric_snapshots.connection_status = 'online'
+      GROUP BY COALESCE(refresh_runs.started_at, metric_snapshots.collected_at)
       ORDER BY collected_at ASC`,
       [since],
       (row) => ({
@@ -249,7 +265,8 @@ export class MonitorDatabase {
         id TEXT PRIMARY KEY,
         server_id TEXT NOT NULL,
         collected_at TEXT NOT NULL,
-        status TEXT NOT NULL,
+        connection_status TEXT NOT NULL,
+        health_level TEXT,
         cpu_used_percent REAL,
         memory_used_percent REAL,
         disk_used_percent REAL,
@@ -258,7 +275,13 @@ export class MonitorDatabase {
         load_15 REAL,
         uptime_seconds REAL,
         error_code TEXT,
-        error_message TEXT
+        error_message TEXT,
+        cpu_model TEXT,
+        cpu_vcores INTEGER,
+        memory_total_bytes REAL,
+        memory_used_bytes REAL,
+        disk_total_bytes REAL,
+        disk_used_bytes REAL
       );
 
       CREATE INDEX IF NOT EXISTS idx_metric_snapshots_server_time
@@ -308,7 +331,8 @@ function mapSnapshot(row: Record<string, SqlValue>): MetricSnapshot {
     id: String(row.id),
     serverId: String(row.server_id),
     collectedAt: String(row.collected_at),
-    status: row.status as MetricSnapshot["status"],
+    connectionStatus: String(row.connection_status) as ConnectionStatus,
+    healthLevel: row.health_level == null ? null : (String(row.health_level) as HealthLevel),
     cpuUsedPercent: nullableNumber(row.cpu_used_percent),
     memoryUsedPercent: nullableNumber(row.memory_used_percent),
     diskUsedPercent: nullableNumber(row.disk_used_percent),
@@ -317,7 +341,13 @@ function mapSnapshot(row: Record<string, SqlValue>): MetricSnapshot {
     load15: nullableNumber(row.load_15),
     uptimeSeconds: nullableNumber(row.uptime_seconds),
     errorCode: row.error_code == null ? null : String(row.error_code),
-    errorMessage: row.error_message == null ? null : String(row.error_message)
+    errorMessage: row.error_message == null ? null : String(row.error_message),
+    cpuModel: row.cpu_model == null ? null : String(row.cpu_model),
+    cpuVcores: nullableNumber(row.cpu_vcores),
+    memoryTotalBytes: nullableNumber(row.memory_total_bytes),
+    memoryUsedBytes: nullableNumber(row.memory_used_bytes),
+    diskTotalBytes: nullableNumber(row.disk_total_bytes),
+    diskUsedBytes: nullableNumber(row.disk_used_bytes)
   };
 }
 

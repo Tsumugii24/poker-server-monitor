@@ -5,6 +5,7 @@ import dotenv from "dotenv";
 import type { ServerConfig } from "../shared/types";
 
 export type RuntimeConfig = {
+  host: string;
   port: number;
   databasePath: string;
   refreshIntervalMs: number;
@@ -24,6 +25,7 @@ export function loadRuntimeConfig(env: EnvSource = process.env): RuntimeConfig {
   const password = required(env.SSH_PASSWORD, "SSH_PASSWORD");
 
   return {
+    host: env.SERVER_MONITOR_HOST ?? "127.0.0.1",
     port: numberFromEnv(env.SERVER_MONITOR_PORT, 3001),
     databasePath: env.SERVER_MONITOR_DB_PATH ?? "data/server-monitor.sqlite",
     refreshIntervalMs: numberFromEnv(env.SERVER_MONITOR_REFRESH_INTERVAL_MS, 3_600_000),

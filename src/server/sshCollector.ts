@@ -20,13 +20,37 @@ read cpu user nice system idle iowait irq softirq steal guest guest_nice < /proc
 total2=$((user + nice + system + idle + iowait + irq + softirq + steal))
 idle2=$((idle + iowait))
 cpu_used=$(awk -v t1="$total1" -v t2="$total2" -v i1="$idle1" -v i2="$idle2" 'BEGIN { total=t2-t1; idle=i2-i1; if (total <= 0) print 0; else printf "%.2f", (total-idle)*100/total }')
-mem_used=$(awk '/MemTotal/ { total=$2 } /MemAvailable/ { available=$2 } END { if (total <= 0) print 0; else printf "%.2f", (total-available)*100/total }' /proc/meminfo)
-disk_used=$(df -P / | awk 'NR==2 { gsub("%", "", $5); print $5 }')
+cpu_model=$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | sed 's/^[ \t]*//')
+cpu_vcores=$(nproc)
+
+mem_vals=$(awk '/MemTotal/ {t=$2} /MemAvailable/ {a=$2} END {print t, a}' /proc/meminfo)
+mem_total=$(echo $mem_vals | awk '{print $1}')
+mem_available=$(echo $mem_vals | awk '{print $2}')
+mem_used=$((mem_total - mem_available))
+mem_used_percent=$(awk -v t="$mem_total" -v a="$mem_available" 'BEGIN { if (t <= 0) print 0; else printf "%.2f", (t-a)*100/t }')
+
+disk_vals=$(df -P / | awk 'NR==2 {gsub("%", "", $5); print $2, $3, $5}')
+disk_total=$(echo $disk_vals | awk '{print $1}')
+disk_used=$(echo $disk_vals | awk '{print $2}')
+disk_percent=$(echo $disk_vals | awk '{print $3}')
+
+mem_total_bytes=$(awk -v t="$mem_total" 'BEGIN { printf "%.0f", t * 1024 }')
+mem_used_bytes=$(awk -v u="$mem_used" 'BEGIN { printf "%.0f", u * 1024 }')
+disk_total_bytes=$(awk -v t="$disk_total" 'BEGIN { printf "%.0f", t * 1024 }')
+disk_used_bytes=$(awk -v u="$disk_used" 'BEGIN { printf "%.0f", u * 1024 }')
+
 read load1 load5 load15 rest < /proc/loadavg
 uptime_seconds=$(awk '{ printf "%d", $1 }' /proc/uptime)
+
 echo "CPU_USED_PERCENT=$cpu_used"
-echo "MEMORY_USED_PERCENT=$mem_used"
-echo "DISK_USED_PERCENT=$disk_used"
+echo "CPU_MODEL=$cpu_model"
+echo "CPU_VCORES=$cpu_vcores"
+echo "MEMORY_USED_PERCENT=$mem_used_percent"
+echo "MEMORY_TOTAL_BYTES=$mem_total_bytes"
+echo "MEMORY_USED_BYTES=$mem_used_bytes"
+echo "DISK_USED_PERCENT=$disk_percent"
+echo "DISK_TOTAL_BYTES=$disk_total_bytes"
+echo "DISK_USED_BYTES=$disk_used_bytes"
 echo "LOAD_1=$load1"
 echo "LOAD_5=$load5"
 echo "LOAD_15=$load15"

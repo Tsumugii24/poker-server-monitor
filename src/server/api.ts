@@ -74,29 +74,33 @@ export function createApp({ db, refreshService }: AppDependencies): Express {
 
 function buildSummary(servers: ReturnType<MonitorDatabase["getServerRows"]>): OverviewSummary {
   const latest = servers.map((server) => server.latest);
-  const usable = latest.filter(
-    (snapshot) => snapshot?.status === "online" || snapshot?.status === "warning"
-  );
+  const onlineSnapshots = latest.filter((s) => s?.connectionStatus === "online");
 
   return {
     total: servers.length,
-    online: latest.filter(
-      (snapshot) => snapshot?.status === "online" || snapshot?.status === "warning"
-    ).length,
-    warning: latest.filter((snapshot) => snapshot?.status === "warning").length,
-    offline: latest.filter((snapshot) => snapshot?.status === "offline").length,
-    unknown: latest.filter((snapshot) => !snapshot || snapshot.status === "unknown").length,
-    averageCpu: average(usable.map((snapshot) => snapshot?.cpuUsedPercent ?? null)),
-    averageMemory: average(usable.map((snapshot) => snapshot?.memoryUsedPercent ?? null)),
-    averageDisk: average(usable.map((snapshot) => snapshot?.diskUsedPercent ?? null))
+    // Connectivity
+    online: onlineSnapshots.length,
+    offline: latest.filter((s) => s?.connectionStatus === "offline").length,
+    unknown: latest.filter((s) => !s || s.connectionStatus === "unknown").length,
+    // Health (among online servers)
+    healthy: onlineSnapshots.filter((s) => s?.healthLevel === "healthy").length,
+    warning: onlineSnapshots.filter((s) => s?.healthLevel === "warning").length,
+    dangerous: onlineSnapshots.filter((s) => s?.healthLevel === "dangerous").length,
+    // Averages (among online servers)
+    averageCpu: average(onlineSnapshots.map((s) => s?.cpuUsedPercent ?? null)),
+    averageMemory: average(onlineSnapshots.map((s) => s?.memoryUsedPercent ?? null)),
+    averageDisk: average(onlineSnapshots.map((s) => s?.diskUsedPercent ?? null))
   };
 }
 
 function describeOverview(summary: OverviewSummary): string {
-  const healthy = `${summary.online} of ${summary.total} servers online`;
-  const warnings = summary.warning > 0 ? `${summary.warning} warning` : "no warnings";
+  const connectivity = `${summary.online} of ${summary.total} servers online`;
+  const healthIssues: string[] = [];
+  if (summary.warning > 0) healthIssues.push(`${summary.warning} warning`);
+  if (summary.dangerous > 0) healthIssues.push(`${summary.dangerous} dangerous`);
+  const health = healthIssues.length > 0 ? healthIssues.join(", ") : "all healthy";
   const offline = summary.offline > 0 ? `${summary.offline} offline` : "none offline";
-  return `${healthy}; ${warnings}; ${offline}.`;
+  return `${connectivity}; ${health}; ${offline}.`;
 }
 
 function average(values: Array<number | null>): number | null {

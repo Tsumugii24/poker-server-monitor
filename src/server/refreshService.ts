@@ -49,7 +49,10 @@ export class RefreshService {
 
     try {
       const enabledServers = this.options.servers.filter((server) => server.enabled);
-      const snapshots = await Promise.all(enabledServers.map((server) => this.collect(server)));
+      const collectedAt = startedAt;
+      const snapshots = (await Promise.all(enabledServers.map((server) => this.collect(server)))).map(
+        (snapshot) => ({ ...snapshot, collectedAt })
+      );
       for (const snapshot of snapshots) {
         this.options.db.insertSnapshot(snapshot);
       }
@@ -61,10 +64,10 @@ export class RefreshService {
         startedAt,
         finishedAt: new Date().toISOString(),
         status: "completed",
-        successCount: snapshots.filter((item) => item.status === "online").length,
-        warningCount: snapshots.filter((item) => item.status === "warning").length,
+        successCount: snapshots.filter((item) => item.connectionStatus === "online" && item.healthLevel === "healthy").length,
+        warningCount: snapshots.filter((item) => item.connectionStatus === "online" && item.healthLevel !== "healthy").length,
         failureCount: snapshots.filter(
-          (item) => item.status === "offline" || item.status === "unknown"
+          (item) => item.connectionStatus === "offline" || item.connectionStatus === "unknown"
         ).length
       };
       this.options.db.insertRefreshRun(run);
@@ -87,9 +90,14 @@ export class RefreshService {
     };
   }
 
-  startScheduler(): void {
+  startScheduler(options: { runImmediately?: boolean } = {}): void {
     this.stopScheduler();
     this.scheduleNextTime();
+    if (options.runImmediately) {
+      void this.refreshAll("startup").catch((error: unknown) => {
+        console.error("Startup refresh failed", error);
+      });
+    }
     this.scheduler = setInterval(() => {
       void this.refreshAll("scheduled");
     }, this.options.intervalMs);

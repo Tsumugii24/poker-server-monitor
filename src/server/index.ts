@@ -17,7 +17,7 @@ async function main(): Promise<void> {
     intervalMs: config.refreshIntervalMs,
     credentials: config.ssh
   });
-  refreshService.startScheduler();
+  refreshService.startScheduler({ runImmediately: true });
 
   const app = createApp({ db, refreshService });
   const clientDist = path.resolve("dist/client");
@@ -26,8 +26,8 @@ async function main(): Promise<void> {
     response.sendFile(path.join(clientDist, "index.html"));
   });
 
-  app.listen(config.port, "127.0.0.1", () => {
-    console.log(`Server monitor listening on http://127.0.0.1:${config.port}`);
+  app.listen(config.port, config.host, () => {
+    console.log(`Server monitor listening on http://${config.host}:${config.port}`);
   });
 }
 
