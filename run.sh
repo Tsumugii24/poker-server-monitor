@@ -29,7 +29,7 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     -h|--help)
-      echo "Usage: ./Run.sh [--skip-build] [--no-open] [--background] [--port 3001]"
+      echo "Usage: ./run.sh [--skip-build] [--no-open] [--background] [--port 3001]"
       exit 0
       ;;
     *)

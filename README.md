@@ -58,16 +58,16 @@ Production app: `http://127.0.0.1:3001` by default.
 Run this from PowerShell:
 
 ```powershell
-.\Run.ps1
+.\run.ps1
 ```
 
 Useful options:
 
 ```powershell
-.\Run.ps1 -SkipBuild
-.\Run.ps1 -NoOpen
-.\Run.ps1 -Port 3001
-.\Run.ps1 -Background
+.\run.ps1 -SkipBuild
+.\run.ps1 -NoOpen
+.\run.ps1 -Port 3001
+.\run.ps1 -Background
 ```
 
 ### Linux
@@ -75,17 +75,17 @@ Useful options:
 Run this from a shell:
 
 ```bash
-chmod +x ./Run.sh
-./Run.sh
+chmod +x ./run.sh
+./run.sh
 ```
 
 Useful options:
 
 ```bash
-./Run.sh --skip-build
-./Run.sh --no-open
-./Run.sh --port 3001
-./Run.sh --background
+./run.sh --skip-build
+./run.sh --no-open
+./run.sh --port 3001
+./run.sh --background
 ```
 
 Both scripts check for `.env` and `config/servers.json`, stop any existing listener on the selected port when possible, optionally rebuild the app, and start the dashboard. By default the server runs in the current terminal, so `Ctrl+C` stops it.
