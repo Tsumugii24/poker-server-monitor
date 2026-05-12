@@ -56,6 +56,24 @@ npm start
 
 Production app: `http://127.0.0.1:3001`
 
+## One-Click Start
+
+Run this from PowerShell:
+
+```powershell
+.\start-dashboard.ps1
+```
+
+Useful options:
+
+```powershell
+.\start-dashboard.ps1 -SkipBuild
+.\start-dashboard.ps1 -NoOpen
+.\start-dashboard.ps1 -Port 3001
+```
+
+The script stops any existing listener on the selected port, optionally rebuilds the app, starts the dashboard in the background, checks `/api/overview`, and opens the browser.
+
 ## Verification
 
 ```powershell
