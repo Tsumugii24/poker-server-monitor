@@ -9,28 +9,31 @@ const servers: ServerConfig[] = [
   { id: "prod-01", name: "Production 01", host: "10.0.0.1", port: 22, enabled: true }
 ];
 
-const snapshot: MetricSnapshot = {
-  id: "snap-1",
-  serverId: "prod-01",
-  collectedAt: "2026-05-12T00:00:00.000Z",
-  connectionStatus: "online",
-  healthLevel: "healthy",
-  cpuUsedPercent: 20,
-  memoryUsedPercent: 30,
-  diskUsedPercent: 40,
-  load1: 0.1,
-  load5: 0.2,
-  load15: 0.3,
-  uptimeSeconds: 3600,
-  errorCode: null,
-  errorMessage: null,
-  cpuModel: "Intel Xeon E5-2686 v4",
-  cpuVcores: 4,
-  memoryTotalBytes: 8589934592,
-  memoryUsedBytes: 2576980378,
-  diskTotalBytes: 107374182400,
-  diskUsedBytes: 42949672960
-};
+function snapshot(overrides: Partial<MetricSnapshot> = {}): MetricSnapshot {
+  return {
+    id: "snap-1",
+    serverId: "prod-01",
+    collectedAt: new Date().toISOString(),
+    connectionStatus: "online",
+    healthLevel: "healthy",
+    cpuUsedPercent: 20,
+    memoryUsedPercent: 30,
+    diskUsedPercent: 40,
+    load1: 0.1,
+    load5: 0.2,
+    load15: 0.3,
+    uptimeSeconds: 3600,
+    errorCode: null,
+    errorMessage: null,
+    cpuModel: "Intel Xeon E5-2686 v4",
+    cpuVcores: 4,
+    memoryTotalBytes: 8589934592,
+    memoryUsedBytes: 2576980378,
+    diskTotalBytes: 107374182400,
+    diskUsedBytes: 42949672960,
+    ...overrides
+  };
+}
 
 describe("monitor API", () => {
   let db: MonitorDatabase;
@@ -39,13 +42,13 @@ describe("monitor API", () => {
   beforeEach(async () => {
     db = await MonitorDatabase.createInMemory();
     db.syncServers(servers);
-    db.insertSnapshot(snapshot);
+    db.insertSnapshot(snapshot());
     service = new RefreshService({
       db,
       servers,
       intervalMs: 3_600_000,
       collect: async () => ({
-        ...snapshot,
+        ...snapshot(),
         id: crypto.randomUUID(),
         collectedAt: new Date().toISOString()
       })
@@ -71,14 +74,13 @@ describe("monitor API", () => {
       enabled: true
     };
     db.syncServers([...servers, warningServer]);
-    db.insertSnapshot({
-      ...snapshot,
+    db.insertSnapshot(snapshot({
       id: "snap-2",
       serverId: "prod-02",
       connectionStatus: "online",
       healthLevel: "warning",
       cpuUsedPercent: 85
-    });
+    }));
 
     const response = await request(createApp({ db, refreshService: service })).get("/api/overview");
 

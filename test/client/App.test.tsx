@@ -156,6 +156,27 @@ describe("App", () => {
     expect(portCells.length).toBeGreaterThanOrEqual(2);
   });
 
+  it("shows server id as the first inventory column", async () => {
+    render(<App />);
+
+    expect(await screen.findByRole("columnheader", { name: "ID" })).toBeInTheDocument();
+    expect(screen.getByText("prod-01")).toBeInTheDocument();
+    expect(screen.getByText("prod-02")).toBeInTheDocument();
+  });
+
+  it("toggles server inventory sorting by id", async () => {
+    render(<App />);
+
+    const idSort = await screen.findByRole("button", { name: "Sort by ID descending" });
+    expect(inventoryIds()).toEqual(["prod-01", "prod-02"]);
+
+    await userEvent.click(idSort);
+    expect(inventoryIds()).toEqual(["prod-02", "prod-01"]);
+
+    await userEvent.click(screen.getByRole("button", { name: "Sort by ID ascending" }));
+    expect(inventoryIds()).toEqual(["prod-01", "prod-02"]);
+  });
+
   it("toggles between dark and light themes", async () => {
     render(<App />);
 
@@ -182,4 +203,8 @@ function json(body: unknown, status = 200): Response {
     status,
     json: async () => body
   } as Response;
+}
+
+function inventoryIds(): string[] {
+  return Array.from(document.querySelectorAll(".server-id-value")).map((node) => node.textContent ?? "");
 }

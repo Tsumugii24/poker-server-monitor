@@ -615,6 +615,24 @@ th:last-child {
   border-radius: 0 var(--radius-sm) 0 0;
 }
 
+.table-sort-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 0;
+  padding: 0;
+  color: inherit;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+}
+
+.table-sort-button:hover {
+  color: var(--accent);
+}
+
 tbody tr {
   cursor: pointer;
   transition: background var(--transition);
@@ -646,6 +664,19 @@ td .port-value {
   font-weight: 600;
   font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
   letter-spacing: 0.3px;
+}
+
+.server-id-value {
+  display: inline-block;
+  max-width: 120px;
+  color: var(--text-secondary);
+  font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
+  font-size: 12px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: middle;
 }
 
 .inventory-filter-badge {

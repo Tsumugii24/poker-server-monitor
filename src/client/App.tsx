@@ -33,6 +33,7 @@ type Route =
     };
 
 type Theme = "dark" | "light";
+type SortDirection = "asc" | "desc";
 
 const THEME_KEY = "server-monitor-theme";
 
@@ -175,9 +176,10 @@ function OverviewView({
   onOpenServer: (serverId: string) => void;
 }) {
   const [filter, setFilter] = useState<string>("all");
+  const [idSortDirection, setIdSortDirection] = useState<SortDirection>("asc");
 
   const filteredServers = useMemo(() => {
-    return overview.servers.filter((server) => {
+    const servers = overview.servers.filter((server) => {
       const conn = server.latest?.connectionStatus;
       const health = server.latest?.healthLevel;
       if (filter === "all") return true;
@@ -188,7 +190,16 @@ function OverviewView({
       if (filter === "dangerous") return health === "dangerous";
       return true;
     });
-  }, [overview.servers, filter]);
+
+    return [...servers].sort((a, b) => {
+      const result = a.id.localeCompare(b.id, undefined, { numeric: true, sensitivity: "base" });
+      return idSortDirection === "asc" ? result : -result;
+    });
+  }, [overview.servers, filter, idSortDirection]);
+
+  const toggleIdSort = () => {
+    setIdSortDirection((current) => (current === "asc" ? "desc" : "asc"));
+  };
 
   const overallTimestamps = overview.overallHistory.map((p) => p.collectedAt);
 
@@ -266,7 +277,12 @@ function OverviewView({
           <Server size={16} />
           <h3>Server Inventory {filter !== "all" && <span className="inventory-filter-badge">({filteredServers.length})</span>}</h3>
         </div>
-        <ServerTable servers={filteredServers} onOpenServer={onOpenServer} />
+        <ServerTable
+          servers={filteredServers}
+          idSortDirection={idSortDirection}
+          onToggleIdSort={toggleIdSort}
+          onOpenServer={onOpenServer}
+        />
       </section>
     </>
   );
@@ -347,9 +363,13 @@ function MetricCard({ label, value, subtext }: { label: string; value: string; s
 
 function ServerTable({
   servers,
+  idSortDirection,
+  onToggleIdSort,
   onOpenServer
 }: {
   servers: ServerRow[];
+  idSortDirection: SortDirection;
+  onToggleIdSort: () => void;
   onOpenServer: (serverId: string) => void;
 }) {
   return (
@@ -357,6 +377,17 @@ function ServerTable({
       <table>
         <thead>
           <tr>
+            <th aria-label="ID">
+              <button
+                className="table-sort-button"
+                onClick={onToggleIdSort}
+                aria-label={`Sort by ID ${idSortDirection === "asc" ? "descending" : "ascending"}`}
+                title={`Sort by ID ${idSortDirection === "asc" ? "descending" : "ascending"}`}
+              >
+                ID
+                <span aria-hidden="true">{idSortDirection === "asc" ? "↑" : "↓"}</span>
+              </button>
+            </th>
             <th>Name</th>
             <th>Port</th>
             <th>Status</th>
@@ -371,6 +402,9 @@ function ServerTable({
         <tbody>
           {servers.map((server) => (
             <tr key={server.id} onClick={() => onOpenServer(server.id)}>
+              <td>
+                <span className="server-id-value">{server.id}</span>
+              </td>
               <td>
                 <button className="row-button">{server.name}</button>
                 <span className="muted">{server.host}</span>
