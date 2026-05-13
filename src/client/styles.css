@@ -709,6 +709,24 @@ td .port-value {
   color: var(--accent-hover);
 }
 
+.server-name-input {
+  display: block;
+  width: min(220px, 100%);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  padding: 4px 7px;
+  color: var(--text-primary);
+  background: var(--bg-elevated);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  outline: none;
+}
+
+.server-name-input:disabled {
+  opacity: 0.7;
+}
+
 .muted {
   display: block;
   margin-top: 3px;

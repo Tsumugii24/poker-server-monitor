@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { loadRuntimeConfig, loadServerInventory } from "../../src/server/config";
+import { loadRuntimeConfig, loadServerInventory, updateServerInventoryName } from "../../src/server/config";
 
 let tempDir: string;
 
@@ -44,6 +44,32 @@ describe("server inventory loading", () => {
     );
 
     expect(() => loadServerInventory(file)).toThrow("Duplicate server id prod-01");
+  });
+
+  it("updates a server name in the inventory file", () => {
+    const file = path.join(tempDir, "servers.json");
+    fs.writeFileSync(
+      file,
+      JSON.stringify([
+        { id: "prod-01", name: "Production 01", host: "10.0.0.1", port: 22, enabled: true },
+        { id: "prod-02", name: "Production 02", host: "10.0.0.2", port: 2222, enabled: false }
+      ])
+    );
+
+    const updated = updateServerInventoryName(file, "prod-02", "Analytics 02");
+
+    expect(updated).toMatchObject({ id: "prod-02", name: "Analytics 02", host: "10.0.0.2" });
+    expect(JSON.parse(fs.readFileSync(file, "utf8"))).toEqual([
+      { id: "prod-01", name: "Production 01", host: "10.0.0.1", port: 22, enabled: true },
+      { id: "prod-02", name: "Analytics 02", host: "10.0.0.2", port: 2222, enabled: false }
+    ]);
+  });
+
+  it("rejects empty server names when updating inventory", () => {
+    const file = path.join(tempDir, "servers.json");
+    fs.writeFileSync(file, JSON.stringify([{ id: "prod-01", name: "Production 01", host: "10.0.0.1" }]));
+
+    expect(() => updateServerInventoryName(file, "prod-01", "   ")).toThrow("name must be a non-empty string");
   });
 });
 

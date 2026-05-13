@@ -1,14 +1,16 @@
 import express, { type Express } from "express";
 import type { OverviewResponse, OverviewSummary, ServerDetailResponse } from "../shared/types";
+import { loadServerInventory, updateServerInventoryName } from "./config";
 import type { MonitorDatabase } from "./db";
 import type { RefreshService } from "./refreshService";
 
 export type AppDependencies = {
   db: MonitorDatabase;
   refreshService: RefreshService;
+  inventoryPath?: string;
 };
 
-export function createApp({ db, refreshService }: AppDependencies): Express {
+export function createApp({ db, refreshService, inventoryPath = "config/servers.json" }: AppDependencies): Express {
   const app = express();
   app.use(express.json());
 
@@ -43,6 +45,30 @@ export function createApp({ db, refreshService }: AppDependencies): Express {
       history: db.getServerHistory(server.id, 24)
     };
     response.json(body);
+  });
+
+  app.patch("/api/servers/:id", (request, response) => {
+    if (!isRecord(request.body) || typeof request.body.name !== "string" || request.body.name.trim() === "") {
+      response.status(400).json({ error: "invalid_server_name" });
+      return;
+    }
+
+    try {
+      const updated = updateServerInventoryName(inventoryPath, request.params.id, request.body.name);
+      db.syncServers(loadServerInventory(inventoryPath));
+      response.json(updated);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (/not found/i.test(message)) {
+        response.status(404).json({ error: "server_not_found" });
+        return;
+      }
+      if (/name must be/i.test(message)) {
+        response.status(400).json({ error: "invalid_server_name" });
+        return;
+      }
+      response.status(500).json({ error: "inventory_update_failed", message });
+    }
   });
 
   app.get("/api/servers/:id/history", (request, response) => {
@@ -107,4 +133,8 @@ function average(values: Array<number | null>): number | null {
   const numeric = values.filter((value): value is number => value !== null);
   if (numeric.length === 0) return null;
   return Math.round((numeric.reduce((sum, value) => sum + value, 0) / numeric.length) * 10) / 10;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }

@@ -104,11 +104,22 @@ const storageMock = {
 describe("App", () => {
   beforeEach(() => {
     fakeStorage.clear();
+    let currentOverview = structuredClone(overview);
     vi.stubGlobal("localStorage", storageMock);
     vi.stubGlobal(
       "fetch",
       vi.fn(async (url: string, init?: RequestInit) => {
-        if (url === "/api/overview") return json(overview);
+        if (url === "/api/overview") return json(currentOverview);
+        if (url === "/api/servers/prod-02" && init?.method === "PATCH") {
+          const body = JSON.parse(String(init.body)) as { name: string };
+          currentOverview = {
+            ...currentOverview,
+            servers: currentOverview.servers.map((server) =>
+              server.id === "prod-02" ? { ...server, name: body.name } : server
+            )
+          };
+          return json({ ...currentOverview.servers[1], name: body.name });
+        }
         if (url === "/api/servers/prod-02") return json(detail);
         if (url === "/api/refresh" && init?.method === "POST") {
           return json({ accepted: true, state: overview.refresh });
@@ -177,6 +188,24 @@ describe("App", () => {
     expect(inventoryIds()).toEqual(["prod-01", "prod-02"]);
   });
 
+  it("edits a server name inline and persists it", async () => {
+    render(<App />);
+
+    await userEvent.click(await screen.findByRole("button", { name: "Edit name for prod-02" }));
+    const input = screen.getByLabelText("Server name for prod-02");
+    await userEvent.clear(input);
+    await userEvent.type(input, "Poker Gateway{Enter}");
+
+    expect(await screen.findByRole("button", { name: "Edit name for prod-02" })).toHaveTextContent("Poker Gateway");
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/servers/prod-02",
+      expect.objectContaining({
+        method: "PATCH",
+        body: JSON.stringify({ name: "Poker Gateway" })
+      })
+    );
+  });
+
   it("toggles between dark and light themes", async () => {
     render(<App />);
 
@@ -190,7 +219,7 @@ describe("App", () => {
   it("opens a server detail view from the server list", async () => {
     render(<App />);
 
-    await userEvent.click(await screen.findByText("Production 02"));
+    await userEvent.click(await screen.findByText("10.0.0.2"));
 
     expect(await screen.findByText("Production 02 Details")).toBeInTheDocument();
     expect(screen.getByText("CPU 24h")).toBeInTheDocument();

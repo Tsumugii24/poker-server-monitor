@@ -1,5 +1,8 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import request from "supertest";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { MetricSnapshot, ServerConfig } from "../../src/shared/types";
 import { createApp } from "../../src/server/api";
 import { MonitorDatabase } from "../../src/server/db";
@@ -38,8 +41,13 @@ function snapshot(overrides: Partial<MetricSnapshot> = {}): MetricSnapshot {
 describe("monitor API", () => {
   let db: MonitorDatabase;
   let service: RefreshService;
+  let tempDir: string;
+  let inventoryPath: string;
 
   beforeEach(async () => {
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "server-monitor-api-"));
+    inventoryPath = path.join(tempDir, "servers.json");
+    fs.writeFileSync(inventoryPath, JSON.stringify(servers));
     db = await MonitorDatabase.createInMemory();
     db.syncServers(servers);
     db.insertSnapshot(snapshot());
@@ -53,6 +61,10 @@ describe("monitor API", () => {
         collectedAt: new Date().toISOString()
       })
     });
+  });
+
+  afterEach(() => {
+    fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
   it("returns overview data with summary and latest server rows", async () => {
@@ -106,5 +118,25 @@ describe("monitor API", () => {
 
     expect(response.status).toBe(202);
     expect(response.body.accepted).toBe(true);
+  });
+
+  it("updates a server name in the inventory file and database", async () => {
+    const response = await request(createApp({ db, refreshService: service, inventoryPath }))
+      .patch("/api/servers/prod-01")
+      .send({ name: "Main Poker Node" });
+
+    expect(response.status).toBe(200);
+    expect(response.body.name).toBe("Main Poker Node");
+    expect(db.getServer("prod-01")?.name).toBe("Main Poker Node");
+    expect(JSON.parse(fs.readFileSync(inventoryPath, "utf8"))[0].name).toBe("Main Poker Node");
+  });
+
+  it("rejects empty server name updates", async () => {
+    const response = await request(createApp({ db, refreshService: service, inventoryPath }))
+      .patch("/api/servers/prod-01")
+      .send({ name: " " });
+
+    expect(response.status).toBe(400);
+    expect(response.body.error).toBe("invalid_server_name");
   });
 });

@@ -21,6 +21,7 @@ import type {
   MetricSnapshot,
   OverviewResponse,
   ServerDetailResponse,
+  ServerConfig,
   ServerRow
 } from "../shared/types";
 import "./styles.css";
@@ -124,6 +125,30 @@ export default function App() {
     }
   };
 
+  const renameServer = async (serverId: string, name: string) => {
+    const updated = await fetchJson<ServerConfig>(`/api/servers/${encodeURIComponent(serverId)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name })
+    });
+
+    setOverview((current) =>
+      current
+        ? {
+            ...current,
+            servers: current.servers.map((server) =>
+              server.id === serverId ? { ...server, name: updated.name } : server
+            )
+          }
+        : current
+    );
+    setDetail((current) =>
+      current && current.server.id === serverId
+        ? { ...current, server: { ...current.server, name: updated.name } }
+        : current
+    );
+  };
+
   return (
     <main className="app-shell">
       <header className="topbar">
@@ -156,7 +181,7 @@ export default function App() {
       {loading ? <div className="notice">Loading…</div> : null}
 
       {!loading && route.name === "overview" && overview ? (
-        <OverviewView overview={overview} onOpenServer={openServer} />
+        <OverviewView overview={overview} onOpenServer={openServer} onRenameServer={renameServer} />
       ) : null}
 
       {!loading && route.name === "detail" && detail ? (
@@ -170,10 +195,12 @@ export default function App() {
 
 function OverviewView({
   overview,
-  onOpenServer
+  onOpenServer,
+  onRenameServer
 }: {
   overview: OverviewResponse;
   onOpenServer: (serverId: string) => void;
+  onRenameServer: (serverId: string, name: string) => Promise<void>;
 }) {
   const [filter, setFilter] = useState<string>("all");
   const [idSortDirection, setIdSortDirection] = useState<SortDirection>("asc");
@@ -282,6 +309,7 @@ function OverviewView({
           idSortDirection={idSortDirection}
           onToggleIdSort={toggleIdSort}
           onOpenServer={onOpenServer}
+          onRenameServer={onRenameServer}
         />
       </section>
     </>
@@ -365,13 +393,45 @@ function ServerTable({
   servers,
   idSortDirection,
   onToggleIdSort,
-  onOpenServer
+  onOpenServer,
+  onRenameServer
 }: {
   servers: ServerRow[];
   idSortDirection: SortDirection;
   onToggleIdSort: () => void;
   onOpenServer: (serverId: string) => void;
+  onRenameServer: (serverId: string, name: string) => Promise<void>;
 }) {
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [draftName, setDraftName] = useState("");
+  const [savingId, setSavingId] = useState<string | null>(null);
+
+  const startEditing = (server: ServerRow) => {
+    setEditingId(server.id);
+    setDraftName(server.name);
+  };
+
+  const cancelEditing = () => {
+    setEditingId(null);
+    setDraftName("");
+  };
+
+  const commitName = async (server: ServerRow) => {
+    const nextName = draftName.trim();
+    if (nextName === "" || nextName === server.name) {
+      cancelEditing();
+      return;
+    }
+
+    setSavingId(server.id);
+    try {
+      await onRenameServer(server.id, nextName);
+      cancelEditing();
+    } finally {
+      setSavingId(null);
+    }
+  };
+
   return (
     <div className="table-wrap">
       <table>
@@ -406,7 +466,38 @@ function ServerTable({
                 <span className="server-id-value">{server.id}</span>
               </td>
               <td>
-                <button className="row-button">{server.name}</button>
+                {editingId === server.id ? (
+                  <input
+                    className="server-name-input"
+                    aria-label={`Server name for ${server.id}`}
+                    value={draftName}
+                    disabled={savingId === server.id}
+                    autoFocus
+                    onClick={(event) => event.stopPropagation()}
+                    onChange={(event) => setDraftName(event.target.value)}
+                    onBlur={() => void commitName(server)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        event.currentTarget.blur();
+                      }
+                      if (event.key === "Escape") {
+                        event.stopPropagation();
+                        cancelEditing();
+                      }
+                    }}
+                  />
+                ) : (
+                  <button
+                    className="row-button"
+                    aria-label={`Edit name for ${server.id}`}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      startEditing(server);
+                    }}
+                  >
+                    {server.name}
+                  </button>
+                )}
                 <span className="muted">{server.host}</span>
               </td>
               <td>

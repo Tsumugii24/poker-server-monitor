@@ -72,6 +72,37 @@ export function loadServerInventory(filename = "config/servers.json"): ServerCon
   });
 }
 
+export function updateServerInventoryName(
+  filename: string,
+  serverId: string,
+  name: string
+): ServerConfig {
+  const trimmedName = name.trim();
+  if (trimmedName === "") {
+    throw new Error("name must be a non-empty string");
+  }
+
+  const fullPath = path.resolve(filename);
+  const raw = JSON.parse(fs.readFileSync(fullPath, "utf8")) as unknown;
+  if (!Array.isArray(raw)) {
+    throw new Error(`Server inventory must be an array: ${filename}`);
+  }
+
+  const entry = raw.find((item) => isRecord(item) && item.id === serverId);
+  if (!entry || !isRecord(entry)) {
+    throw new Error(`Server ${serverId} not found`);
+  }
+
+  entry.name = trimmedName;
+  fs.writeFileSync(fullPath, `${JSON.stringify(raw, null, 2)}\n`);
+
+  const updated = loadServerInventory(fullPath).find((server) => server.id === serverId);
+  if (!updated) {
+    throw new Error(`Server ${serverId} not found`);
+  }
+  return updated;
+}
+
 function required(value: string | undefined, name: string): string {
   if (!value || value.trim() === "") {
     throw new Error(`${name} is required`);
