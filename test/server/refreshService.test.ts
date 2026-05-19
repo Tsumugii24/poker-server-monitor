@@ -115,6 +115,54 @@ describe("RefreshService", () => {
     expect(db.getLastRefreshRun()).toMatchObject({ trigger: "startup" });
   });
 
+  it("keeps the automatic refresh schedule fixed after a manual refresh", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-05-20T10:00:00.000Z"));
+      const service = new RefreshService({
+        db,
+        servers,
+        intervalMs: 3_600_000,
+        collect: async (server) => metric(server.id, "online")
+      });
+
+      service.startScheduler();
+      const nextAutoRefresh = service.getState().nextRefreshAt;
+
+      vi.setSystemTime(new Date("2026-05-20T10:15:00.000Z"));
+      await service.refreshAll("manual");
+      service.stopScheduler();
+
+      expect(service.getState().nextRefreshAt).toBe(nextAutoRefresh);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("advances the next automatic refresh time when the scheduled tick fires", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-05-20T10:00:00.000Z"));
+      const service = new RefreshService({
+        db,
+        servers,
+        intervalMs: 3_600_000,
+        collect: async (server) => metric(server.id, "online")
+      });
+
+      service.startScheduler();
+      expect(service.getState().nextRefreshAt).toBe("2026-05-20T11:00:00.000Z");
+
+      await vi.advanceTimersByTimeAsync(3_600_000);
+      service.stopScheduler();
+
+      expect(service.getState().nextRefreshAt).toBe("2026-05-20T12:00:00.000Z");
+      expect(db.getLastRefreshRun()).toMatchObject({ trigger: "scheduled" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("rejects overlapping refresh requests", async () => {
     let release!: () => void;
     const blocker = new Promise<void>((resolve) => {

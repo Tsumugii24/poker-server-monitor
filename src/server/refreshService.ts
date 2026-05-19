@@ -20,6 +20,7 @@ export type RefreshServiceOptions = {
 export class RefreshService {
   private active = false;
   private nextRefreshAt: string | null = null;
+  private nextRefreshAtMs: number | null = null;
   private scheduler: NodeJS.Timeout | null = null;
   private readonly collect: (server: ServerConfig) => Promise<MetricSnapshot>;
 
@@ -71,7 +72,6 @@ export class RefreshService {
         ).length
       };
       this.options.db.insertRefreshRun(run);
-      this.scheduleNextTime();
 
       return {
         accepted: true,
@@ -92,13 +92,14 @@ export class RefreshService {
 
   startScheduler(options: { runImmediately?: boolean } = {}): void {
     this.stopScheduler();
-    this.scheduleNextTime();
+    this.scheduleNextTime(Date.now() + this.options.intervalMs);
     if (options.runImmediately) {
       void this.refreshAll("startup").catch((error: unknown) => {
         console.error("Startup refresh failed", error);
       });
     }
     this.scheduler = setInterval(() => {
+      this.advanceScheduledRefreshTime();
       void this.refreshAll("scheduled");
     }, this.options.intervalMs);
   }
@@ -110,7 +111,12 @@ export class RefreshService {
     }
   }
 
-  private scheduleNextTime(): void {
-    this.nextRefreshAt = new Date(Date.now() + this.options.intervalMs).toISOString();
+  private advanceScheduledRefreshTime(): void {
+    this.scheduleNextTime((this.nextRefreshAtMs ?? Date.now()) + this.options.intervalMs);
+  }
+
+  private scheduleNextTime(timestampMs: number): void {
+    this.nextRefreshAtMs = timestampMs;
+    this.nextRefreshAt = new Date(timestampMs).toISOString();
   }
 }
