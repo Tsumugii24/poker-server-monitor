@@ -2,14 +2,14 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import request from "supertest";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { MetricSnapshot, ServerConfig } from "../../src/shared/types";
 import { createApp } from "../../src/server/api";
 import { MonitorDatabase } from "../../src/server/db";
 import { RefreshService } from "../../src/server/refreshService";
 
 const servers: ServerConfig[] = [
-  { id: "prod-01", name: "Production 01", host: "10.0.0.1", port: 22, enabled: true }
+  { id: "prod-01", name: "Production 01", host: "10.0.0.1", port: 22, enabled: true, note: "TBD" }
 ];
 
 function snapshot(overrides: Partial<MetricSnapshot> = {}): MetricSnapshot {
@@ -43,10 +43,12 @@ describe("monitor API", () => {
   let service: RefreshService;
   let tempDir: string;
   let inventoryPath: string;
+  let alertSettingsPath: string;
 
   beforeEach(async () => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "server-monitor-api-"));
     inventoryPath = path.join(tempDir, "servers.json");
+    alertSettingsPath = path.join(tempDir, "alerts.json");
     fs.writeFileSync(inventoryPath, JSON.stringify(servers));
     db = await MonitorDatabase.createInMemory();
     db.syncServers(servers);
@@ -74,6 +76,7 @@ describe("monitor API", () => {
     expect(response.body.summary.total).toBe(1);
     expect(response.body.servers[0].latest.connectionStatus).toBe("online");
     expect(response.body.servers[0].latest.healthLevel).toBe("healthy");
+    expect(response.body.summary.pipelineRunning).toBe(0);
     expect(response.body.description).toContain("1 of 1 servers online");
   });
 
@@ -83,7 +86,8 @@ describe("monitor API", () => {
       name: "Production 02",
       host: "10.0.0.2",
       port: 22,
-      enabled: true
+      enabled: true,
+      note: "TBD"
     };
     db.syncServers([...servers, warningServer]);
     db.insertSnapshot(snapshot({
@@ -120,23 +124,141 @@ describe("monitor API", () => {
     expect(response.body.accepted).toBe(true);
   });
 
-  it("updates a server name in the inventory file and database", async () => {
+  it("updates a server note in the inventory file and database", async () => {
     const response = await request(createApp({ db, refreshService: service, inventoryPath }))
       .patch("/api/servers/prod-01")
-      .send({ name: "Main Poker Node" });
+      .send({ note: "Primary solver" });
 
     expect(response.status).toBe(200);
-    expect(response.body.name).toBe("Main Poker Node");
-    expect(db.getServer("prod-01")?.name).toBe("Main Poker Node");
-    expect(JSON.parse(fs.readFileSync(inventoryPath, "utf8"))[0].name).toBe("Main Poker Node");
+    expect(response.body.note).toBe("Primary solver");
+    expect(db.getServer("prod-01")?.note).toBe("Primary solver");
+    expect(JSON.parse(fs.readFileSync(inventoryPath, "utf8"))[0].note).toBe("Primary solver");
   });
 
-  it("rejects empty server name updates", async () => {
+  it("rejects empty server note updates", async () => {
     const response = await request(createApp({ db, refreshService: service, inventoryPath }))
       .patch("/api/servers/prod-01")
-      .send({ name: " " });
+      .send({ note: " " });
 
     expect(response.status).toBe(400);
-    expect(response.body.error).toBe("invalid_server_name");
+    expect(response.body.error).toBe("invalid_server_note");
+  });
+
+  it("returns disabled alert settings by default", async () => {
+    const response = await request(createApp({ db, refreshService: service, alertSettingsPath })).get(
+      "/api/settings/alerts"
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.settings).toEqual({
+      enabled: false,
+      wechatRoomId: "",
+      cooldownMinutes: 60,
+      language: "en"
+    });
+    expect(response.body.status).toEqual({ enabled: false, configured: false });
+  });
+
+  it("updates alert settings", async () => {
+    const startAlertConnector = vi.fn();
+    const response = await request(createApp({ db, refreshService: service, alertSettingsPath, startAlertConnector }))
+      .patch("/api/settings/alerts")
+      .send({ enabled: true, wechatRoomId: "12345@chatroom", cooldownMinutes: 15, language: "zh" });
+
+    expect(response.status).toBe(200);
+    expect(response.body.settings.enabled).toBe(true);
+    expect(JSON.parse(fs.readFileSync(alertSettingsPath, "utf8"))).toMatchObject({
+      enabled: true,
+      wechatRoomId: "12345@chatroom",
+      cooldownMinutes: 15,
+      language: "zh"
+    });
+    expect(startAlertConnector).toHaveBeenCalledTimes(1);
+  });
+
+  it("sends a test alert through the configured alert service", async () => {
+    const sent: string[] = [];
+
+    const response = await request(createApp({
+      db,
+      refreshService: service,
+      alertSettingsPath,
+      sendTestAlert: async (message) => {
+        sent.push(message);
+      }
+    }))
+      .post("/api/settings/alerts/test")
+      .send({ enabled: true, wechatRoomId: "12345@chatroom", cooldownMinutes: 15, language: "en" });
+
+    expect(response.status).toBe(202);
+    expect(sent[0]).toContain("Server Monitor test alert");
+  });
+
+  it("sends a Chinese test alert when alert language is zh", async () => {
+    const sent: string[] = [];
+
+    const response = await request(createApp({
+      db,
+      refreshService: service,
+      alertSettingsPath,
+      sendTestAlert: async (message) => {
+        sent.push(message);
+      }
+    }))
+      .post("/api/settings/alerts/test")
+      .send({ enabled: true, wechatRoomId: "12345@chatroom", cooldownMinutes: 15, language: "zh" });
+
+    expect(response.status).toBe(202);
+    expect(sent[0]).toContain("Server Monitor 测试告警");
+    expect(sent[0]).toContain("时间:");
+    expect(sent[0]).toContain("WeChat 离线告警已配置成功");
+  });
+
+  it("returns WeChat connector status", async () => {
+    const response = await request(createApp({
+      db,
+      refreshService: service,
+      getWeChatStatus: () => ({
+        started: true,
+        loggedIn: true,
+        polling: true,
+        qrUrl: null,
+        lastError: null,
+        messageCount: 1,
+        lastMessageAt: "2026-05-20T10:00:00.000Z",
+        recentChats: [
+          { userId: "12345@chatroom", text: "setup", receivedAt: "2026-05-20T10:00:00.000Z" }
+        ]
+      })
+    })).get("/api/settings/wechat");
+
+    expect(response.status).toBe(200);
+    expect(response.body.loggedIn).toBe(true);
+    expect(response.body.polling).toBe(true);
+    expect(response.body.messageCount).toBe(1);
+    expect(response.body.recentChats[0].userId).toBe("12345@chatroom");
+  });
+
+  it("starts the WeChat connector", async () => {
+    const startAlertConnector = vi.fn();
+    const response = await request(createApp({
+      db,
+      refreshService: service,
+      startAlertConnector,
+      getWeChatStatus: () => ({
+        started: true,
+        loggedIn: false,
+        polling: false,
+        qrUrl: "https://example.com/qr",
+        lastError: null,
+        messageCount: 0,
+        lastMessageAt: null,
+        recentChats: []
+      })
+    })).post("/api/settings/wechat/start");
+
+    expect(response.status).toBe(202);
+    expect(startAlertConnector).toHaveBeenCalledTimes(1);
+    expect(response.body.qrUrl).toBe("https://example.com/qr");
   });
 });

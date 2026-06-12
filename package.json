@@ -2,6 +2,9 @@
   "name": "server-monitor",
   "version": "0.1.0",
   "private": true,
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "dev": "concurrently \"npm:dev:server\" \"npm:dev:client\"",
     "dev:server": "tsx watch src/server/index.ts",
@@ -12,6 +15,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.node.json"
   },
   "dependencies": {
+    "@wechatbot/wechatbot": "^2.1.1",
     "dotenv": "^17.2.3",
     "express": "^5.2.1",
     "lucide-react": "^0.561.0",

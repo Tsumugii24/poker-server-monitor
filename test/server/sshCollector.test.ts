@@ -7,7 +7,8 @@ const server: ServerConfig = {
   name: "Production 01",
   host: "10.0.0.1",
   port: 22,
-  enabled: true
+  enabled: true,
+  note: "TBD"
 };
 
 describe("collectServerMetrics", () => {

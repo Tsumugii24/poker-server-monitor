@@ -15,3 +15,4 @@ data/*.db-*
 .vite/
 
 /config/servers.json
+/config/alerts.json

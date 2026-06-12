@@ -9,20 +9,27 @@ import {
   Moon,
   RefreshCw,
   Server,
+  Settings,
   ShieldCheck,
   Signal,
   Sun,
-  TriangleAlert
+  TriangleAlert,
+  Workflow
 } from "lucide-react";
 import { type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
 import type {
+  AlertSettings,
+  AlertStatus,
   ConnectionStatus,
   HealthLevel,
   MetricSnapshot,
   OverviewResponse,
+  PipelineDisplayStatus,
+  PipelineStatusSnapshot,
   ServerDetailResponse,
   ServerConfig,
-  ServerRow
+  ServerRow,
+  WeChatConnectorStatus
 } from "../shared/types";
 import "./styles.css";
 
@@ -35,6 +42,22 @@ type Route =
 
 type Theme = "dark" | "light";
 type SortDirection = "asc" | "desc";
+
+type AlertSettingsResponse = {
+  settings: AlertSettings;
+  status: AlertStatus;
+};
+
+const EMPTY_WECHAT_STATUS: WeChatConnectorStatus = {
+  started: false,
+  loggedIn: false,
+  polling: false,
+  qrUrl: null,
+  lastError: null,
+  messageCount: 0,
+  lastMessageAt: null,
+  recentChats: []
+};
 
 const THEME_KEY = "server-monitor-theme";
 
@@ -54,6 +77,7 @@ const METRIC_ICONS: Record<string, ReactNode> = {
   "Avg CPU":    <Cpu size={18} />,
   "Avg Memory": <MemoryStick size={18} />,
   "Avg Disk":   <HardDrive size={18} />,
+  Task:           <Workflow size={18} />,
   CPU:          <Cpu size={18} />,
   Memory:       <MemoryStick size={18} />,
   Disk:         <HardDrive size={18} />,
@@ -69,6 +93,11 @@ export default function App() {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [theme, setTheme] = useState<Theme>(getStoredTheme);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [alertSettings, setAlertSettings] = useState<AlertSettings | null>(null);
+  const [alertStatus, setAlertStatus] = useState<AlertStatus | null>(null);
+  const [wechatStatus, setWeChatStatus] = useState<WeChatConnectorStatus>(EMPTY_WECHAT_STATUS);
+  const [settingsSaving, setSettingsSaving] = useState(false);
 
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
@@ -78,6 +107,76 @@ export default function App() {
   const toggleTheme = useCallback(() => {
     setTheme((prev) => (prev === "dark" ? "light" : "dark"));
   }, []);
+
+  const openSettings = async () => {
+    setSettingsOpen(true);
+    setError(null);
+    try {
+      const response = await fetchJson<AlertSettingsResponse>("/api/settings/alerts");
+      setAlertSettings(response.settings);
+      setAlertStatus(response.status);
+      setWeChatStatus(await fetchJson<WeChatConnectorStatus>("/api/settings/wechat"));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    }
+  };
+
+  const saveAlertSettings = async (settings: AlertSettings) => {
+    setSettingsSaving(true);
+    setError(null);
+    try {
+      const response = await fetchJson<AlertSettingsResponse>("/api/settings/alerts", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(settings)
+      });
+      setAlertSettings(response.settings);
+      setAlertStatus(response.status);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setSettingsSaving(false);
+    }
+  };
+
+  const sendTestAlert = async (settings: AlertSettings) => {
+    setSettingsSaving(true);
+    setError(null);
+    try {
+      const response = await fetchJson<{ status: AlertStatus }>("/api/settings/alerts/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(settings)
+      });
+      setAlertSettings(settings);
+      setAlertStatus(response.status);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setSettingsSaving(false);
+    }
+  };
+
+  const startWeChatLogin = async () => {
+    setSettingsSaving(true);
+    setError(null);
+    try {
+      setWeChatStatus(await fetchJson<WeChatConnectorStatus>("/api/settings/wechat/start", { method: "POST" }));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setSettingsSaving(false);
+    }
+  };
+
+  const refreshWeChatStatus = async () => {
+    setError(null);
+    try {
+      setWeChatStatus(await fetchJson<WeChatConnectorStatus>("/api/settings/wechat"));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    }
+  };
 
   useEffect(() => {
     const onPopState = () => setRoute(routeFromLocation());
@@ -125,11 +224,11 @@ export default function App() {
     }
   };
 
-  const renameServer = async (serverId: string, name: string) => {
+  const updateServerNote = async (serverId: string, note: string) => {
     const updated = await fetchJson<ServerConfig>(`/api/servers/${encodeURIComponent(serverId)}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name })
+      body: JSON.stringify({ note })
     });
 
     setOverview((current) =>
@@ -137,14 +236,14 @@ export default function App() {
         ? {
             ...current,
             servers: current.servers.map((server) =>
-              server.id === serverId ? { ...server, name: updated.name } : server
+              server.id === serverId ? { ...server, note: updated.note } : server
             )
           }
         : current
     );
     setDetail((current) =>
       current && current.server.id === serverId
-        ? { ...current, server: { ...current.server, name: updated.name } }
+        ? { ...current, server: { ...current.server, note: updated.note } }
         : current
     );
   };
@@ -164,6 +263,14 @@ export default function App() {
         <div className="topbar-actions">
           <button
             className="theme-toggle"
+            onClick={openSettings}
+            title="Open settings"
+            aria-label="Open settings"
+          >
+            <Settings size={18} />
+          </button>
+          <button
+            className="theme-toggle"
             onClick={toggleTheme}
             title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
             aria-label={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
@@ -180,8 +287,24 @@ export default function App() {
       {error ? <div className="notice error">{error}</div> : null}
       {loading ? <div className="notice">Loading…</div> : null}
 
+      {settingsOpen && alertSettings ? (
+        <div className="modal-backdrop" role="presentation">
+          <SettingsPanel
+            settings={alertSettings}
+            status={alertStatus}
+            saving={settingsSaving}
+            onClose={() => setSettingsOpen(false)}
+            onSave={saveAlertSettings}
+            onTest={sendTestAlert}
+            wechatStatus={wechatStatus}
+            onStartWeChat={startWeChatLogin}
+            onRefreshWeChat={refreshWeChatStatus}
+          />
+        </div>
+      ) : null}
+
       {!loading && route.name === "overview" && overview ? (
-        <OverviewView overview={overview} onOpenServer={openServer} onRenameServer={renameServer} />
+        <OverviewView overview={overview} onOpenServer={openServer} onUpdateServerNote={updateServerNote} />
       ) : null}
 
       {!loading && route.name === "detail" && detail ? (
@@ -193,14 +316,196 @@ export default function App() {
 
 /* ── Overview page ────────────────────────────────────────────── */
 
+function SettingsPanel({
+  settings,
+  status,
+  saving,
+  onClose,
+  onSave,
+  onTest,
+  wechatStatus,
+  onStartWeChat,
+  onRefreshWeChat
+}: {
+  settings: AlertSettings;
+  status: AlertStatus | null;
+  saving: boolean;
+  onClose: () => void;
+  onSave: (settings: AlertSettings) => Promise<void>;
+  onTest: (settings: AlertSettings) => Promise<void>;
+  wechatStatus: WeChatConnectorStatus;
+  onStartWeChat: () => Promise<void>;
+  onRefreshWeChat: () => Promise<void>;
+}) {
+  const [draft, setDraft] = useState<AlertSettings>(settings);
+
+  useEffect(() => {
+    setDraft(settings);
+  }, [settings]);
+
+  const normalizedDraft = (): AlertSettings => ({
+    ...draft,
+    cooldownMinutes: Math.max(1, draft.cooldownMinutes),
+    language: draft.language ?? "en"
+  });
+
+  return (
+    <section className="panel settings-panel" aria-label="Settings" role="dialog" aria-modal="true">
+      <div className="settings-header">
+        <div className="panel-title">
+          <Settings size={16} />
+          <h3>Settings</h3>
+        </div>
+        <button className="icon-button ghost compact" onClick={onClose}>Close</button>
+      </div>
+
+      <div className="forward-settings">
+        <h4>Forward Settings</h4>
+        <div className="settings-grid">
+          <label className="toggle-row">
+            <input
+              type="checkbox"
+              checked={draft.enabled}
+              onChange={(event) => setDraft((current) => ({ ...current, enabled: event.target.checked }))}
+              aria-label="Enable WeChat offline alerts"
+            />
+            <span>Enable WeChat offline alerts</span>
+          </label>
+
+          <label className="field-row">
+            <span>WeChat group chat ID</span>
+            <input
+              value={draft.wechatRoomId}
+              onChange={(event) => setDraft((current) => ({ ...current, wechatRoomId: event.target.value }))}
+              placeholder="12345@chatroom"
+              aria-label="WeChat group chat ID"
+            />
+          </label>
+
+          <label className="field-row">
+            <span>Alert language</span>
+            <select
+              value={draft.language ?? "en"}
+              onChange={(event) => setDraft((current) => ({
+                ...current,
+                language: event.target.value === "zh" ? "zh" : "en"
+              }))}
+              aria-label="Alert language"
+            >
+              <option value="en">English</option>
+              <option value="zh">中文</option>
+            </select>
+          </label>
+
+          <label className="field-row">
+            <span>Alert cooldown minutes</span>
+            <input
+              type="number"
+              min="1"
+              value={draft.cooldownMinutes || ""}
+              onChange={(event) => setDraft((current) => ({
+                ...current,
+                cooldownMinutes: event.target.value === "" ? 0 : Math.max(1, Number(event.target.value) || 1)
+              }))}
+              aria-label="Alert cooldown minutes"
+            />
+          </label>
+        </div>
+      </div>
+
+      <div className="settings-footer">
+        <span className={status?.enabled && status.configured ? "settings-status active" : "settings-status"}>
+          {status?.enabled && status.configured ? "WeChat alerts enabled" : "WeChat alerts disabled"}
+        </span>
+        <div className="settings-actions">
+          <button className="icon-button" disabled={saving} onClick={() => void onTest(normalizedDraft())}>
+            Send test alert
+          </button>
+          <button className="icon-button primary" disabled={saving} onClick={() => void onSave(normalizedDraft())}>
+            Save alert settings
+          </button>
+        </div>
+      </div>
+
+      <div className="wechat-setup">
+        <div className="wechat-setup-header">
+          <div>
+            <h4>WeChat Bot Login</h4>
+            <p>{wechatStatus.loggedIn ? "Logged in and listening for group messages." : "Start login, scan the QR code, then send a message in the target group."}</p>
+          </div>
+          <div className="settings-actions">
+            <button className="icon-button" disabled={saving} onClick={() => void onStartWeChat()}>
+              Start WeChat login
+            </button>
+            <button className="icon-button" disabled={saving} onClick={() => void onRefreshWeChat()}>
+              Refresh status
+            </button>
+          </div>
+        </div>
+
+        <div className="wechat-status-grid">
+          <div>
+            <span className="settings-status-label">Status</span>
+            <strong>{wechatStatus.loggedIn ? "Logged in" : wechatStatus.started ? "Waiting for QR scan" : "Not started"}</strong>
+          </div>
+          <div>
+            <span className="settings-status-label">Polling</span>
+            <strong>{wechatStatus.polling ? "Running" : "Stopped"}</strong>
+          </div>
+          <div>
+            <span className="settings-status-label">Messages seen</span>
+            <strong>{wechatStatus.messageCount}</strong>
+          </div>
+          <div>
+            <span className="settings-status-label">Last message</span>
+            <strong>{formatDate(wechatStatus.lastMessageAt)}</strong>
+          </div>
+          {wechatStatus.qrUrl ? (
+            <div>
+              <span className="settings-status-label">QR login URL</span>
+              <a href={wechatStatus.qrUrl} target="_blank" rel="noreferrer">Open QR code</a>
+            </div>
+          ) : null}
+          {wechatStatus.lastError ? (
+            <div>
+              <span className="settings-status-label">Last error</span>
+              <strong>{wechatStatus.lastError}</strong>
+            </div>
+          ) : null}
+        </div>
+
+        <div className="wechat-chat-list">
+          <span className="settings-status-label">Recent WeChat chats</span>
+          {wechatStatus.recentChats.length > 0 ? (
+            <div className="wechat-chat-options">
+              {wechatStatus.recentChats.map((chat) => (
+                <button
+                  key={chat.userId}
+                  className="wechat-chat-option"
+                  onClick={() => setDraft((current) => ({ ...current, wechatRoomId: chat.userId }))}
+                >
+                  <strong>{chat.userId}</strong>
+                  <span>{chat.text || "No text preview"}</span>
+                </button>
+              ))}
+            </div>
+          ) : (
+            <p className="settings-help">No chats detected yet. After login, send a message in the target WeChat group and refresh status.</p>
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function OverviewView({
   overview,
   onOpenServer,
-  onRenameServer
+  onUpdateServerNote
 }: {
   overview: OverviewResponse;
   onOpenServer: (serverId: string) => void;
-  onRenameServer: (serverId: string, name: string) => Promise<void>;
+  onUpdateServerNote: (serverId: string, note: string) => Promise<void>;
 }) {
   const [filter, setFilter] = useState<string>("all");
   const [idSortDirection, setIdSortDirection] = useState<SortDirection>("asc");
@@ -215,6 +520,8 @@ function OverviewView({
       if (filter === "unknown") return conn === "unknown";
       if (filter === "warning") return health === "warning";
       if (filter === "dangerous") return health === "dangerous";
+      if (filter === "task-running") return isTaskActive(server.pipeline);
+      if (filter === "task-stale") return server.pipeline?.displayStatus === "stale";
       return true;
     });
 
@@ -240,8 +547,17 @@ function OverviewView({
         <p>Next auto-refresh: {formatDate(overview.refresh.nextRefreshAt)}</p>
       </section>
 
-      <section className="macro-grid">
+      <section className="macro-grid five">
         <MetricCard label="Online" value={`${overview.summary.online} / ${overview.summary.total}`} />
+        <MetricCard
+          label="Task"
+          value={`${overview.summary.pipelineRunning} running`}
+          subtext={
+            overview.summary.pipelineStale > 0
+              ? `${overview.summary.pipelineStale} stale`
+              : `${overview.summary.pipelineIdle} idle`
+          }
+        />
         <MetricCard label="Avg CPU" value={formatPercent(overview.summary.averageCpu)} />
         <MetricCard label="Avg Memory" value={formatPercent(overview.summary.averageMemory)} />
         <MetricCard label="Avg Disk" value={formatPercent(overview.summary.averageDisk)} />
@@ -295,6 +611,14 @@ function OverviewView({
               <dt>Dangerous</dt>
               <dd className="dd-value">{overview.summary.dangerous ?? 0}</dd>
             </div>
+            <div className={`stat-task ${filter === "task-running" ? "active" : ""}`} onClick={() => setFilter("task-running")}>
+              <dt>Task Running</dt>
+              <dd className="dd-value">{overview.summary.pipelineRunning ?? 0}</dd>
+            </div>
+            <div className={`stat-task-stale ${filter === "task-stale" ? "active" : ""}`} onClick={() => setFilter("task-stale")}>
+              <dt>Task Stale</dt>
+              <dd className="dd-value">{overview.summary.pipelineStale ?? 0}</dd>
+            </div>
           </dl>
         </div>
       </section>
@@ -309,7 +633,7 @@ function OverviewView({
           idSortDirection={idSortDirection}
           onToggleIdSort={toggleIdSort}
           onOpenServer={onOpenServer}
-          onRenameServer={onRenameServer}
+          onUpdateServerNote={onUpdateServerNote}
         />
       </section>
     </>
@@ -338,8 +662,11 @@ function DetailView({ detail, onBack }: { detail: ServerDetailResponse; onBack: 
           {latest?.connectionStatus === "online" && latest?.healthLevel ? (
             <HealthBadge level={latest.healthLevel} />
           ) : null}
+          {detail.pipeline ? <TaskBadge status={detail.pipeline.displayStatus} /> : null}
         </div>
       </section>
+
+      <TaskPanel task={detail.pipeline} />
 
       <section className="macro-grid five">
         <MetricCard 
@@ -394,38 +721,38 @@ function ServerTable({
   idSortDirection,
   onToggleIdSort,
   onOpenServer,
-  onRenameServer
+  onUpdateServerNote
 }: {
   servers: ServerRow[];
   idSortDirection: SortDirection;
   onToggleIdSort: () => void;
   onOpenServer: (serverId: string) => void;
-  onRenameServer: (serverId: string, name: string) => Promise<void>;
+  onUpdateServerNote: (serverId: string, note: string) => Promise<void>;
 }) {
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [draftName, setDraftName] = useState("");
+  const [draftNote, setDraftNote] = useState("");
   const [savingId, setSavingId] = useState<string | null>(null);
 
   const startEditing = (server: ServerRow) => {
     setEditingId(server.id);
-    setDraftName(server.name);
+    setDraftNote(server.note);
   };
 
   const cancelEditing = () => {
     setEditingId(null);
-    setDraftName("");
+    setDraftNote("");
   };
 
-  const commitName = async (server: ServerRow) => {
-    const nextName = draftName.trim();
-    if (nextName === "" || nextName === server.name) {
+  const commitNote = async (server: ServerRow) => {
+    const nextNote = draftNote.trim();
+    if (nextNote === "" || nextNote === server.note) {
       cancelEditing();
       return;
     }
 
     setSavingId(server.id);
     try {
-      await onRenameServer(server.id, nextName);
+      await onUpdateServerNote(server.id, nextNote);
       cancelEditing();
     } finally {
       setSavingId(null);
@@ -452,11 +779,13 @@ function ServerTable({
             <th>Port</th>
             <th>Status</th>
             <th>Health</th>
+            <th>Task</th>
             <th>CPU</th>
             <th>Memory</th>
             <th>Disk</th>
             <th>Load</th>
             <th>Uptime</th>
+            <th>Note</th>
           </tr>
         </thead>
         <tbody>
@@ -466,38 +795,15 @@ function ServerTable({
                 <span className="server-id-value">{server.id}</span>
               </td>
               <td>
-                {editingId === server.id ? (
-                  <input
-                    className="server-name-input"
-                    aria-label={`Server name for ${server.id}`}
-                    value={draftName}
-                    disabled={savingId === server.id}
-                    autoFocus
-                    onClick={(event) => event.stopPropagation()}
-                    onChange={(event) => setDraftName(event.target.value)}
-                    onBlur={() => void commitName(server)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter") {
-                        event.currentTarget.blur();
-                      }
-                      if (event.key === "Escape") {
-                        event.stopPropagation();
-                        cancelEditing();
-                      }
-                    }}
-                  />
-                ) : (
-                  <button
-                    className="row-button"
-                    aria-label={`Edit name for ${server.id}`}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      startEditing(server);
-                    }}
-                  >
-                    {server.name}
-                  </button>
-                )}
+                <span
+                  className={
+                    resolveServerDatasetName(server)
+                      ? "server-dataset-name has-dataset"
+                      : "server-dataset-name"
+                  }
+                >
+                  {formatServerDatasetName(server)}
+                </span>
                 <span className="muted">{server.host}</span>
               </td>
               <td>
@@ -513,11 +819,52 @@ function ServerTable({
                   <span className="text-muted">—</span>
                 )}
               </td>
+              <td>
+                {server.pipeline ? (
+                  <TaskBadge status={server.pipeline.displayStatus} />
+                ) : (
+                  <span className="text-muted">—</span>
+                )}
+              </td>
               <td>{formatPercent(server.latest?.cpuUsedPercent)}</td>
               <td>{formatPercent(server.latest?.memoryUsedPercent)}</td>
               <td>{formatPercent(server.latest?.diskUsedPercent)}</td>
               <td>{server.latest?.load1?.toFixed(2) ?? "-"}</td>
               <td>{formatDuration(server.latest?.uptimeSeconds)}</td>
+              <td>
+                {editingId === server.id ? (
+                  <input
+                    className="server-name-input"
+                    aria-label={`Server note for ${server.id}`}
+                    value={draftNote}
+                    disabled={savingId === server.id}
+                    autoFocus
+                    onClick={(event) => event.stopPropagation()}
+                    onChange={(event) => setDraftNote(event.target.value)}
+                    onBlur={() => void commitNote(server)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        event.currentTarget.blur();
+                      }
+                      if (event.key === "Escape") {
+                        event.stopPropagation();
+                        cancelEditing();
+                      }
+                    }}
+                  />
+                ) : (
+                  <button
+                    className="row-button"
+                    aria-label={`Edit note for ${server.id}`}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      startEditing(server);
+                    }}
+                  >
+                    {server.note}
+                  </button>
+                )}
+              </td>
             </tr>
           ))}
         </tbody>
@@ -534,6 +881,84 @@ function ConnBadge({ status }: { status: ConnectionStatus }) {
 /** Health level badge — shows healthy / warning / dangerous. */
 function HealthBadge({ level }: { level: HealthLevel }) {
   return <span className={`badge health-badge ${level}`}>{level}</span>;
+}
+
+function TaskBadge({ status }: { status: PipelineDisplayStatus }) {
+  return <span className={`badge task-badge ${status}`}>{formatTaskStatusLabel(status)}</span>;
+}
+
+function TaskPanel({ task }: { task: PipelineStatusSnapshot | null }) {
+  if (!task) {
+    return (
+      <section className="panel task-panel">
+        <div className="panel-title">
+          <Workflow size={16} />
+          <h3>Solver Task</h3>
+        </div>
+        <p className="task-empty">No task status collected yet.</p>
+      </section>
+    );
+  }
+
+  const progress = taskProgressPercent(task);
+
+  return (
+    <section className="panel task-panel">
+      <div className="panel-title">
+        <Workflow size={16} />
+        <h3>Solver Task</h3>
+      </div>
+
+      <div className="task-summary-grid">
+        <div>
+          <span className="settings-status-label">Status</span>
+          <TaskBadge status={task.displayStatus} />
+        </div>
+        <div>
+          <span className="settings-status-label">Process</span>
+          <strong>{formatProcessAlive(task.processAlive)}</strong>
+        </div>
+        <div>
+          <span className="settings-status-label">Scenario</span>
+          <strong>{task.scenario ?? "—"}</strong>
+        </div>
+        <div>
+          <span className="settings-status-label">Dataset</span>
+          <strong>{task.datasetName ?? task.repoId ?? "—"}</strong>
+        </div>
+        <div>
+          <span className="settings-status-label">Batch</span>
+          <strong>{formatTaskBatch(task)}</strong>
+        </div>
+        <div>
+          <span className="settings-status-label">Updated</span>
+          <strong>{formatDate(task.updatedAt)}</strong>
+        </div>
+      </div>
+
+      {progress != null ? (
+        <div className="task-progress">
+          <div className="task-progress-label">
+            <span>Batch progress</span>
+            <strong>{progress}%</strong>
+          </div>
+          <div className="task-progress-track">
+            <div className="task-progress-fill" style={{ width: `${progress}%` }} />
+          </div>
+        </div>
+      ) : null}
+
+      {task.command ? (
+        <div className="task-command">
+          <span className="settings-status-label">Command</span>
+          <code>{task.command}</code>
+        </div>
+      ) : null}
+
+      {task.error ? <div className="notice error">{task.error}</div> : null}
+      {task.errorMessage ? <div className="notice error">{task.errorMessage}</div> : null}
+    </section>
+  );
 }
 
 function ChartPanel({
@@ -778,4 +1203,48 @@ function formatBytes(bytes: number | null | undefined): string {
   if (bytes >= 1048576) return (bytes / 1048576).toFixed(1) + " MB";
   if (bytes >= 1024) return (bytes / 1024).toFixed(1) + " KB";
   return bytes + " B";
+}
+
+function isTaskActive(task: PipelineStatusSnapshot | null | undefined): boolean {
+  if (!task) return false;
+  return (
+    task.displayStatus === "running" ||
+    task.displayStatus === "solving" ||
+    task.displayStatus === "uploading" ||
+    task.displayStatus === "cleanup"
+  );
+}
+
+function resolveServerDatasetName(server: ServerRow): string | null {
+  return server.pipeline?.datasetName ?? server.lastDatasetName;
+}
+
+function formatServerDatasetName(server: ServerRow): string {
+  return resolveServerDatasetName(server) ?? "-";
+}
+
+function formatTaskStatusLabel(status: PipelineDisplayStatus): string {
+  return status.replace(/_/g, " ");
+}
+
+function formatTaskBatch(task: PipelineStatusSnapshot): string {
+  if (task.currentBatch != null && task.totalBatches != null) {
+    const expr = task.batchExpr ? ` (${task.batchExpr})` : "";
+    return `${task.currentBatch}/${task.totalBatches}${expr}`;
+  }
+  if (task.totalTasks != null) return `${task.totalTasks} tasks`;
+  return "—";
+}
+
+function formatProcessAlive(processAlive: boolean | null): string {
+  if (processAlive === true) return "Alive";
+  if (processAlive === false) return "Not running";
+  return "—";
+}
+
+function taskProgressPercent(task: PipelineStatusSnapshot): number | null {
+  if (task.currentBatch == null || task.totalBatches == null || task.totalBatches <= 0) {
+    return null;
+  }
+  return Math.min(100, Math.round((task.currentBatch / task.totalBatches) * 100));
 }

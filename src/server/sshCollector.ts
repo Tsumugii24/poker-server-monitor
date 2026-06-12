@@ -71,7 +71,7 @@ export async function collectServerMetrics(
   }
 }
 
-class Ssh2Executor implements SshExecutor {
+export class Ssh2Executor implements SshExecutor {
   run(server: ServerConfig, credentials: SshCredentials, command: string): Promise<string> {
     return new Promise((resolve, reject) => {
       const client = new Client();

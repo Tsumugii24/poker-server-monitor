@@ -17,6 +17,89 @@ export type ServerConfig = {
   port: number;
   group?: string;
   enabled: boolean;
+  note: string;
+};
+
+export type AlertSettings = {
+  enabled: boolean;
+  wechatRoomId: string;
+  cooldownMinutes: number;
+  language: "en" | "zh";
+};
+
+export type AlertStatus = {
+  enabled: boolean;
+  configured: boolean;
+};
+
+export type WeChatChatCandidate = {
+  userId: string;
+  text: string;
+  receivedAt: string;
+};
+
+export type WeChatConnectorStatus = {
+  started: boolean;
+  loggedIn: boolean;
+  polling: boolean;
+  qrUrl: string | null;
+  lastError: string | null;
+  messageCount: number;
+  lastMessageAt: string | null;
+  recentChats: WeChatChatCandidate[];
+};
+
+export const PIPELINE_FILE_STATUSES = [
+  "running",
+  "completed",
+  "completed_with_upload_failures",
+  "failed",
+  "exited"
+] as const;
+export type PipelineFileStatus = (typeof PIPELINE_FILE_STATUSES)[number];
+
+export const PIPELINE_PHASES = ["solving", "uploading", "cleanup"] as const;
+export type PipelinePhase = (typeof PIPELINE_PHASES)[number];
+
+export const PIPELINE_DISPLAY_STATUSES = [
+  "idle",
+  "running",
+  "solving",
+  "uploading",
+  "cleanup",
+  "stale",
+  "completed",
+  "completed_with_upload_failures",
+  "failed",
+  "exited",
+  "unavailable"
+] as const;
+export type PipelineDisplayStatus = (typeof PIPELINE_DISPLAY_STATUSES)[number];
+
+export type PipelineStatusSnapshot = {
+  id: string;
+  serverId: string;
+  collectedAt: string;
+  available: boolean;
+  processAlive: boolean | null;
+  fileStatus: PipelineFileStatus | null;
+  displayStatus: PipelineDisplayStatus;
+  phase: PipelinePhase | null;
+  repoId: string | null;
+  datasetName: string | null;
+  scenario: string | null;
+  currentBatch: number | null;
+  totalBatches: number | null;
+  totalTasks: number | null;
+  batchExpr: string | null;
+  pid: number | null;
+  startedAt: string | null;
+  updatedAt: string | null;
+  finishedAt: string | null;
+  command: string | null;
+  error: string | null;
+  errorCode: string | null;
+  errorMessage: string | null;
 };
 
 export type MetricSnapshot = {
@@ -44,6 +127,8 @@ export type MetricSnapshot = {
 
 export type ServerRow = ServerConfig & {
   latest: MetricSnapshot | null;
+  pipeline: PipelineStatusSnapshot | null;
+  lastDatasetName: string | null;
 };
 
 export type RefreshRun = {
@@ -77,6 +162,10 @@ export type OverviewSummary = {
   averageCpu: number | null;
   averageMemory: number | null;
   averageDisk: number | null;
+  // Pipeline counts (among online servers only)
+  pipelineRunning: number;
+  pipelineIdle: number;
+  pipelineStale: number;
 };
 
 export type OverallHistoryPoint = {
@@ -98,6 +187,8 @@ export type OverviewResponse = {
 export type ServerDetailResponse = {
   server: ServerConfig;
   latest: MetricSnapshot | null;
+  pipeline: PipelineStatusSnapshot | null;
+  pipelineHistory: PipelineStatusSnapshot[];
   history: MetricSnapshot[];
 };
 

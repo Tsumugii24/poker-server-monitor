@@ -28,7 +28,10 @@ describe("shared monitor contracts", () => {
         dangerous: 0,
         averageCpu: 12,
         averageMemory: 34,
-        averageDisk: 56
+        averageDisk: 56,
+        pipelineRunning: 0,
+        pipelineIdle: 0,
+        pipelineStale: 0
       },
       description: "1 server online. All healthy.",
       servers: [
@@ -38,6 +41,7 @@ describe("shared monitor contracts", () => {
           host: "10.0.0.1",
           port: 22,
           enabled: true,
+          note: "TBD",
           latest: {
             id: "snap-1",
             serverId: "prod-01",
@@ -59,7 +63,9 @@ describe("shared monitor contracts", () => {
             memoryUsedBytes: 2919235584,
             diskTotalBytes: 107374182400,
             diskUsedBytes: 60129542144
-          }
+          },
+          pipeline: null,
+          lastDatasetName: null
         }
       ],
       overallHistory: []

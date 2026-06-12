@@ -9,14 +9,16 @@ const servers: ServerConfig[] = [
     host: "10.0.0.1",
     port: 22,
     group: "production",
-    enabled: true
+    enabled: true,
+    note: "TBD"
   },
   {
     id: "prod-02",
     name: "Production 02",
     host: "10.0.0.2",
     port: 2222,
-    enabled: true
+    enabled: true,
+    note: "TBD"
   }
 ];
 
@@ -100,6 +102,14 @@ describe("MonitorDatabase", () => {
     db.pruneSnapshots(24, "2026-05-12T00:00:00.000Z");
 
     expect(db.getServerHistory("prod-01", 48, "2026-05-12T00:00:00.000Z")).toHaveLength(1);
+  });
+
+  it("persists the last known dataset name on the server record", () => {
+    db.syncServers(servers);
+    db.updateServerLastDatasetName("prod-01", "sia-45-sod-40");
+
+    expect(db.getLastDatasetName("prod-01")).toBe("sia-45-sod-40");
+    expect(db.getServerRows().find((row) => row.id === "prod-01")?.lastDatasetName).toBe("sia-45-sod-40");
   });
 
   it("records refresh runs and returns the latest run", () => {

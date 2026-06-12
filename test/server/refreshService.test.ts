@@ -4,8 +4,8 @@ import { MonitorDatabase } from "../../src/server/db";
 import { RefreshService } from "../../src/server/refreshService";
 
 const servers: ServerConfig[] = [
-  { id: "prod-01", name: "Production 01", host: "10.0.0.1", port: 22, enabled: true },
-  { id: "prod-02", name: "Production 02", host: "10.0.0.2", port: 22, enabled: true }
+  { id: "prod-01", name: "Production 01", host: "10.0.0.1", port: 22, enabled: true, note: "TBD" },
+  { id: "prod-02", name: "Production 02", host: "10.0.0.2", port: 22, enabled: true, note: "TBD" }
 ];
 
 function metric(
@@ -52,7 +52,32 @@ describe("RefreshService", () => {
       servers,
       intervalMs: 3_600_000,
       collect: async (server) =>
-        metric(server.id, "online", server.id === "prod-01" ? "healthy" : "warning")
+        metric(server.id, "online", server.id === "prod-01" ? "healthy" : "warning"),
+      collectPipeline: async (server) => ({
+        id: `${server.id}-pipeline`,
+        serverId: server.id,
+        collectedAt: new Date().toISOString(),
+        available: server.id === "prod-01",
+        processAlive: server.id === "prod-01",
+        fileStatus: server.id === "prod-01" ? "running" : null,
+        displayStatus: server.id === "prod-01" ? "solving" : "idle",
+        phase: server.id === "prod-01" ? "solving" : null,
+        repoId: server.id === "prod-01" ? "Tsumugii/sia-45-sod-40" : null,
+        datasetName: server.id === "prod-01" ? "sia-45-sod-40" : null,
+        scenario: null,
+        currentBatch: null,
+        totalBatches: null,
+        totalTasks: null,
+        batchExpr: null,
+        pid: null,
+        startedAt: null,
+        updatedAt: null,
+        finishedAt: null,
+        command: null,
+        error: null,
+        errorCode: null,
+        errorMessage: null
+      })
     });
 
     const response = await service.refreshAll("manual");
@@ -60,6 +85,8 @@ describe("RefreshService", () => {
     expect(response.accepted).toBe(true);
     expect(db.getServerRows().map((row) => row.latest?.connectionStatus)).toEqual(["online", "online"]);
     expect(db.getServerRows().map((row) => row.latest?.healthLevel)).toEqual(["healthy", "warning"]);
+    expect(db.getServerRows().map((row) => row.pipeline?.displayStatus)).toEqual(["solving", "idle"]);
+    expect(db.getServerRows().map((row) => row.lastDatasetName)).toEqual(["sia-45-sod-40", null]);
     expect(db.getLastRefreshRun()).toMatchObject({
       status: "completed",
       successCount: 1,

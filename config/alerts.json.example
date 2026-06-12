@@ -1,0 +1,6 @@
+{
+  "enabled": false,
+  "wechatRoomId": "",
+  "cooldownMinutes": 60,
+  "language": "en"
+}

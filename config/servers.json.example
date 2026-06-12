@@ -5,6 +5,7 @@
     "host": "[SERVER_IP_ADDRESS]",
     "port": 22,
     "group": "[GROUP_NAME]",
-    "enabled": true
+    "enabled": true,
+    "note": "TBD"
   }
 ]

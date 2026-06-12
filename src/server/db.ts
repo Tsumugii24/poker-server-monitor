@@ -1,7 +1,15 @@
 import fs from "node:fs";
 import path from "node:path";
 import initSqlJs, { type Database, type SqlJsStatic } from "sql.js";
-import type { ConnectionStatus, HealthLevel, MetricSnapshot, RefreshRun, ServerConfig, ServerRow } from "../shared/types";
+import type {
+  ConnectionStatus,
+  HealthLevel,
+  MetricSnapshot,
+  PipelineStatusSnapshot,
+  RefreshRun,
+  ServerConfig,
+  ServerRow
+} from "../shared/types";
 
 let sqlPromise: Promise<SqlJsStatic> | null = null;
 
@@ -42,14 +50,15 @@ export class MonitorDatabase {
     this.removeServersMissingFromInventory(servers.map((server) => server.id));
 
     const stmt = this.database.prepare(`
-      INSERT INTO servers (id, name, host, port, group_name, enabled, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM servers WHERE id = ?), ?), ?)
+      INSERT INTO servers (id, name, host, port, group_name, enabled, note, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM servers WHERE id = ?), ?), ?)
       ON CONFLICT(id) DO UPDATE SET
         name = excluded.name,
         host = excluded.host,
         port = excluded.port,
         group_name = excluded.group_name,
         enabled = excluded.enabled,
+        note = excluded.note,
         updated_at = excluded.updated_at
     `);
     const now = new Date().toISOString();
@@ -62,6 +71,7 @@ export class MonitorDatabase {
           server.port,
           server.group ?? null,
           server.enabled ? 1 : 0,
+          server.note,
           server.id,
           now,
           now
@@ -85,7 +95,7 @@ export class MonitorDatabase {
 
   getServers(): ServerConfig[] {
     return this.query<ServerConfig>(
-      "SELECT id, name, host, port, group_name, enabled FROM servers ORDER BY name ASC",
+      "SELECT id, name, host, port, group_name, enabled, note FROM servers ORDER BY name ASC",
       [],
       (row) => ({
         id: String(row.id),
@@ -93,7 +103,8 @@ export class MonitorDatabase {
         host: String(row.host),
         port: Number(row.port),
         group: row.group_name == null ? undefined : String(row.group_name),
-        enabled: Number(row.enabled) === 1
+        enabled: Number(row.enabled) === 1,
+        note: row.note == null ? "TBD" : String(row.note)
       })
     );
   }
@@ -101,7 +112,7 @@ export class MonitorDatabase {
   getServer(id: string): ServerConfig | null {
     return (
       this.query<ServerConfig>(
-        "SELECT id, name, host, port, group_name, enabled FROM servers WHERE id = ?",
+        "SELECT id, name, host, port, group_name, enabled, note FROM servers WHERE id = ?",
         [id],
         (row) => ({
           id: String(row.id),
@@ -109,7 +120,8 @@ export class MonitorDatabase {
           host: String(row.host),
           port: Number(row.port),
           group: row.group_name == null ? undefined : String(row.group_name),
-          enabled: Number(row.enabled) === 1
+          enabled: Number(row.enabled) === 1,
+          note: row.note == null ? "TBD" : String(row.note)
         })
       )[0] ?? null
     );
@@ -152,8 +164,28 @@ export class MonitorDatabase {
   getServerRows(): ServerRow[] {
     return this.getServers().map((server) => ({
       ...server,
-      latest: this.getLatestSnapshot(server.id)
+      latest: this.getLatestSnapshot(server.id),
+      pipeline: this.getLatestPipelineSnapshot(server.id),
+      lastDatasetName: this.getLastDatasetName(server.id)
     }));
+  }
+
+  getLastDatasetName(serverId: string): string | null {
+    return (
+      this.query<string | null>(
+        "SELECT last_dataset_name FROM servers WHERE id = ?",
+        [serverId],
+        (row) => (row.last_dataset_name == null ? null : String(row.last_dataset_name))
+      )[0] ?? null
+    );
+  }
+
+  updateServerLastDatasetName(serverId: string, datasetName: string): void {
+    const trimmed = datasetName.trim();
+    if (trimmed === "") return;
+
+    this.database.run("UPDATE servers SET last_dataset_name = ? WHERE id = ?", [trimmed, serverId]);
+    this.persist();
   }
 
   getLatestSnapshot(serverId: string): MetricSnapshot | null {
@@ -178,7 +210,63 @@ export class MonitorDatabase {
   pruneSnapshots(hours: number, now = new Date().toISOString()): void {
     const cutoff = new Date(new Date(now).getTime() - hours * 60 * 60 * 1000).toISOString();
     this.database.run("DELETE FROM metric_snapshots WHERE collected_at < ?", [cutoff]);
+    this.database.run("DELETE FROM pipeline_status_snapshots WHERE collected_at < ?", [cutoff]);
     this.persist();
+  }
+
+  insertPipelineSnapshot(snapshot: PipelineStatusSnapshot): void {
+    this.database.run(
+      `INSERT INTO pipeline_status_snapshots (
+        id, server_id, collected_at, available, process_alive, file_status, display_status, phase,
+        repo_id, dataset_name, scenario, current_batch, total_batches, total_tasks, batch_expr,
+        pid, started_at, updated_at, finished_at, command_text, error_text, error_code, error_message
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        snapshot.id,
+        snapshot.serverId,
+        snapshot.collectedAt,
+        snapshot.available ? 1 : 0,
+        snapshot.processAlive == null ? null : snapshot.processAlive ? 1 : 0,
+        snapshot.fileStatus,
+        snapshot.displayStatus,
+        snapshot.phase,
+        snapshot.repoId,
+        snapshot.datasetName,
+        snapshot.scenario,
+        snapshot.currentBatch,
+        snapshot.totalBatches,
+        snapshot.totalTasks,
+        snapshot.batchExpr,
+        snapshot.pid,
+        snapshot.startedAt,
+        snapshot.updatedAt,
+        snapshot.finishedAt,
+        snapshot.command,
+        snapshot.error,
+        snapshot.errorCode,
+        snapshot.errorMessage
+      ]
+    );
+    this.persist();
+  }
+
+  getLatestPipelineSnapshot(serverId: string): PipelineStatusSnapshot | null {
+    return (
+      this.query<PipelineStatusSnapshot>(
+        "SELECT * FROM pipeline_status_snapshots WHERE server_id = ? ORDER BY collected_at DESC LIMIT 1",
+        [serverId],
+        mapPipelineSnapshot
+      )[0] ?? null
+    );
+  }
+
+  getPipelineHistory(serverId: string, hours: number, now = new Date().toISOString()): PipelineStatusSnapshot[] {
+    const since = new Date(new Date(now).getTime() - hours * 60 * 60 * 1000).toISOString();
+    return this.query<PipelineStatusSnapshot>(
+      "SELECT * FROM pipeline_status_snapshots WHERE server_id = ? AND collected_at >= ? ORDER BY collected_at ASC",
+      [serverId, since],
+      mapPipelineSnapshot
+    );
   }
 
   insertRefreshRun(run: RefreshRun): void {
@@ -257,6 +345,8 @@ export class MonitorDatabase {
         port INTEGER NOT NULL,
         group_name TEXT,
         enabled INTEGER NOT NULL,
+        note TEXT NOT NULL DEFAULT 'TBD',
+        last_dataset_name TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -287,6 +377,35 @@ export class MonitorDatabase {
       CREATE INDEX IF NOT EXISTS idx_metric_snapshots_server_time
         ON metric_snapshots(server_id, collected_at);
 
+      CREATE TABLE IF NOT EXISTS pipeline_status_snapshots (
+        id TEXT PRIMARY KEY,
+        server_id TEXT NOT NULL,
+        collected_at TEXT NOT NULL,
+        available INTEGER NOT NULL,
+        process_alive INTEGER,
+        file_status TEXT,
+        display_status TEXT NOT NULL,
+        phase TEXT,
+        repo_id TEXT,
+        dataset_name TEXT,
+        scenario TEXT,
+        current_batch INTEGER,
+        total_batches INTEGER,
+        total_tasks INTEGER,
+        batch_expr TEXT,
+        pid INTEGER,
+        started_at TEXT,
+        updated_at TEXT,
+        finished_at TEXT,
+        command_text TEXT,
+        error_text TEXT,
+        error_code TEXT,
+        error_message TEXT
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_pipeline_status_snapshots_server_time
+        ON pipeline_status_snapshots(server_id, collected_at);
+
       CREATE TABLE IF NOT EXISTS refresh_runs (
         id TEXT PRIMARY KEY,
         trigger TEXT NOT NULL,
@@ -298,7 +417,31 @@ export class MonitorDatabase {
         failure_count INTEGER NOT NULL
       );
     `);
+    this.ensureServerNoteColumn();
+    this.ensureLastDatasetNameColumn();
     this.persist();
+  }
+
+  private ensureLastDatasetNameColumn(): void {
+    const columns = this.query<{ name: string }>(
+      "PRAGMA table_info(servers)",
+      [],
+      (row) => ({ name: String(row.name) })
+    );
+    if (!columns.some((column) => column.name === "last_dataset_name")) {
+      this.database.run("ALTER TABLE servers ADD COLUMN last_dataset_name TEXT");
+    }
+  }
+
+  private ensureServerNoteColumn(): void {
+    const columns = this.query<{ name: string }>(
+      "PRAGMA table_info(servers)",
+      [],
+      (row) => ({ name: String(row.name) })
+    );
+    if (!columns.some((column) => column.name === "note")) {
+      this.database.run("ALTER TABLE servers ADD COLUMN note TEXT NOT NULL DEFAULT 'TBD'");
+    }
   }
 
   private query<T>(
@@ -348,6 +491,34 @@ function mapSnapshot(row: Record<string, SqlValue>): MetricSnapshot {
     memoryUsedBytes: nullableNumber(row.memory_used_bytes),
     diskTotalBytes: nullableNumber(row.disk_total_bytes),
     diskUsedBytes: nullableNumber(row.disk_used_bytes)
+  };
+}
+
+function mapPipelineSnapshot(row: Record<string, SqlValue>): PipelineStatusSnapshot {
+  return {
+    id: String(row.id),
+    serverId: String(row.server_id),
+    collectedAt: String(row.collected_at),
+    available: Number(row.available) === 1,
+    processAlive: row.process_alive == null ? null : Number(row.process_alive) === 1,
+    fileStatus: row.file_status == null ? null : String(row.file_status) as PipelineStatusSnapshot["fileStatus"],
+    displayStatus: String(row.display_status) as PipelineStatusSnapshot["displayStatus"],
+    phase: row.phase == null ? null : String(row.phase) as PipelineStatusSnapshot["phase"],
+    repoId: row.repo_id == null ? null : String(row.repo_id),
+    datasetName: row.dataset_name == null ? null : String(row.dataset_name),
+    scenario: row.scenario == null ? null : String(row.scenario),
+    currentBatch: nullableNumber(row.current_batch),
+    totalBatches: nullableNumber(row.total_batches),
+    totalTasks: nullableNumber(row.total_tasks),
+    batchExpr: row.batch_expr == null ? null : String(row.batch_expr),
+    pid: nullableNumber(row.pid),
+    startedAt: row.started_at == null ? null : String(row.started_at),
+    updatedAt: row.updated_at == null ? null : String(row.updated_at),
+    finishedAt: row.finished_at == null ? null : String(row.finished_at),
+    command: row.command_text == null ? null : String(row.command_text),
+    error: row.error_text == null ? null : String(row.error_text),
+    errorCode: row.error_code == null ? null : String(row.error_code),
+    errorMessage: row.error_message == null ? null : String(row.error_message)
   };
 }
 
