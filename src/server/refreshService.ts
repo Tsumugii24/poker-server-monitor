@@ -11,6 +11,7 @@ import type { MonitorDatabase } from "./db";
 import { collectServerPipelineStatus, buildPipelineFailureSnapshot } from "./pipelineStatusCollector";
 import { collectServerMetrics, type SshCredentials, Ssh2Executor } from "./sshCollector";
 import type { AlertService } from "./alertService";
+import { classifyWeChatSendError } from "./wechatNotifier";
 
 export type RefreshServiceOptions = {
   db: MonitorDatabase;
@@ -28,10 +29,12 @@ export class RefreshService {
   private nextRefreshAt: string | null = null;
   private nextRefreshAtMs: number | null = null;
   private scheduler: NodeJS.Timeout | null = null;
+  private intervalMs: number;
   private readonly collect: (server: ServerConfig) => Promise<MetricSnapshot>;
   private readonly collectPipeline: (server: ServerConfig) => Promise<PipelineStatusSnapshot>;
 
   constructor(private readonly options: RefreshServiceOptions) {
+    this.intervalMs = options.intervalMs;
     const executor = new Ssh2Executor();
     this.collect =
       options.collect ??
@@ -116,7 +119,7 @@ export class RefreshService {
         trigger,
         startedAt
       }).catch((error: unknown) => {
-        console.error("Alert delivery failed", error);
+        console.error(classifyWeChatSendError(error).logMessage);
       });
 
       return {
@@ -138,7 +141,7 @@ export class RefreshService {
 
   startScheduler(options: { runImmediately?: boolean } = {}): void {
     this.stopScheduler();
-    this.scheduleNextTime(Date.now() + this.options.intervalMs);
+    this.scheduleNextTime(Date.now() + this.intervalMs);
     if (options.runImmediately) {
       void this.refreshAll("startup").catch((error: unknown) => {
         console.error("Startup refresh failed", error);
@@ -147,7 +150,14 @@ export class RefreshService {
     this.scheduler = setInterval(() => {
       this.advanceScheduledRefreshTime();
       void this.refreshAll("scheduled");
-    }, this.options.intervalMs);
+    }, this.intervalMs);
+  }
+
+  updateScheduleInterval(intervalMs: number): void {
+    this.intervalMs = intervalMs;
+    if (this.scheduler) {
+      this.startScheduler();
+    }
   }
 
   stopScheduler(): void {
@@ -158,7 +168,7 @@ export class RefreshService {
   }
 
   private advanceScheduledRefreshTime(): void {
-    this.scheduleNextTime((this.nextRefreshAtMs ?? Date.now()) + this.options.intervalMs);
+    this.scheduleNextTime((this.nextRefreshAtMs ?? Date.now()) + this.intervalMs);
   }
 
   private scheduleNextTime(timestampMs: number): void {

@@ -1,7 +1,7 @@
 import path from "node:path";
 import express from "express";
 import { createApp } from "./api";
-import { AlertService } from "./alertService";
+import { AlertService, alertRefreshIntervalMs } from "./alertService";
 import { loadAlertSettings, loadRuntimeConfig, loadServerInventory } from "./config";
 import { MonitorDatabase } from "./db";
 import { RefreshService } from "./refreshService";
@@ -15,17 +15,24 @@ async function main(): Promise<void> {
   const notifier = new WeChatNotifier();
   const alertService = new AlertService({
     getSettings: () => loadAlertSettings(config.alertSettingsPath),
-    send: (message, roomId) => notifier.send(message, roomId)
+    send: async (message, roomId) => {
+      const settings = loadAlertSettings(config.alertSettingsPath);
+      const status = notifier.getStatus(settings.enabled ? settings.wechatRoomId : "");
+      if (!status.loggedIn) {
+        throw new Error("WeChat bot is not logged in yet.");
+      }
+      await notifier.send(message, roomId);
+    }
   });
   const alertSettings = loadAlertSettings(config.alertSettingsPath);
   if (alertSettings.enabled) {
-    await notifier.ensureStarted();
+    notifier.startInBackground();
   }
 
   const refreshService = new RefreshService({
     db,
     servers,
-    intervalMs: config.refreshIntervalMs,
+    intervalMs: alertRefreshIntervalMs(alertSettings, config.refreshIntervalMs),
     credentials: config.ssh,
     pipelineStatusFilePath: config.pipelineStatusFilePath,
     alerts: alertService
@@ -37,9 +44,17 @@ async function main(): Promise<void> {
     refreshService,
     inventoryPath: config.inventoryPath,
     alertSettingsPath: config.alertSettingsPath,
+    defaultRefreshIntervalMs: config.refreshIntervalMs,
     sendTestAlert: (message, roomId) => notifier.send(message, roomId),
     startAlertConnector: () => notifier.ensureStarted(),
-    getWeChatStatus: () => notifier.getStatus()
+    restartAlertConnector: () => notifier.restartLogin(),
+    restoreAlertConnector: () => notifier.restoreSession(),
+    logoutWeChatConnector: () => notifier.logout(),
+    switchWeChatConnector: () => notifier.switchAccount(),
+    getWeChatStatus: () => {
+      const settings = loadAlertSettings(config.alertSettingsPath);
+      return notifier.getStatus(settings.enabled ? settings.wechatRoomId : "");
+    }
   });
   const clientDist = path.resolve("dist/client");
   app.use(express.static(clientDist));

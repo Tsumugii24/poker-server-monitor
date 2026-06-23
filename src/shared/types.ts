@@ -1,4 +1,13 @@
 /** Connectivity dimension — is the server reachable? */
+import type { WeChatDeliveryInfo, WeChatTargetActivity } from "./wechatDelivery";
+
+export type {
+  WeChatDeliveryInfo,
+  WeChatDeliveryPhase,
+  WeChatDeliverySeverity,
+  WeChatTargetActivity
+} from "./wechatDelivery";
+
 export const CONNECTION_STATUSES = ["online", "offline", "unknown"] as const;
 export type ConnectionStatus = (typeof CONNECTION_STATUSES)[number];
 
@@ -20,9 +29,26 @@ export type ServerConfig = {
   note: string;
 };
 
+/** A single WeChat notification recipient. */
+export type WeChatRecipient = {
+  /** Unique identifier (UUID). */
+  id: string;
+  /** WeChat user or chatroom ID (e.g. "12345@chatroom"). */
+  contactId: string;
+  /** User-friendly display label. */
+  label: string;
+  /** Whether this recipient is active for alert delivery. */
+  enabled: boolean;
+  /** ISO timestamp when this recipient was added. */
+  addedAt: string;
+};
+
 export type AlertSettings = {
   enabled: boolean;
+  /** Legacy single target — derived from the first enabled recipient. */
   wechatRoomId: string;
+  /** All configured notification recipients. */
+  wechatRecipients: WeChatRecipient[];
   cooldownMinutes: number;
   language: "en" | "zh";
 };
@@ -38,15 +64,33 @@ export type WeChatChatCandidate = {
   receivedAt: string;
 };
 
+export type WeChatStoredSession = {
+  available: boolean;
+  botUserId: string | null;
+  savedAt: string | null;
+  contextUserIds: string[];
+  verifiedForTarget: boolean;
+};
+
 export type WeChatConnectorStatus = {
   started: boolean;
   loggedIn: boolean;
   polling: boolean;
+  /** True after the first poll:start event (context store loaded). */
+  ready: boolean;
   qrUrl: string | null;
+  /** True while the server is waiting for a QR scan (including before qrUrl is ready). */
+  awaitingQr: boolean;
+  /** WeChat user id of the logged-in bot account, if available. */
+  botUserId: string | null;
+  /** Persisted session snapshot from local WeChat bot storage. */
+  storedSession: WeChatStoredSession;
   lastError: string | null;
   messageCount: number;
   lastMessageAt: string | null;
   recentChats: WeChatChatCandidate[];
+  delivery: WeChatDeliveryInfo;
+  target: WeChatTargetActivity | null;
 };
 
 export const PIPELINE_FILE_STATUSES = [

@@ -1,4 +1,4 @@
-import type { AlertSettings, MetricSnapshot, RefreshTrigger, ServerConfig } from "../shared/types";
+import type { AlertSettings, MetricSnapshot, RefreshTrigger, ServerConfig, WeChatRecipient } from "../shared/types";
 
 export type AlertRefreshEvent = {
   servers: ServerConfig[];
@@ -13,102 +13,145 @@ export type AlertServiceOptions = {
 };
 
 export class AlertService {
-  private readonly lastOfflineAlertAt = new Map<string, number>();
+  private lastAlertSentAt: number | null = null;
 
   constructor(private readonly options: AlertServiceOptions) {}
 
   async handleRefresh(event: AlertRefreshEvent): Promise<void> {
     const settings = this.options.getSettings();
-    if (!settings.enabled || settings.wechatRoomId.trim() === "") {
+    if (!settings.enabled) {
+      return;
+    }
+
+    const enabledRecipients = settings.wechatRecipients.filter((r) => r.enabled);
+    if (enabledRecipients.length === 0) {
+      return;
+    }
+
+    const offlineSnapshots = event.snapshots.filter((snapshot) => snapshot.connectionStatus === "offline");
+    if (offlineSnapshots.length === 0) {
+      return;
+    }
+
+    if (!shouldSendOfflineAlert(event.trigger, settings, this.lastAlertSentAt)) {
       return;
     }
 
     const serverById = new Map(event.servers.map((server) => [server.id, server]));
-    const offlineSnapshots = event.snapshots.filter((snapshot) => snapshot.connectionStatus === "offline");
-    const onlineIds = new Set(event.snapshots
-      .filter((snapshot) => snapshot.connectionStatus !== "offline")
-      .map((snapshot) => snapshot.serverId));
+    const message = formatOfflineMessage(offlineSnapshots, serverById, event, settings.language);
 
-    for (const serverId of onlineIds) {
-      this.lastOfflineAlertAt.delete(serverId);
+    const errors: string[] = [];
+    for (const recipient of enabledRecipients) {
+      try {
+        await this.options.send(message, recipient.contactId);
+      } catch (error) {
+        errors.push(`${recipient.contactId}: ${error instanceof Error ? error.message : String(error)}`);
+      }
     }
 
-    const alertable = offlineSnapshots.filter((snapshot) => this.shouldAlert(snapshot.serverId, settings));
-    if (alertable.length === 0) {
+    this.lastAlertSentAt = Date.now();
+
+    if (errors.length > 0) {
+      console.error(`Alert delivery failed for ${errors.length} recipient(s):\n${errors.join("\n")}`);
+    }
+  }
+
+  async sendTest(settings: AlertSettings, recipientId?: string): Promise<void> {
+    if (!settings.enabled) {
+      throw new Error("WeChat alerts must be enabled before sending a test alert");
+    }
+
+    const message = formatTestAlertMessage(settings.language);
+
+    if (recipientId) {
+      const recipient = settings.wechatRecipients.find((r) => r.id === recipientId);
+      if (!recipient) {
+        throw new Error(`Recipient ${recipientId} not found`);
+      }
+      await this.options.send(message, recipient.contactId);
       return;
     }
 
-    const now = Date.now();
-    for (const snapshot of alertable) {
-      this.lastOfflineAlertAt.set(snapshot.serverId, now);
+    // Send to all enabled recipients
+    const enabledRecipients = settings.wechatRecipients.filter((r) => r.enabled);
+    if (enabledRecipients.length === 0) {
+      throw new Error("No enabled recipients configured");
     }
 
-    await this.options.send(this.formatOfflineMessage(alertable, serverById, event, settings.language), settings.wechatRoomId);
-  }
-
-  async sendTest(settings: AlertSettings): Promise<void> {
-    if (!settings.enabled || settings.wechatRoomId.trim() === "") {
-      throw new Error("WeChat alerts must be enabled and configured before sending a test alert");
+    for (const recipient of enabledRecipients) {
+      await this.options.send(message, recipient.contactId);
     }
-
-    await this.options.send(formatTestAlertMessage(settings.language), settings.wechatRoomId);
   }
 
   getStatus(): { enabled: boolean; configured: boolean } {
     const settings = this.options.getSettings();
     return {
       enabled: settings.enabled,
-      configured: settings.wechatRoomId.trim() !== ""
+      configured: settings.wechatRecipients.some((r) => r.enabled)
     };
   }
+}
 
-  private shouldAlert(serverId: string, settings: AlertSettings): boolean {
-    const lastSentAt = this.lastOfflineAlertAt.get(serverId);
-    if (lastSentAt == null) {
-      return true;
-    }
-    return Date.now() - lastSentAt >= settings.cooldownMinutes * 60_000;
+export function shouldSendOfflineAlert(
+  trigger: RefreshTrigger,
+  settings: AlertSettings,
+  lastAlertSentAt: number | null,
+  now = Date.now()
+): boolean {
+  if (trigger === "manual") {
+    return true;
   }
+  if (lastAlertSentAt == null) {
+    return true;
+  }
+  return now - lastAlertSentAt >= settings.cooldownMinutes * 60_000;
+}
 
-  private formatOfflineMessage(
-    snapshots: MetricSnapshot[],
-    serverById: Map<string, ServerConfig>,
-    event: AlertRefreshEvent,
-    language: AlertSettings["language"]
-  ): string {
-    const lines = snapshots.map((snapshot) => {
-      const server = serverById.get(snapshot.serverId);
-      const address = server ? `${server.host}:${server.port}` : snapshot.serverId;
-      const reason = snapshot.errorMessage
-        ? ` ${language === "zh" ? "原因" : "Reason"}: ${snapshot.errorMessage}`
-        : "";
-      return `- 🔴 ${address}${reason}`;
-    });
+export function alertRefreshIntervalMs(settings: AlertSettings, fallbackMs: number): number {
+  if (settings.enabled) {
+    return settings.cooldownMinutes * 60_000;
+  }
+  return fallbackMs;
+}
 
-    if (language === "zh") {
-      return [
-        "🚨 Server Monitor 告警",
-        "",
-        `- 状态: 检测到服务器离线`,
-        `- 触发: ${formatTrigger(event.trigger, language)}`,
-        `- 时间: ${new Date(event.startedAt).toLocaleString()}`,
-        "",
-        "离线服务器:",
-        ...lines
-      ].join("\n");
-    }
+function formatOfflineMessage(
+  snapshots: MetricSnapshot[],
+  serverById: Map<string, ServerConfig>,
+  event: AlertRefreshEvent,
+  language: AlertSettings["language"]
+): string {
+  const lines = snapshots.map((snapshot) => {
+    const server = serverById.get(snapshot.serverId);
+    const address = server ? `${server.host}:${server.port}` : snapshot.serverId;
+    const reason = snapshot.errorMessage
+      ? ` ${language === "zh" ? "原因" : "Reason"}: ${snapshot.errorMessage}`
+      : "";
+    return `- 🔴 ${address}${reason}`;
+  });
 
+  if (language === "zh") {
     return [
-      "🚨 Server Monitor Alert",
+      "🚨 Server Monitor 告警",
       "",
-      `- Status: Offline server detected`,
-      `- Trigger: ${formatTrigger(event.trigger, language)}`,
-      `- Time: ${new Date(event.startedAt).toLocaleString()}`,
+      `- 状态: 检测到服务器离线`,
+      `- 触发: ${formatTrigger(event.trigger, language)}`,
+      `- 时间: ${new Date(event.startedAt).toLocaleString()}`,
       "",
-      "Offline servers:",
+      "离线服务器:",
       ...lines
     ].join("\n");
   }
+
+  return [
+    "🚨 Server Monitor Alert",
+    "",
+    `- Status: Offline server detected`,
+    `- Trigger: ${formatTrigger(event.trigger, language)}`,
+    `- Time: ${new Date(event.startedAt).toLocaleString()}`,
+    "",
+    "Offline servers:",
+    ...lines
+  ].join("\n");
 }
 
 function formatTrigger(trigger: RefreshTrigger, language: AlertSettings["language"]): string {

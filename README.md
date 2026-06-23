@@ -53,7 +53,13 @@ The dashboard can send a WeChat message when an enabled server is detected as `o
 7. Enable WeChat offline alerts, choose English or Chinese alert language, set the cooldown minutes, and save.
 8. Use `Send test alert` to verify delivery.
 
-The WeChat bot needs message context before it can send to a group. The Settings panel exposes the recent chat IDs that the bot has seen, so you do not need to manually inspect terminal logs for the group ID. The `@wechatbot/wechatbot` SDK stores its login state locally, so do not commit generated WeChat credential files. Alerts are rate-limited per server by the configured cooldown, and a recovered server can alert again if it goes offline later.
+The WeChat bot needs message context before it can send to a group. The Settings panel exposes the recent chat IDs that the bot has seen, so you do not need to manually inspect terminal logs for the group ID. The `@wechatbot/wechatbot` SDK stores its login state locally, so do not commit generated WeChat credential files.
+
+Alert behavior:
+
+- **Manual Refresh** always sends a WeChat alert when any enabled server is `offline`.
+- **Scheduled checks** run at the configured auto alert interval (default 60 minutes) and send only if that interval has passed since the last alert, whether the last alert came from a manual or automatic refresh.
+- Only `offline` servers are included. `unknown` or online-but-unhealthy servers do not trigger offline alerts.
 
 Offline alert messages only include the affected server address and port. Server names and inventory IDs are intentionally omitted from forwarded alerts.
 

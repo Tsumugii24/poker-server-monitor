@@ -1,23 +1,32 @@
+import { randomUUID } from "node:crypto";
 import express, { type Express } from "express";
 import type {
   AlertSettings,
   OverviewResponse,
   OverviewSummary,
   ServerDetailResponse,
-  WeChatConnectorStatus
+  WeChatConnectorStatus,
+  WeChatRecipient
 } from "../shared/types";
 import { loadAlertSettings, loadServerInventory, saveAlertSettings, updateServerInventoryNote } from "./config";
-import { formatTestAlertMessage } from "./alertService";
+import { formatTestAlertMessage, alertRefreshIntervalMs } from "./alertService";
 import type { MonitorDatabase } from "./db";
 import type { RefreshService } from "./refreshService";
+import { buildWeChatDelivery } from "../shared/wechatDelivery";
+import { defaultWeChatStoredSession } from "../shared/wechatSession";
 
 export type AppDependencies = {
   db: MonitorDatabase;
   refreshService: RefreshService;
   inventoryPath?: string;
   alertSettingsPath?: string;
+  defaultRefreshIntervalMs?: number;
   sendTestAlert?: (message: string, roomId: string) => Promise<void> | void;
   startAlertConnector?: () => Promise<void> | void;
+  restartAlertConnector?: () => Promise<void> | void;
+  restoreAlertConnector?: () => Promise<void> | void;
+  logoutWeChatConnector?: () => Promise<void> | void;
+  switchWeChatConnector?: () => Promise<void> | void;
   getWeChatStatus?: () => WeChatConnectorStatus;
 };
 
@@ -26,8 +35,13 @@ export function createApp({
   refreshService,
   inventoryPath = "config/servers.json",
   alertSettingsPath = "config/alerts.json",
+  defaultRefreshIntervalMs = 3_600_000,
   sendTestAlert,
   startAlertConnector,
+  restartAlertConnector,
+  restoreAlertConnector,
+  logoutWeChatConnector,
+  switchWeChatConnector,
   getWeChatStatus
 }: AppDependencies): Express {
   const app = express();
@@ -108,6 +122,7 @@ export function createApp({
 
     try {
       const settings = saveAlertSettings(alertSettingsPath, request.body);
+      refreshService.updateScheduleInterval(alertRefreshIntervalMs(settings, defaultRefreshIntervalMs));
       if (settings.enabled) {
         void Promise.resolve(startAlertConnector?.()).catch((error: unknown) => {
           console.error("Alert connector startup failed", error);
@@ -133,13 +148,17 @@ export function createApp({
 
     try {
       const settings = saveAlertSettings(alertSettingsPath, request.body);
-      if (!settings.enabled || settings.wechatRoomId.trim() === "") {
+      if (!settings.enabled || !settings.wechatRecipients.some((r) => r.enabled)) {
         response.status(400).json({ error: "alert_not_configured" });
         return;
       }
 
       await sendTestAlert?.(formatTestAlertMessage(settings.language), settings.wechatRoomId);
-      response.status(202).json({ accepted: true, status: alertStatus(settings) });
+      response.status(202).json({
+        accepted: true,
+        status: alertStatus(settings),
+        wechat: getWeChatStatus?.() ?? defaultWeChatStatus(settings.wechatRoomId)
+      });
     } catch (error) {
       response.status(500).json({
         error: "alert_test_failed",
@@ -149,14 +168,180 @@ export function createApp({
   });
 
   app.get("/api/settings/wechat", (_request, response) => {
-    response.json(getWeChatStatus?.() ?? defaultWeChatStatus());
+    const settings = loadAlertSettings(alertSettingsPath);
+    response.json(getWeChatStatus?.() ?? defaultWeChatStatus(settings.enabled ? settings.wechatRoomId : ""));
   });
 
   app.post("/api/settings/wechat/start", (_request, response) => {
-    void Promise.resolve(startAlertConnector?.()).catch((error: unknown) => {
+    void Promise.resolve(restartAlertConnector?.() ?? startAlertConnector?.()).catch((error: unknown) => {
       console.error("WeChat connector startup failed", error);
     });
-    response.status(202).json(getWeChatStatus?.() ?? defaultWeChatStatus());
+    response.status(202).json({ accepted: true });
+  });
+
+  app.post("/api/settings/wechat/restore", async (_request, response) => {
+    try {
+      await Promise.resolve(restoreAlertConnector?.());
+      const settings = loadAlertSettings(alertSettingsPath);
+      response.json(getWeChatStatus?.() ?? defaultWeChatStatus(settings.enabled ? settings.wechatRoomId : ""));
+    } catch (error) {
+      response.status(500).json({
+        error: "wechat_restore_failed",
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  app.post("/api/settings/wechat/logout", async (_request, response) => {
+    try {
+      await Promise.resolve(logoutWeChatConnector?.());
+      const settings = loadAlertSettings(alertSettingsPath);
+      response.json(getWeChatStatus?.() ?? defaultWeChatStatus(settings.enabled ? settings.wechatRoomId : ""));
+    } catch (error) {
+      response.status(500).json({
+        error: "wechat_logout_failed",
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  app.post("/api/settings/wechat/switch", (_request, response) => {
+    void Promise.resolve(switchWeChatConnector?.()).catch((error: unknown) => {
+      console.error("WeChat account switch failed", error);
+    });
+    response.status(202).json({ accepted: true });
+  });
+
+  // ── Recipient management ──────────────────────────────────────
+
+  app.get("/api/settings/alerts/recipients", (_request, response) => {
+    const settings = loadAlertSettings(alertSettingsPath);
+    response.json({ recipients: settings.wechatRecipients });
+  });
+
+  app.post("/api/settings/alerts/recipients", (request, response) => {
+    if (!isRecord(request.body) ||
+        typeof request.body.contactId !== "string" ||
+        request.body.contactId.trim() === "") {
+      response.status(400).json({ error: "invalid_recipient", message: "contactId is required" });
+      return;
+    }
+
+    try {
+      const settings = loadAlertSettings(alertSettingsPath);
+      const contactId = (request.body.contactId as string).trim();
+      const label = typeof request.body.label === "string" ? request.body.label.trim() : contactId;
+
+      // Check for duplicate contactId
+      if (settings.wechatRecipients.some((r) => r.contactId === contactId)) {
+        response.status(409).json({ error: "duplicate_recipient", message: `Recipient ${contactId} already exists` });
+        return;
+      }
+
+      const newRecipient: WeChatRecipient = {
+        id: randomUUID(),
+        contactId,
+        label,
+        enabled: true,
+        addedAt: new Date().toISOString()
+      };
+
+      settings.wechatRecipients.push(newRecipient);
+      // Sync legacy field
+      const firstEnabled = settings.wechatRecipients.find((r) => r.enabled);
+      settings.wechatRoomId = firstEnabled?.contactId ?? "";
+
+      const saved = saveAlertSettings(alertSettingsPath, settings);
+      response.status(201).json({ recipient: newRecipient, settings: saved, status: alertStatus(saved) });
+    } catch (error) {
+      response.status(500).json({
+        error: "recipient_add_failed",
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  app.patch("/api/settings/alerts/recipients/:id", (request, response) => {
+    if (!isRecord(request.body)) {
+      response.status(400).json({ error: "invalid_request" });
+      return;
+    }
+
+    try {
+      const settings = loadAlertSettings(alertSettingsPath);
+      const recipient = settings.wechatRecipients.find((r) => r.id === request.params.id);
+      if (!recipient) {
+        response.status(404).json({ error: "recipient_not_found" });
+        return;
+      }
+
+      if (typeof request.body.enabled === "boolean") {
+        recipient.enabled = request.body.enabled;
+      }
+      if (typeof request.body.label === "string") {
+        recipient.label = request.body.label.trim();
+      }
+
+      // Sync legacy field
+      const firstEnabled = settings.wechatRecipients.find((r) => r.enabled);
+      settings.wechatRoomId = firstEnabled?.contactId ?? "";
+
+      const saved = saveAlertSettings(alertSettingsPath, settings);
+      response.json({ recipient, settings: saved, status: alertStatus(saved) });
+    } catch (error) {
+      response.status(500).json({
+        error: "recipient_update_failed",
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  app.delete("/api/settings/alerts/recipients/:id", (request, response) => {
+    try {
+      const settings = loadAlertSettings(alertSettingsPath);
+      const index = settings.wechatRecipients.findIndex((r) => r.id === request.params.id);
+      if (index === -1) {
+        response.status(404).json({ error: "recipient_not_found" });
+        return;
+      }
+
+      settings.wechatRecipients.splice(index, 1);
+      // Sync legacy field
+      const firstEnabled = settings.wechatRecipients.find((r) => r.enabled);
+      settings.wechatRoomId = firstEnabled?.contactId ?? "";
+
+      const saved = saveAlertSettings(alertSettingsPath, settings);
+      response.json({ settings: saved, status: alertStatus(saved) });
+    } catch (error) {
+      response.status(500).json({
+        error: "recipient_delete_failed",
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  app.post("/api/settings/alerts/test/:recipientId", async (request, response) => {
+    try {
+      const settings = loadAlertSettings(alertSettingsPath);
+      const recipient = settings.wechatRecipients.find((r) => r.id === request.params.recipientId);
+      if (!recipient) {
+        response.status(404).json({ error: "recipient_not_found" });
+        return;
+      }
+
+      await sendTestAlert?.(formatTestAlertMessage(settings.language), recipient.contactId);
+      response.status(202).json({
+        accepted: true,
+        recipientId: recipient.id,
+        status: alertStatus(settings),
+        wechat: getWeChatStatus?.() ?? defaultWeChatStatus(recipient.contactId)
+      });
+    } catch (error) {
+      response.status(500).json({
+        error: "alert_test_failed",
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
   });
 
   app.get("/api/servers/:id/history", (request, response) => {
@@ -249,30 +434,66 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function isAlertSettingsInput(value: unknown): value is AlertSettings {
-  return isRecord(value) &&
-    typeof value.enabled === "boolean" &&
-    typeof value.wechatRoomId === "string" &&
-    typeof value.cooldownMinutes === "number" &&
-    Number.isFinite(value.cooldownMinutes) &&
-    (value.language === "en" || value.language === "zh");
+  if (!isRecord(value)) return false;
+  if (typeof value.enabled !== "boolean") return false;
+  if (typeof value.cooldownMinutes !== "number" || !Number.isFinite(value.cooldownMinutes)) return false;
+  if (value.language !== "en" && value.language !== "zh") return false;
+  // wechatRoomId is optional now (derived from recipients), but accept it for backward compat
+  if (value.wechatRoomId != null && typeof value.wechatRoomId !== "string") return false;
+  // wechatRecipients is optional in input (config normalizer handles it)
+  if (value.wechatRecipients != null && !Array.isArray(value.wechatRecipients)) return false;
+  return true;
 }
 
 function alertStatus(settings: AlertSettings): { enabled: boolean; configured: boolean } {
   return {
     enabled: settings.enabled,
-    configured: settings.wechatRoomId.trim() !== ""
+    configured: settings.wechatRecipients.some((r) => r.enabled)
   };
 }
 
-function defaultWeChatStatus(): WeChatConnectorStatus {
+function defaultWeChatStatus(alertTargetUserId = ""): WeChatConnectorStatus {
+  const configuredTarget = alertTargetUserId.trim();
   return {
     started: false,
     loggedIn: false,
     polling: false,
+    ready: false,
     qrUrl: null,
+    awaitingQr: false,
+    botUserId: null,
+    storedSession: defaultWeChatStoredSession(),
     lastError: null,
     messageCount: 0,
     lastMessageAt: null,
-    recentChats: []
+    recentChats: [],
+    target: configuredTarget
+      ? {
+          userId: configuredTarget,
+          lastInboundAt: null,
+          lastSendSuccessAt: null,
+          lastSendFailureAt: null,
+          lastSendFailureCode: null
+        }
+      : null,
+    delivery: buildWeChatDelivery({
+      alertsConfigured: configuredTarget.length > 0,
+      started: false,
+      loggedIn: false,
+      polling: false,
+      ready: false,
+      qrUrl: null,
+      awaitingQr: false,
+      lastError: null,
+      target: configuredTarget
+        ? {
+            userId: configuredTarget,
+            lastInboundAt: null,
+            lastSendSuccessAt: null,
+            lastSendFailureAt: null,
+            lastSendFailureCode: null
+          }
+        : null
+    })
   };
 }

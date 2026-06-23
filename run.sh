@@ -55,6 +55,11 @@ if [[ ! -f "config/servers.json" ]]; then
   exit 1
 fi
 
+if [[ ! -d "node_modules/@wechatbot/wechatbot" ]]; then
+  echo "Installing dependencies (required for WeChat alerts and runtime modules)..."
+  npm install
+fi
+
 if command -v lsof >/dev/null 2>&1; then
   mapfile -t PIDS < <(lsof -tiTCP:"$PORT" -sTCP:LISTEN || true)
   for pid in "${PIDS[@]}"; do

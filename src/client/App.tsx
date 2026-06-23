@@ -17,6 +17,7 @@ import {
   Workflow
 } from "lucide-react";
 import { type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
+import { SettingsWizard } from "./SettingsWizard";
 import type {
   AlertSettings,
   AlertStatus,
@@ -31,6 +32,10 @@ import type {
   ServerRow,
   WeChatConnectorStatus
 } from "../shared/types";
+import {
+  buildWeChatDelivery
+} from "../shared/wechatDelivery";
+import { defaultWeChatStoredSession } from "../shared/wechatSession";
 import "./styles.css";
 
 type Route =
@@ -52,11 +57,27 @@ const EMPTY_WECHAT_STATUS: WeChatConnectorStatus = {
   started: false,
   loggedIn: false,
   polling: false,
+  ready: false,
   qrUrl: null,
+  awaitingQr: false,
+  botUserId: null,
+  storedSession: defaultWeChatStoredSession(),
   lastError: null,
   messageCount: 0,
   lastMessageAt: null,
-  recentChats: []
+  recentChats: [],
+  target: null,
+  delivery: buildWeChatDelivery({
+    alertsConfigured: false,
+    started: false,
+    loggedIn: false,
+    polling: false,
+    ready: false,
+    qrUrl: null,
+    awaitingQr: false,
+    lastError: null,
+    target: null
+  })
 };
 
 const THEME_KEY = "server-monitor-theme";
@@ -132,6 +153,7 @@ export default function App() {
       });
       setAlertSettings(response.settings);
       setAlertStatus(response.status);
+      setWeChatStatus(await fetchJson<WeChatConnectorStatus>("/api/settings/wechat"));
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     } finally {
@@ -143,15 +165,28 @@ export default function App() {
     setSettingsSaving(true);
     setError(null);
     try {
-      const response = await fetchJson<{ status: AlertStatus }>("/api/settings/alerts/test", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(settings)
-      });
+      const response = await fetchJson<{ status: AlertStatus; wechat?: WeChatConnectorStatus }>(
+        "/api/settings/alerts/test",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(settings)
+        }
+      );
       setAlertSettings(settings);
       setAlertStatus(response.status);
+      if (response.wechat) {
+        setWeChatStatus(response.wechat);
+      } else {
+        setWeChatStatus(await fetchJson<WeChatConnectorStatus>("/api/settings/wechat"));
+      }
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
+      try {
+        setWeChatStatus(await fetchJson<WeChatConnectorStatus>("/api/settings/wechat"));
+      } catch {
+        /* ignore secondary refresh failure */
+      }
     } finally {
       setSettingsSaving(false);
     }
@@ -161,7 +196,8 @@ export default function App() {
     setSettingsSaving(true);
     setError(null);
     try {
-      setWeChatStatus(await fetchJson<WeChatConnectorStatus>("/api/settings/wechat/start", { method: "POST" }));
+      await fetchJson<{ accepted: boolean }>("/api/settings/wechat/start", { method: "POST" });
+      await refreshWeChatStatus();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     } finally {
@@ -169,14 +205,133 @@ export default function App() {
     }
   };
 
-  const refreshWeChatStatus = async () => {
+  const refreshWeChatStatus = useCallback(async () => {
     setError(null);
     try {
       setWeChatStatus(await fetchJson<WeChatConnectorStatus>("/api/settings/wechat"));
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     }
+  }, []);
+
+  const logoutWeChat = async () => {
+    setSettingsSaving(true);
+    setError(null);
+    try {
+      setWeChatStatus(await fetchJson<WeChatConnectorStatus>("/api/settings/wechat/logout", { method: "POST" }));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+      throw caught;
+    } finally {
+      setSettingsSaving(false);
+    }
   };
+
+  const switchWeChatAccount = async () => {
+    setSettingsSaving(true);
+    setError(null);
+    try {
+      await fetchJson<{ accepted: boolean }>("/api/settings/wechat/switch", { method: "POST" });
+      await refreshWeChatStatus();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+      throw caught;
+    } finally {
+      setSettingsSaving(false);
+    }
+  };
+
+  const restoreWeChatSession = async () => {
+    setSettingsSaving(true);
+    setError(null);
+    try {
+      setWeChatStatus(await fetchJson<WeChatConnectorStatus>("/api/settings/wechat/restore", { method: "POST" }));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+      throw caught;
+    } finally {
+      setSettingsSaving(false);
+    }
+  };
+
+  const addRecipient = async (contactId: string, label: string) => {
+    setError(null);
+    try {
+      const response = await fetchJson<{ settings: AlertSettings; status: AlertStatus }>(
+        "/api/settings/alerts/recipients",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ contactId, label })
+        }
+      );
+      setAlertSettings(response.settings);
+      setAlertStatus(response.status);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+      throw caught;
+    }
+  };
+
+  const updateRecipient = async (id: string, patch: { enabled?: boolean; label?: string }) => {
+    setError(null);
+    try {
+      const response = await fetchJson<{ settings: AlertSettings; status: AlertStatus }>(
+        `/api/settings/alerts/recipients/${id}`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(patch)
+        }
+      );
+      setAlertSettings(response.settings);
+      setAlertStatus(response.status);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+      throw caught;
+    }
+  };
+
+  const removeRecipient = async (id: string) => {
+    setError(null);
+    try {
+      const response = await fetchJson<{ settings: AlertSettings; status: AlertStatus }>(
+        `/api/settings/alerts/recipients/${id}`,
+        { method: "DELETE" }
+      );
+      setAlertSettings(response.settings);
+      setAlertStatus(response.status);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+      throw caught;
+    }
+  };
+
+  const testRecipient = async (id: string) => {
+    setError(null);
+    try {
+      const response = await fetchJson<{ status: AlertStatus; wechat?: WeChatConnectorStatus }>(
+        `/api/settings/alerts/test/${id}`,
+        { method: "POST" }
+      );
+      setAlertStatus(response.status);
+      if (response.wechat) {
+        setWeChatStatus(response.wechat);
+      }
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+      throw caught;
+    }
+  };
+
+  useEffect(() => {
+    if (!settingsOpen || wechatStatus.loggedIn) return undefined;
+    void refreshWeChatStatus();
+    const timer = window.setInterval(() => {
+      void refreshWeChatStatus();
+    }, 1500);
+    return () => window.clearInterval(timer);
+  }, [settingsOpen, wechatStatus.loggedIn, refreshWeChatStatus]);
 
   useEffect(() => {
     const onPopState = () => setRoute(routeFromLocation());
@@ -289,7 +444,7 @@ export default function App() {
 
       {settingsOpen && alertSettings ? (
         <div className="modal-backdrop" role="presentation">
-          <SettingsPanel
+          <SettingsWizard
             settings={alertSettings}
             status={alertStatus}
             saving={settingsSaving}
@@ -299,6 +454,13 @@ export default function App() {
             wechatStatus={wechatStatus}
             onStartWeChat={startWeChatLogin}
             onRefreshWeChat={refreshWeChatStatus}
+            onRestoreWeChat={restoreWeChatSession}
+            onLogoutWeChat={logoutWeChat}
+            onSwitchWeChat={switchWeChatAccount}
+            onAddRecipient={addRecipient}
+            onUpdateRecipient={updateRecipient}
+            onRemoveRecipient={removeRecipient}
+            onTestRecipient={testRecipient}
           />
         </div>
       ) : null}
@@ -315,188 +477,6 @@ export default function App() {
 }
 
 /* ── Overview page ────────────────────────────────────────────── */
-
-function SettingsPanel({
-  settings,
-  status,
-  saving,
-  onClose,
-  onSave,
-  onTest,
-  wechatStatus,
-  onStartWeChat,
-  onRefreshWeChat
-}: {
-  settings: AlertSettings;
-  status: AlertStatus | null;
-  saving: boolean;
-  onClose: () => void;
-  onSave: (settings: AlertSettings) => Promise<void>;
-  onTest: (settings: AlertSettings) => Promise<void>;
-  wechatStatus: WeChatConnectorStatus;
-  onStartWeChat: () => Promise<void>;
-  onRefreshWeChat: () => Promise<void>;
-}) {
-  const [draft, setDraft] = useState<AlertSettings>(settings);
-
-  useEffect(() => {
-    setDraft(settings);
-  }, [settings]);
-
-  const normalizedDraft = (): AlertSettings => ({
-    ...draft,
-    cooldownMinutes: Math.max(1, draft.cooldownMinutes),
-    language: draft.language ?? "en"
-  });
-
-  return (
-    <section className="panel settings-panel" aria-label="Settings" role="dialog" aria-modal="true">
-      <div className="settings-header">
-        <div className="panel-title">
-          <Settings size={16} />
-          <h3>Settings</h3>
-        </div>
-        <button className="icon-button ghost compact" onClick={onClose}>Close</button>
-      </div>
-
-      <div className="forward-settings">
-        <h4>Forward Settings</h4>
-        <div className="settings-grid">
-          <label className="toggle-row">
-            <input
-              type="checkbox"
-              checked={draft.enabled}
-              onChange={(event) => setDraft((current) => ({ ...current, enabled: event.target.checked }))}
-              aria-label="Enable WeChat offline alerts"
-            />
-            <span>Enable WeChat offline alerts</span>
-          </label>
-
-          <label className="field-row">
-            <span>WeChat group chat ID</span>
-            <input
-              value={draft.wechatRoomId}
-              onChange={(event) => setDraft((current) => ({ ...current, wechatRoomId: event.target.value }))}
-              placeholder="12345@chatroom"
-              aria-label="WeChat group chat ID"
-            />
-          </label>
-
-          <label className="field-row">
-            <span>Alert language</span>
-            <select
-              value={draft.language ?? "en"}
-              onChange={(event) => setDraft((current) => ({
-                ...current,
-                language: event.target.value === "zh" ? "zh" : "en"
-              }))}
-              aria-label="Alert language"
-            >
-              <option value="en">English</option>
-              <option value="zh">中文</option>
-            </select>
-          </label>
-
-          <label className="field-row">
-            <span>Alert cooldown minutes</span>
-            <input
-              type="number"
-              min="1"
-              value={draft.cooldownMinutes || ""}
-              onChange={(event) => setDraft((current) => ({
-                ...current,
-                cooldownMinutes: event.target.value === "" ? 0 : Math.max(1, Number(event.target.value) || 1)
-              }))}
-              aria-label="Alert cooldown minutes"
-            />
-          </label>
-        </div>
-      </div>
-
-      <div className="settings-footer">
-        <span className={status?.enabled && status.configured ? "settings-status active" : "settings-status"}>
-          {status?.enabled && status.configured ? "WeChat alerts enabled" : "WeChat alerts disabled"}
-        </span>
-        <div className="settings-actions">
-          <button className="icon-button" disabled={saving} onClick={() => void onTest(normalizedDraft())}>
-            Send test alert
-          </button>
-          <button className="icon-button primary" disabled={saving} onClick={() => void onSave(normalizedDraft())}>
-            Save alert settings
-          </button>
-        </div>
-      </div>
-
-      <div className="wechat-setup">
-        <div className="wechat-setup-header">
-          <div>
-            <h4>WeChat Bot Login</h4>
-            <p>{wechatStatus.loggedIn ? "Logged in and listening for group messages." : "Start login, scan the QR code, then send a message in the target group."}</p>
-          </div>
-          <div className="settings-actions">
-            <button className="icon-button" disabled={saving} onClick={() => void onStartWeChat()}>
-              Start WeChat login
-            </button>
-            <button className="icon-button" disabled={saving} onClick={() => void onRefreshWeChat()}>
-              Refresh status
-            </button>
-          </div>
-        </div>
-
-        <div className="wechat-status-grid">
-          <div>
-            <span className="settings-status-label">Status</span>
-            <strong>{wechatStatus.loggedIn ? "Logged in" : wechatStatus.started ? "Waiting for QR scan" : "Not started"}</strong>
-          </div>
-          <div>
-            <span className="settings-status-label">Polling</span>
-            <strong>{wechatStatus.polling ? "Running" : "Stopped"}</strong>
-          </div>
-          <div>
-            <span className="settings-status-label">Messages seen</span>
-            <strong>{wechatStatus.messageCount}</strong>
-          </div>
-          <div>
-            <span className="settings-status-label">Last message</span>
-            <strong>{formatDate(wechatStatus.lastMessageAt)}</strong>
-          </div>
-          {wechatStatus.qrUrl ? (
-            <div>
-              <span className="settings-status-label">QR login URL</span>
-              <a href={wechatStatus.qrUrl} target="_blank" rel="noreferrer">Open QR code</a>
-            </div>
-          ) : null}
-          {wechatStatus.lastError ? (
-            <div>
-              <span className="settings-status-label">Last error</span>
-              <strong>{wechatStatus.lastError}</strong>
-            </div>
-          ) : null}
-        </div>
-
-        <div className="wechat-chat-list">
-          <span className="settings-status-label">Recent WeChat chats</span>
-          {wechatStatus.recentChats.length > 0 ? (
-            <div className="wechat-chat-options">
-              {wechatStatus.recentChats.map((chat) => (
-                <button
-                  key={chat.userId}
-                  className="wechat-chat-option"
-                  onClick={() => setDraft((current) => ({ ...current, wechatRoomId: chat.userId }))}
-                >
-                  <strong>{chat.userId}</strong>
-                  <span>{chat.text || "No text preview"}</span>
-                </button>
-              ))}
-            </div>
-          ) : (
-            <p className="settings-help">No chats detected yet. After login, send a message in the target WeChat group and refresh status.</p>
-          )}
-        </div>
-      </div>
-    </section>
-  );
-}
 
 function OverviewView({
   overview,

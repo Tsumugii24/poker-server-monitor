@@ -23,6 +23,11 @@ if (-not (Test-Path "config\servers.json")) {
   exit 1
 }
 
+if (-not (Test-Path "node_modules\@wechatbot\wechatbot")) {
+  Write-Host "Installing dependencies (required for WeChat alerts and runtime modules)..."
+  npm install
+}
+
 $listeners = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
 foreach ($listener in $listeners) {
   if ($listener.OwningProcess -gt 0) {

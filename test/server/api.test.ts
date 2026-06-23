@@ -222,20 +222,37 @@ describe("monitor API", () => {
         started: true,
         loggedIn: true,
         polling: true,
+        ready: true,
         qrUrl: null,
+        awaitingQr: false,
+        botUserId: "bot@im.wechat",
+        storedSession: {
+          available: true,
+          botUserId: "bot@im.wechat",
+          savedAt: "2026-05-20T10:00:00.000Z",
+          contextUserIds: ["12345@chatroom"],
+          verifiedForTarget: true
+        },
         lastError: null,
         messageCount: 1,
         lastMessageAt: "2026-05-20T10:00:00.000Z",
         recentChats: [
           { userId: "12345@chatroom", text: "setup", receivedAt: "2026-05-20T10:00:00.000Z" }
-        ]
+        ],
+        target: {
+          userId: "12345@chatroom",
+          lastInboundAt: "2026-05-20T10:00:00.000Z",
+          lastSendSuccessAt: "2026-05-20T10:05:00.000Z",
+          lastSendFailureAt: null,
+          lastSendFailureCode: null
+        },
+        delivery: { phase: "ready", severity: "success" }
       })
     })).get("/api/settings/wechat");
 
     expect(response.status).toBe(200);
     expect(response.body.loggedIn).toBe(true);
-    expect(response.body.polling).toBe(true);
-    expect(response.body.messageCount).toBe(1);
+    expect(response.body.storedSession.available).toBe(true);
     expect(response.body.recentChats[0].userId).toBe("12345@chatroom");
   });
 
@@ -249,16 +266,133 @@ describe("monitor API", () => {
         started: true,
         loggedIn: false,
         polling: false,
+        ready: false,
         qrUrl: "https://example.com/qr",
+        awaitingQr: true,
+        botUserId: null,
+        storedSession: {
+          available: false,
+          botUserId: null,
+          savedAt: null,
+          contextUserIds: [],
+          verifiedForTarget: false
+        },
         lastError: null,
         messageCount: 0,
         lastMessageAt: null,
-        recentChats: []
+        recentChats: [],
+        target: null,
+        delivery: { phase: "awaiting_qr", severity: "warning" }
       })
     })).post("/api/settings/wechat/start");
 
     expect(response.status).toBe(202);
     expect(startAlertConnector).toHaveBeenCalledTimes(1);
-    expect(response.body.qrUrl).toBe("https://example.com/qr");
+    expect(response.body.accepted).toBe(true);
+  });
+
+  it("restores a stored WeChat session", async () => {
+    const restoreAlertConnector = vi.fn();
+    const response = await request(createApp({
+      db,
+      refreshService: service,
+      restoreAlertConnector,
+      getWeChatStatus: () => ({
+        started: true,
+        loggedIn: true,
+        polling: true,
+        ready: true,
+        qrUrl: null,
+        awaitingQr: false,
+        botUserId: "bot@im.wechat",
+        storedSession: {
+          available: true,
+          botUserId: "bot@im.wechat",
+          savedAt: "2026-05-20T10:00:00.000Z",
+          contextUserIds: ["123@im.wechat"],
+          verifiedForTarget: true
+        },
+        lastError: null,
+        messageCount: 0,
+        lastMessageAt: null,
+        recentChats: [],
+        target: null,
+        delivery: { phase: "awaiting_context", severity: "warning" }
+      })
+    })).post("/api/settings/wechat/restore");
+
+    expect(response.status).toBe(200);
+    expect(restoreAlertConnector).toHaveBeenCalledTimes(1);
+    expect(response.body.loggedIn).toBe(true);
+  });
+
+  it("logs out the WeChat connector", async () => {
+    const logoutWeChatConnector = vi.fn();
+    const response = await request(createApp({
+      db,
+      refreshService: service,
+      logoutWeChatConnector,
+      getWeChatStatus: () => ({
+        started: false,
+        loggedIn: false,
+        polling: false,
+        ready: false,
+        qrUrl: null,
+        awaitingQr: false,
+        botUserId: null,
+        storedSession: {
+          available: false,
+          botUserId: null,
+          savedAt: null,
+          contextUserIds: [],
+          verifiedForTarget: false
+        },
+        lastError: null,
+        messageCount: 0,
+        lastMessageAt: null,
+        recentChats: [],
+        target: null,
+        delivery: { phase: "bot_offline", severity: "warning" }
+      })
+    })).post("/api/settings/wechat/logout");
+
+    expect(response.status).toBe(200);
+    expect(logoutWeChatConnector).toHaveBeenCalledTimes(1);
+    expect(response.body.loggedIn).toBe(false);
+  });
+
+  it("switches the WeChat account", async () => {
+    const switchWeChatConnector = vi.fn();
+    const response = await request(createApp({
+      db,
+      refreshService: service,
+      switchWeChatConnector,
+      getWeChatStatus: () => ({
+        started: true,
+        loggedIn: false,
+        polling: false,
+        ready: false,
+        qrUrl: "https://example.com/qr",
+        awaitingQr: true,
+        botUserId: null,
+        storedSession: {
+          available: false,
+          botUserId: null,
+          savedAt: null,
+          contextUserIds: [],
+          verifiedForTarget: false
+        },
+        lastError: null,
+        messageCount: 0,
+        lastMessageAt: null,
+        recentChats: [],
+        target: null,
+        delivery: { phase: "awaiting_qr", severity: "warning" }
+      })
+    })).post("/api/settings/wechat/switch");
+
+    expect(response.status).toBe(202);
+    expect(switchWeChatConnector).toHaveBeenCalledTimes(1);
+    expect(response.body.accepted).toBe(true);
   });
 });

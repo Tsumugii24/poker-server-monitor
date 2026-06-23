@@ -1,8 +1,9 @@
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import dotenv from "dotenv";
-import type { AlertSettings, ServerConfig } from "../shared/types";
+import type { AlertSettings, ServerConfig, WeChatRecipient } from "../shared/types";
 
 export type RuntimeConfig = {
   host: string;
@@ -181,6 +182,7 @@ function defaultAlertSettings(): AlertSettings {
   return {
     enabled: false,
     wechatRoomId: "",
+    wechatRecipients: [],
     cooldownMinutes: 60,
     language: "en"
   };
@@ -188,15 +190,46 @@ function defaultAlertSettings(): AlertSettings {
 
 function normalizeAlertSettings(value: Record<string, unknown>): AlertSettings {
   const enabled = value.enabled == null ? false : requiredBoolean(value.enabled, "alerts.enabled");
-  const wechatRoomId = value.wechatRoomId == null ? "" : optionalString(value.wechatRoomId, "alerts.wechatRoomId");
   const cooldownMinutes = value.cooldownMinutes == null
     ? 60
     : requiredPositiveNumber(value.cooldownMinutes, "alerts.cooldownMinutes");
   const language = value.language == null ? "en" : requiredAlertLanguage(value.language);
 
+  // Normalize recipients array
+  let recipients: WeChatRecipient[] = [];
+  if (Array.isArray(value.wechatRecipients)) {
+    recipients = value.wechatRecipients
+      .filter((r): r is Record<string, unknown> => typeof r === "object" && r !== null)
+      .map((r) => ({
+        id: typeof r.id === "string" ? r.id : randomUUID(),
+        contactId: typeof r.contactId === "string" ? r.contactId.trim() : "",
+        label: typeof r.label === "string" ? r.label.trim() : "",
+        enabled: typeof r.enabled === "boolean" ? r.enabled : true,
+        addedAt: typeof r.addedAt === "string" ? r.addedAt : new Date().toISOString()
+      }))
+      .filter((r) => r.contactId !== "");
+  }
+
+  // Legacy migration: if no recipients but wechatRoomId is set, create one
+  const legacyRoomId = value.wechatRoomId == null ? "" : optionalString(value.wechatRoomId, "alerts.wechatRoomId").trim();
+  if (recipients.length === 0 && legacyRoomId !== "") {
+    recipients.push({
+      id: randomUUID(),
+      contactId: legacyRoomId,
+      label: legacyRoomId,
+      enabled: true,
+      addedAt: new Date().toISOString()
+    });
+  }
+
+  // Derive wechatRoomId from first enabled recipient
+  const firstEnabled = recipients.find((r) => r.enabled);
+  const wechatRoomId = firstEnabled?.contactId ?? "";
+
   return {
     enabled,
-    wechatRoomId: wechatRoomId.trim(),
+    wechatRoomId,
+    wechatRecipients: recipients,
     cooldownMinutes,
     language
   };

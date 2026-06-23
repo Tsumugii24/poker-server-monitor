@@ -174,13 +174,31 @@ describe("App", () => {
             started: true,
             loggedIn: true,
             polling: true,
+            ready: true,
             qrUrl: null,
+            awaitingQr: false,
+            botUserId: "bot@im.wechat",
+            storedSession: {
+              available: true,
+              botUserId: "bot@im.wechat",
+              savedAt: "2026-05-12T00:00:00.000Z",
+              contextUserIds: ["12345@chatroom"],
+              verifiedForTarget: false
+            },
             lastError: null,
             messageCount: 1,
             lastMessageAt: "2026-05-12T00:00:00.000Z",
             recentChats: [
               { userId: "12345@chatroom", text: "monitor setup", receivedAt: "2026-05-12T00:00:00.000Z" }
-            ]
+            ],
+            target: {
+              userId: "12345@chatroom",
+              lastInboundAt: "2026-05-12T00:00:00.000Z",
+              lastSendSuccessAt: "2026-05-12T00:05:00.000Z",
+              lastSendFailureAt: null,
+              lastSendFailureCode: null
+            },
+            delivery: { phase: "ready", severity: "success" }
           });
         }
         if (url === "/api/settings/wechat/start" && init?.method === "POST") {
@@ -188,11 +206,23 @@ describe("App", () => {
             started: true,
             loggedIn: false,
             polling: false,
+            ready: false,
             qrUrl: "https://example.com/qr",
+            awaitingQr: true,
+            botUserId: null,
+            storedSession: {
+              available: false,
+              botUserId: null,
+              savedAt: null,
+              contextUserIds: [],
+              verifiedForTarget: false
+            },
             lastError: null,
             messageCount: 0,
             lastMessageAt: null,
-            recentChats: []
+            recentChats: [],
+            target: null,
+            delivery: { phase: "awaiting_qr", severity: "warning" }
           }, 202);
         }
         if (url === "/api/settings/alerts") {
@@ -321,14 +351,16 @@ describe("App", () => {
 
     await userEvent.click(await screen.findByRole("button", { name: "Open settings" }));
     expect(await screen.findByRole("dialog", { name: "Settings" })).toBeInTheDocument();
-    expect(await screen.findByText("Logged in and listening for group messages.")).toBeInTheDocument();
-    expect(screen.getByText("Running")).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: /12345@chatroom/ }));
-    await userEvent.click(await screen.findByLabelText("Enable WeChat offline alerts"));
-    await userEvent.clear(screen.getByLabelText("Alert cooldown minutes"));
-    await userEvent.type(screen.getByLabelText("Alert cooldown minutes"), "15");
+    expect(await screen.findByText("WeChat Alert Setup")).toBeInTheDocument();
+    expect(screen.getByText("Logged in as")).toBeInTheDocument();
+    expect(screen.getByText("bot@im.wechat")).toBeInTheDocument();
+    expect(await screen.findByText("Step 3 · Configure alert delivery")).toBeInTheDocument();
+    expect(screen.getByLabelText("WeChat contact ID")).toHaveValue("12345@chatroom");
+
+    await userEvent.clear(screen.getByLabelText("Auto alert interval (minutes)"));
+    await userEvent.type(screen.getByLabelText("Auto alert interval (minutes)"), "15");
     await userEvent.selectOptions(screen.getByLabelText("Alert language"), "zh");
-    await userEvent.click(screen.getByRole("button", { name: "Save alert settings" }));
+    await userEvent.click(await screen.findByRole("button", { name: "保存并发送测试告警" }));
 
     await waitFor(() =>
       expect(fetch).toHaveBeenCalledWith(
@@ -339,6 +371,101 @@ describe("App", () => {
         })
       )
     );
+  });
+
+  it("shows a waiting state before the QR URL arrives", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url === "/api/overview") return json(overview);
+        if (url === "/api/settings/alerts") {
+          return json({
+            settings: { enabled: true, wechatRoomId: "123@im.wechat", cooldownMinutes: 60, language: "zh" },
+            status: { enabled: true, configured: true }
+          });
+        }
+        if (url === "/api/settings/wechat") {
+          return json({
+            started: true,
+            loggedIn: false,
+            polling: false,
+            ready: false,
+            qrUrl: null,
+            awaitingQr: true,
+            botUserId: null,
+            storedSession: {
+              available: false,
+              botUserId: null,
+              savedAt: null,
+              contextUserIds: [],
+              verifiedForTarget: false
+            },
+            lastError: null,
+            messageCount: 0,
+            lastMessageAt: null,
+            recentChats: [],
+            target: null,
+            delivery: { phase: "awaiting_qr", severity: "warning" }
+          });
+        }
+        return json({}, 404);
+      })
+    );
+
+    render(<App />);
+    await userEvent.click(await screen.findByRole("button", { name: "Open settings" }));
+    expect(await screen.findByText("正在从服务器获取登录二维码…")).toBeInTheDocument();
+  });
+
+  it("shows the WeChat login QR code in settings while waiting for scan", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url === "/api/overview") return json(overview);
+        if (url === "/api/settings/alerts") {
+          return json({
+            settings: { enabled: true, wechatRoomId: "123@im.wechat", cooldownMinutes: 60, language: "zh" },
+            status: { enabled: true, configured: true }
+          });
+        }
+        if (url === "/api/settings/wechat") {
+          return json({
+            started: true,
+            loggedIn: false,
+            polling: false,
+            ready: false,
+            qrUrl: "https://liteapp.weixin.qq.com/q/test",
+            awaitingQr: true,
+            botUserId: null,
+            storedSession: {
+              available: false,
+              botUserId: null,
+              savedAt: null,
+              contextUserIds: [],
+              verifiedForTarget: false
+            },
+            lastError: null,
+            messageCount: 0,
+            lastMessageAt: null,
+            recentChats: [],
+            target: {
+              userId: "123@im.wechat",
+              lastInboundAt: null,
+              lastSendSuccessAt: null,
+              lastSendFailureAt: null,
+              lastSendFailureCode: null
+            },
+            delivery: { phase: "awaiting_qr", severity: "warning" }
+          });
+        }
+        return json({}, 404);
+      })
+    );
+
+    render(<App />);
+    await userEvent.click(await screen.findByRole("button", { name: "Open settings" }));
+    expect(await screen.findByAltText("微信登录二维码")).toBeInTheDocument();
+    expect(screen.getByText("微信扫码登录 Bot")).toBeInTheDocument();
   });
 
   it("toggles between dark and light themes", async () => {

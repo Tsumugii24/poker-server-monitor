@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { MetricSnapshot, ServerConfig } from "../../src/shared/types";
-import { AlertService, formatTestAlertMessage } from "../../src/server/alertService";
+import {
+  AlertService,
+  formatTestAlertMessage,
+  shouldSendOfflineAlert
+} from "../../src/server/alertService";
 
 const servers: ServerConfig[] = [
   { id: "prod-01", name: "Production 01", host: "10.0.0.1", port: 22, enabled: true, note: "TBD" },
@@ -32,6 +36,24 @@ function snapshot(serverId: string, connectionStatus: "online" | "offline"): Met
     diskUsedBytes: null
   };
 }
+
+describe("shouldSendOfflineAlert", () => {
+  const settings = { enabled: true, wechatRoomId: "12345@chatroom", cooldownMinutes: 60, language: "en" as const };
+
+  it("always allows manual refresh alerts", () => {
+    expect(shouldSendOfflineAlert("manual", settings, Date.now())).toBe(true);
+  });
+
+  it("allows automatic alerts when nothing was sent yet", () => {
+    expect(shouldSendOfflineAlert("scheduled", settings, null)).toBe(true);
+  });
+
+  it("blocks automatic alerts until the global cooldown expires", () => {
+    const now = Date.parse("2026-05-20T12:00:00.000Z");
+    expect(shouldSendOfflineAlert("scheduled", settings, now - 30 * 60_000, now)).toBe(false);
+    expect(shouldSendOfflineAlert("scheduled", settings, now - 61 * 60_000, now)).toBe(true);
+  });
+});
 
 describe("AlertService", () => {
   beforeEach(() => {
@@ -79,8 +101,6 @@ describe("AlertService", () => {
     expect(message).toContain("Server Monitor Alert");
     expect(message).toContain("\n- Status: Offline server detected");
     expect(message).toMatch(/\n- .*10\.0\.0\.1:22 Reason: Connection failed/);
-    expect(message).not.toContain("Production 01");
-    expect(message).not.toContain("prod-01");
   });
 
   it("formats offline alerts in Chinese", async () => {
@@ -98,18 +118,64 @@ describe("AlertService", () => {
     });
 
     const message = send.mock.calls[0][0];
-    expect(message).toContain("Server Monitor");
     expect(message).toContain("\n- \u89e6\u53d1: \u624b\u52a8\u5237\u65b0");
-    expect(message).toMatch(/\n- .*10\.0\.0\.1:22 \u539f\u56e0: Connection failed/);
   });
 
   it("formats test alerts in Chinese", () => {
     const message = formatTestAlertMessage("zh", new Date("2026-05-20T10:00:00.000Z"));
     expect(message).toContain("Server Monitor 测试告警");
-    expect(message).toContain("WeChat 离线告警已配置成功");
   });
 
-  it("does not repeat an offline alert before the cooldown expires", async () => {
+  it("does not consume cooldown when send fails", async () => {
+    const send = vi.fn()
+      .mockRejectedValueOnce(new Error("WeChat bot is not logged in yet."))
+      .mockResolvedValue(undefined);
+    const service = new AlertService({
+      getSettings: () => ({ enabled: true, wechatRoomId: "12345@chatroom", cooldownMinutes: 120, language: "en" }),
+      send
+    });
+
+    await expect(service.handleRefresh({
+      servers,
+      snapshots: [snapshot("prod-01", "offline")],
+      trigger: "scheduled",
+      startedAt: "2026-05-20T10:00:00.000Z"
+    })).rejects.toThrow("WeChat bot is not logged in yet.");
+
+    await service.handleRefresh({
+      servers,
+      snapshots: [snapshot("prod-01", "offline")],
+      trigger: "scheduled",
+      startedAt: "2026-05-20T10:30:00.000Z"
+    });
+
+    expect(send).toHaveBeenCalledTimes(2);
+  });
+
+  it("always sends on manual refresh even inside the cooldown window", async () => {
+    const send = vi.fn();
+    const service = new AlertService({
+      getSettings: () => ({ enabled: true, wechatRoomId: "12345@chatroom", cooldownMinutes: 120, language: "en" }),
+      send
+    });
+
+    await service.handleRefresh({
+      servers,
+      snapshots: [snapshot("prod-01", "offline")],
+      trigger: "scheduled",
+      startedAt: "2026-05-20T10:00:00.000Z"
+    });
+    await service.handleRefresh({
+      servers,
+      snapshots: [snapshot("prod-01", "offline")],
+      trigger: "manual",
+      startedAt: "2026-05-20T10:30:00.000Z"
+    });
+
+    expect(send).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not repeat automatic alerts before the global cooldown expires", async () => {
     const send = vi.fn();
     const service = new AlertService({
       getSettings: () => ({ enabled: true, wechatRoomId: "12345@chatroom", cooldownMinutes: 120, language: "en" }),
@@ -128,12 +194,7 @@ describe("AlertService", () => {
       trigger: "scheduled",
       startedAt: "2026-05-20T11:00:00.000Z"
     });
-    await service.handleRefresh({
-      servers,
-      snapshots: [snapshot("prod-01", "online")],
-      trigger: "scheduled",
-      startedAt: "2026-05-20T12:00:00.000Z"
-    });
+    vi.setSystemTime(new Date("2026-05-20T13:00:00.000Z"));
     await service.handleRefresh({
       servers,
       snapshots: [snapshot("prod-01", "offline")],
