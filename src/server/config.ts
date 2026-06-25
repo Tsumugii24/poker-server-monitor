@@ -7,7 +7,7 @@ import {
   DEFAULT_SSH_COMMAND_TIMEOUT_SECONDS,
   DEFAULT_SSH_CONNECT_TIMEOUT_SECONDS
 } from "../shared/sshSettings";
-import type { AlertSettings, ServerConfig, WeChatRecipient } from "../shared/types";
+import type { AlertSettings, ServerConfig, WeChatAccount, WeChatRecipient } from "../shared/types";
 
 export type RuntimeConfig = {
   host: string;
@@ -187,6 +187,7 @@ function defaultAlertSettings(): AlertSettings {
     enabled: false,
     wechatRoomId: "",
     wechatRecipients: [],
+    wechatAccounts: [],
     cooldownMinutes: 60,
     language: "en",
     sshCommandTimeoutSeconds: DEFAULT_SSH_COMMAND_TIMEOUT_SECONDS,
@@ -246,16 +247,51 @@ function normalizeAlertSettings(value: Record<string, unknown>): AlertSettings {
   // Derive wechatRoomId from first enabled recipient
   const firstEnabled = recipients.find((r) => r.enabled);
   const wechatRoomId = firstEnabled?.contactId ?? "";
+  const accounts = normalizeWeChatAccounts(value.wechatAccounts);
 
   return {
     enabled,
     wechatRoomId,
     wechatRecipients: recipients,
+    wechatAccounts: accounts,
     cooldownMinutes,
     language,
     sshCommandTimeoutSeconds,
     sshConnectTimeoutSeconds
   };
+}
+
+function normalizeWeChatAccounts(value: unknown): WeChatAccount[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const seenIds = new Set<string>();
+  return value
+    .filter((item): item is Record<string, unknown> => isRecord(item))
+    .map((item) => {
+      const id = typeof item.id === "string" && item.id.trim() ? item.id.trim() : randomUUID();
+      const label = typeof item.label === "string" ? item.label.trim() : "";
+      const botUserId = typeof item.botUserId === "string" && item.botUserId.trim()
+        ? item.botUserId.trim()
+        : null;
+      const alertTargetUserId = typeof item.alertTargetUserId === "string" && item.alertTargetUserId.trim()
+        ? item.alertTargetUserId.trim()
+        : null;
+      return {
+        id,
+        label: label || botUserId || alertTargetUserId || id,
+        enabled: typeof item.enabled === "boolean" ? item.enabled : true,
+        addedAt: typeof item.addedAt === "string" ? item.addedAt : new Date().toISOString(),
+        botUserId,
+        alertTargetUserId
+      };
+    })
+    .filter((account) => {
+      if (seenIds.has(account.id)) return false;
+      seenIds.add(account.id);
+      return true;
+    });
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

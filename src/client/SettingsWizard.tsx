@@ -1,153 +1,124 @@
-import { Check, LogOut, Pencil, Plus, RefreshCw, Send, Settings, Timer, Trash2, UserRound, X } from "lucide-react";
+import {
+  Check,
+  LogIn,
+  LogOut,
+  Pencil,
+  Plus,
+  RefreshCw,
+  Send,
+  Settings,
+  Timer,
+  Trash2,
+  UserRound,
+  X
+} from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import type { AlertSettings, AlertStatus, WeChatConnectorStatus, WeChatRecipient } from "../shared/types";
+import type {
+  AlertSettings,
+  AlertStatus,
+  WeChatAccountConnectorStatus,
+  WeChatAccountsStatus
+} from "../shared/types";
 import {
   buildWeChatChecklist,
   getWeChatDeliveryCopy
 } from "../shared/wechatDelivery";
-import {
-  hasWeChatMessageContext,
-  shouldOfferStoredSessionReuse
-} from "../shared/wechatSession";
 import { WeChatQrPanel } from "./WeChatQrPanel";
 
-/* ── Tab types ────────────────────────────────────────────────── */
-type SettingsTab = "connection" | "recipients" | "check" | "status";
+type SettingsTab = "recipients" | "connection" | "check" | "status";
 
-type SessionChoice = "pending" | "reuse" | "new";
-
-/* ── Props ────────────────────────────────────────────────────── */
 type SettingsWizardProps = {
   settings: AlertSettings;
   status: AlertStatus | null;
   saving: boolean;
-  wechatStatus: WeChatConnectorStatus;
+  wechatAccountsStatus: WeChatAccountsStatus;
   onClose: () => void;
   onSave: (settings: AlertSettings) => Promise<void>;
   onTest: (settings: AlertSettings) => Promise<void>;
-  onStartWeChat: () => Promise<void>;
-  onRefreshWeChat: () => Promise<void>;
-  onRefreshWeChatQr: () => Promise<void>;
-  onRestoreWeChat: () => Promise<void>;
-  onLogoutWeChat: () => Promise<void>;
-  onSwitchWeChat: () => Promise<void>;
-  onAddRecipient: (contactId: string, label: string) => Promise<void>;
-  onUpdateRecipient: (id: string, patch: { enabled?: boolean; contactId?: string; label?: string }) => Promise<void>;
-  onRemoveRecipient: (id: string) => Promise<void>;
-  onTestRecipient: (id: string) => Promise<void>;
+  onCreateWeChatAccount: () => Promise<WeChatAccountConnectorStatus | null>;
+  onRefreshWeChatAccounts: () => Promise<void>;
+  onRefreshWeChatAccountQr: (accountId: string) => Promise<void>;
+  onRestoreWeChatAccount: (accountId: string) => Promise<void>;
+  onLogoutWeChatAccount: (accountId: string) => Promise<void>;
+  onUpdateWeChatAccount: (accountId: string, patch: { label?: string; enabled?: boolean }) => Promise<void>;
+  onRemoveWeChatAccount: (accountId: string) => Promise<void>;
+  onVerifyWeChatAccount: (accountId: string, targetUserId?: string) => Promise<void>;
+  onTestWeChatAccount: (accountId: string) => Promise<void>;
 };
 
-/* ── Component ────────────────────────────────────────────────── */
 export function SettingsWizard({
   settings,
   status,
   saving,
-  wechatStatus,
+  wechatAccountsStatus,
   onClose,
   onSave,
   onTest,
-  onStartWeChat,
-  onRefreshWeChat,
-  onRefreshWeChatQr,
-  onRestoreWeChat,
-  onLogoutWeChat,
-  onSwitchWeChat,
-  onAddRecipient,
-  onUpdateRecipient,
-  onRemoveRecipient,
-  onTestRecipient
+  onCreateWeChatAccount,
+  onRefreshWeChatAccounts,
+  onRefreshWeChatAccountQr,
+  onRestoreWeChatAccount,
+  onLogoutWeChatAccount,
+  onUpdateWeChatAccount,
+  onRemoveWeChatAccount,
+  onVerifyWeChatAccount,
+  onTestWeChatAccount
 }: SettingsWizardProps) {
   const [draft, setDraft] = useState<AlertSettings>(settings);
-  const [activeTab, setActiveTab] = useState<SettingsTab>(deriveInitialTab);
-  const [actionError, setActionError] = useState<string | null>(null);
-  const [confirmAction, setConfirmAction] = useState<"logout" | "switch" | null>(null);
-  const [accountBusy, setAccountBusy] = useState(false);
-  const [sessionChoice, setSessionChoice] = useState<SessionChoice | null>(
-    () => initialSessionChoice(wechatStatus)
+  const [activeTab, setActiveTab] = useState<SettingsTab>("recipients");
+  const [selectedAccountId, setSelectedAccountId] = useState<string | null>(
+    wechatAccountsStatus.activeLoginAccountId ?? wechatAccountsStatus.accounts[0]?.id ?? null
   );
-
-  /* ── Add-recipient form state ───────────────────────────────── */
-  const [addContactId, setAddContactId] = useState("");
-  const [addLabel, setAddLabel] = useState("");
-  const [addingRecipient, setAddingRecipient] = useState(false);
-  const [showAddForm, setShowAddForm] = useState(false);
-
-  /* ── Delete confirmation state ──────────────────────────────── */
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [busyAccountId, setBusyAccountId] = useState<string | null>(null);
+  const [testingAccountId, setTestingAccountId] = useState<string | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
-  const [testingId, setTestingId] = useState<string | null>(null);
-  const [editingRecipientId, setEditingRecipientId] = useState<string | null>(null);
-  const [editContactId, setEditContactId] = useState("");
+  const [editingAccountId, setEditingAccountId] = useState<string | null>(null);
   const [editLabel, setEditLabel] = useState("");
-  const [updatingRecipientId, setUpdatingRecipientId] = useState<string | null>(null);
 
   const language = draft.language ?? "en";
   const copy = COPY[language];
-  const deliveryCopy = getWeChatDeliveryCopy(wechatStatus.delivery, language, wechatStatus.target);
-  const checklist = buildWeChatChecklist(wechatStatus, language);
-  const offerStoredSession = shouldOfferStoredSessionReuse(wechatStatus);
+  const accounts = wechatAccountsStatus.accounts;
+  const selectedAccount = useMemo(
+    () => accounts.find((account) => account.id === selectedAccountId) ?? accounts[0] ?? null,
+    [accounts, selectedAccountId]
+  );
+  const selectedConnector = selectedAccount?.connector ?? null;
+  const selectedDeliveryCopy = selectedConnector
+    ? getWeChatDeliveryCopy(selectedConnector.delivery, language, selectedConnector.target)
+    : null;
+  const selectedChecklist = selectedConnector ? buildWeChatChecklist(selectedConnector, language) : [];
 
-  /* ── Sync draft with external settings ──────────────────────── */
   useEffect(() => {
     setDraft(settings);
   }, [settings]);
 
-  /* ── Session choice initialization ──────────────────────────── */
   useEffect(() => {
-    if (sessionChoice != null) return;
-    setSessionChoice(initialSessionChoice(wechatStatus));
-  }, [sessionChoice, wechatStatus]);
+    if (wechatAccountsStatus.activeLoginAccountId) {
+      setSelectedAccountId(wechatAccountsStatus.activeLoginAccountId);
+      return;
+    }
+    if (selectedAccountId && accounts.some((account) => account.id === selectedAccountId)) {
+      return;
+    }
+    setSelectedAccountId(accounts[0]?.id ?? null);
+  }, [accounts, selectedAccountId, wechatAccountsStatus.activeLoginAccountId]);
 
-  /* ── Auto-advance from connection tab when logged in ────────── */
-  useEffect(() => {
-    if (sessionChoice === "pending") return;
-    if (!wechatStatus.loggedIn || activeTab !== "connection" || wechatStatus.awaitingQr) return;
-    // Don't auto-advance, let user explore
-  }, [sessionChoice, wechatStatus.loggedIn, activeTab, wechatStatus.awaitingQr]);
-
-  /* ── Derived state ──────────────────────────────────────────── */
-  const hasContext = hasWeChatMessageContext(wechatStatus, draft.wechatRoomId);
-  const showStoredSessionPrompt = sessionChoice === "pending" && offerStoredSession;
-  const loginUiActive = !wechatStatus.loggedIn && sessionChoice !== "pending";
-  const showQr = loginUiActive && Boolean(wechatStatus.qrUrl);
-  const waitingForQr =
-    loginUiActive &&
-    wechatStatus.awaitingQr &&
-    !wechatStatus.qrUrl &&
-    !wechatStatus.lastError;
-  const restoringSession = sessionChoice === "reuse" && !wechatStatus.loggedIn && !wechatStatus.lastError;
-  const loginFailed = !wechatStatus.loggedIn && Boolean(wechatStatus.lastError) && !wechatStatus.awaitingQr;
-  const showStartLogin =
-    loginUiActive &&
-    !showQr &&
-    !waitingForQr &&
-    !restoringSession &&
-    !loginFailed;
-
-  /* ── Tab configuration ──────────────────────────────────────── */
-  const tabs: Array<{ id: SettingsTab; label: string; badge?: string }> = useMemo(() => [
+  const tabs: Array<{ id: SettingsTab; label: string; badge?: string }> = [
     {
       id: "recipients",
       label: copy.tabs.recipients,
-      badge: settings.wechatRecipients.filter((r) => r.enabled).length > 0
-        ? String(settings.wechatRecipients.filter((r) => r.enabled).length)
-        : undefined
+      badge: wechatAccountsStatus.enabledCount > 0 ? String(wechatAccountsStatus.enabledCount) : undefined
     },
     {
       id: "connection",
       label: copy.tabs.connection,
-      badge: wechatStatus.loggedIn ? "●" : undefined
+      badge: selectedAccount?.connector.loggedIn ? "●" : undefined
     },
-    {
-      id: "check",
-      label: copy.tabs.check
-    },
-    {
-      id: "status",
-      label: copy.tabs.status
-    }
-  ], [copy, wechatStatus.loggedIn, settings.wechatRecipients]);
+    { id: "check", label: copy.tabs.check },
+    { id: "status", label: copy.tabs.status }
+  ];
 
-  /* ── Handlers ───────────────────────────────────────────────── */
   const handleSave = async () => {
     setActionError(null);
     try {
@@ -163,300 +134,140 @@ export function SettingsWizard({
     }
   };
 
-  const resetAfterAccountChange = () => {
-    setConfirmAction(null);
-    setSessionChoice("new");
-    setActiveTab("connection");
-  };
-
-  const handleRestoreSession = async () => {
-    setAccountBusy(true);
-    setActionError(null);
-    setSessionChoice("reuse");
-    try {
-      await onRestoreWeChat();
-    } catch (error) {
-      setSessionChoice("pending");
-      setActionError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setAccountBusy(false);
-    }
-  };
-
-  const handleNewSession = async () => {
-    setAccountBusy(true);
-    setActionError(null);
-    setSessionChoice("new");
-    try {
-      await onSwitchWeChat();
-    } catch (error) {
-      setActionError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setAccountBusy(false);
-    }
-  };
-
-  const handleAccountAction = async (action: "logout" | "switch") => {
-    setAccountBusy(true);
+  const handleCreateAccount = async () => {
+    setBusyAccountId("__new__");
     setActionError(null);
     try {
-      if (action === "logout") {
-        await onLogoutWeChat();
-      } else {
-        await onSwitchWeChat();
+      const account = await onCreateWeChatAccount();
+      if (account) {
+        setSelectedAccountId(account.id);
       }
-      resetAfterAccountChange();
+      setActiveTab("connection");
     } catch (error) {
       setActionError(error instanceof Error ? error.message : String(error));
     } finally {
-      setAccountBusy(false);
+      setBusyAccountId(null);
     }
   };
 
-  const handleAddRecipient = async () => {
-    if (!addContactId.trim()) return;
-    setAddingRecipient(true);
+  const runAccountAction = async (
+    accountId: string,
+    action: () => Promise<void>,
+    nextTab?: SettingsTab
+  ) => {
+    setBusyAccountId(accountId);
     setActionError(null);
     try {
-      await onAddRecipient(addContactId.trim(), addLabel.trim() || addContactId.trim());
-      setAddContactId("");
-      setAddLabel("");
-      setShowAddForm(false);
+      await action();
+      if (nextTab) setActiveTab(nextTab);
     } catch (error) {
       setActionError(error instanceof Error ? error.message : String(error));
     } finally {
-      setAddingRecipient(false);
+      setBusyAccountId(null);
     }
   };
 
-  const handleAddRecipientIntent = async () => {
-    setShowAddForm(false);
-    setAddContactId("");
-    setAddLabel("");
-    setActiveTab("connection");
-    setSessionChoice("new");
-    setActionError(null);
-    if (wechatStatus.awaitingQr || wechatStatus.qrUrl) {
-      return;
-    }
-
-    setAccountBusy(true);
-    try {
-      if (wechatStatus.loggedIn) {
-        await onSwitchWeChat();
-      } else {
-        await onStartWeChat();
-      }
-    } catch (error) {
-      setActionError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setAccountBusy(false);
-    }
-  };
-
-  const startEditRecipient = (recipient: WeChatRecipient) => {
+  const startEditAccount = (account: WeChatAccountConnectorStatus) => {
     setConfirmDeleteId(null);
-    setEditingRecipientId(recipient.id);
-    setEditContactId(recipient.contactId);
-    setEditLabel(recipient.label);
+    setEditingAccountId(account.id);
+    setEditLabel(account.label);
   };
 
-  const cancelEditRecipient = () => {
-    setEditingRecipientId(null);
-    setEditContactId("");
-    setEditLabel("");
+  const saveAccountLabel = async (account: WeChatAccountConnectorStatus) => {
+    if (!editLabel.trim()) return;
+    await runAccountAction(account.id, async () => {
+      await onUpdateWeChatAccount(account.id, { label: editLabel.trim() });
+      setEditingAccountId(null);
+      setEditLabel("");
+    });
   };
 
-  const handleSaveRecipientEdit = async (recipient: WeChatRecipient) => {
-    if (!editContactId.trim()) return;
-    setUpdatingRecipientId(recipient.id);
+  const handleTestAccount = async (accountId: string) => {
+    setTestingAccountId(accountId);
     setActionError(null);
     try {
-      await onUpdateRecipient(recipient.id, {
-        contactId: editContactId.trim(),
-        label: editLabel.trim() || editContactId.trim()
-      });
-      cancelEditRecipient();
+      await onTestWeChatAccount(accountId);
     } catch (error) {
       setActionError(error instanceof Error ? error.message : String(error));
     } finally {
-      setUpdatingRecipientId(null);
+      setTestingAccountId(null);
     }
   };
 
-  const handleRemoveRecipient = async (id: string) => {
-    setActionError(null);
-    try {
-      await onRemoveRecipient(id);
-      setConfirmDeleteId(null);
-      if (editingRecipientId === id) {
-        cancelEditRecipient();
-      }
-    } catch (error) {
-      setActionError(error instanceof Error ? error.message : String(error));
-    }
-  };
-
-  const handleToggleRecipient = async (id: string, enabled: boolean) => {
-    setActionError(null);
-    try {
-      await onUpdateRecipient(id, { enabled });
-    } catch (error) {
-      setActionError(error instanceof Error ? error.message : String(error));
-    }
-  };
-
-  const handleTestRecipient = async (id: string) => {
-    setTestingId(id);
-    setActionError(null);
-    try {
-      await onTestRecipient(id);
-    } catch (error) {
-      setActionError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setTestingId(null);
-    }
-  };
-
-  const handleStartLogin = async () => {
-    setAccountBusy(true);
-    setActionError(null);
-    setSessionChoice("new");
-    try {
-      await onStartWeChat();
-    } catch (error) {
-      setActionError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setAccountBusy(false);
-    }
-  };
-
-  const handleRefreshQr = async () => {
-    setAccountBusy(true);
-    setActionError(null);
-    setSessionChoice("new");
-    try {
-      await onRefreshWeChatQr();
-    } catch (error) {
-      setActionError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setAccountBusy(false);
-    }
-  };
-
-  const weChatLoginFlow = (
-    <>
-      {showStoredSessionPrompt ? (
-        <>
-          <h4>{copy.session.title}</h4>
-          <p className="sw-help">{copy.session.detail}</p>
-          <div className="sw-session-card">
-            <div className="sw-session-meta">
-              <div>
-                <span className="sw-meta-label">{copy.session.account}</span>
-                <strong>{wechatStatus.storedSession.botUserId ?? copy.account.unknownUser}</strong>
-              </div>
-              {wechatStatus.storedSession.savedAt ? (
-                <div>
-                  <span className="sw-meta-label">{copy.session.savedAt}</span>
-                  <strong>{formatDate(wechatStatus.storedSession.savedAt)}</strong>
-                </div>
-              ) : null}
-              {wechatStatus.storedSession.contextUserIds.length > 0 ? (
-                <div>
-                  <span className="sw-meta-label">{copy.session.contextCount}</span>
-                  <strong>{wechatStatus.storedSession.contextUserIds.length}</strong>
-                </div>
-              ) : null}
-            </div>
-            {wechatStatus.storedSession.verifiedForTarget ? (
-              <div className="sw-inline-success">{copy.session.verifiedTarget}</div>
-            ) : wechatStatus.storedSession.contextUserIds.length > 0 ? (
-              <div className="sw-hint">{copy.session.hasContext}</div>
-            ) : (
-              <div className="sw-hint">{copy.session.loginOnly}</div>
-            )}
-            <div className="sw-actions">
-              <button className="sw-btn primary" disabled={accountBusy || saving} onClick={() => void handleRestoreSession()}>
-                {copy.session.reuse}
-              </button>
-              <button className="sw-btn ghost" disabled={accountBusy || saving} onClick={() => void handleNewSession()}>
-                {copy.session.useNew}
-              </button>
-            </div>
-          </div>
-        </>
+  const renderAccountControls = (account: WeChatAccountConnectorStatus) => (
+    <div className="sw-recipient-controls">
+      <label className="sw-toggle" title={account.enabled ? copy.accounts.enabled : copy.accounts.disabled}>
+        <input
+          type="checkbox"
+          checked={account.enabled}
+          onChange={(event) => void runAccountAction(account.id, () =>
+            onUpdateWeChatAccount(account.id, { enabled: event.target.checked })
+          )}
+          disabled={saving || busyAccountId === account.id}
+        />
+        <span className="sw-toggle-track">
+          <span className="sw-toggle-thumb" />
+        </span>
+      </label>
+      <button
+        className="sw-btn-icon"
+        disabled={saving || busyAccountId === account.id}
+        onClick={() => {
+          setSelectedAccountId(account.id);
+          setActiveTab("connection");
+        }}
+        title={copy.accounts.connection}
+        aria-label={`${copy.accounts.connection}: ${account.label}`}
+      >
+        <LogIn size={13} />
+      </button>
+      <button
+        className="sw-btn-icon"
+        disabled={saving || busyAccountId === account.id}
+        onClick={() => startEditAccount(account)}
+        title={copy.accounts.edit}
+        aria-label={`${copy.accounts.edit}: ${account.label}`}
+      >
+        <Pencil size={13} />
+      </button>
+      <button
+        className="sw-btn-icon"
+        disabled={saving || testingAccountId === account.id || !account.enabled || !account.verified}
+        onClick={() => void handleTestAccount(account.id)}
+        title={copy.accounts.test}
+        aria-label={`${copy.accounts.test}: ${account.label}`}
+      >
+        <Send size={13} />
+      </button>
+      {confirmDeleteId === account.id ? (
+        <div className="sw-delete-confirm">
+          <button
+            className="sw-btn danger compact"
+            disabled={saving || busyAccountId === account.id}
+            onClick={() => void runAccountAction(account.id, () => onRemoveWeChatAccount(account.id))}
+          >
+            {copy.common.confirm}
+          </button>
+          <button className="sw-btn ghost compact" onClick={() => setConfirmDeleteId(null)}>
+            {copy.common.cancel}
+          </button>
+        </div>
       ) : (
-        <>
-          {wechatStatus.lastError && !wechatStatus.loggedIn ? (
-            <div className="notice error">{wechatStatus.lastError}</div>
-          ) : null}
-
-          {showQr ? (
-            <WeChatQrPanel
-              url={wechatStatus.qrUrl!}
-              language={language}
-              refreshing={accountBusy || saving}
-              onRefresh={() => void handleRefreshQr()}
-            />
-          ) : waitingForQr ? (
-            <div className="sw-waiting">{copy.connection.fetchingQr}</div>
-          ) : restoringSession ? (
-            <div className="sw-waiting">{copy.session.restoring}</div>
-          ) : wechatStatus.loggedIn ? (
-            <div className="sw-inline-success">{copy.connection.loggedIn}</div>
-          ) : loginFailed ? (
-            <div className="sw-actions">
-              <button className="sw-btn primary" disabled={saving || accountBusy} onClick={() => void handleStartLogin()}>
-                {copy.connection.retryLogin}
-              </button>
-            </div>
-          ) : showStartLogin ? (
-            <div className="sw-actions">
-              <button className="sw-btn primary" disabled={saving || accountBusy} onClick={() => void handleStartLogin()}>
-                {copy.connection.startLogin}
-              </button>
-            </div>
-          ) : null}
-
-          {wechatStatus.loggedIn && !hasContext ? (
-            <div className="sw-context-hint">
-              <p className="sw-help">{copy.connection.contextHint}</p>
-              {wechatStatus.recentChats.length > 0 ? (
-                <div className="sw-recent-chats">
-                  {wechatStatus.recentChats.map((chat) => (
-                    <div key={chat.userId} className="sw-chat-item">
-                      <strong>{chat.userId}</strong>
-                      <span>{chat.text || copy.connection.noPreview}</span>
-                      <span className="sw-chat-time">{formatDate(chat.receivedAt)}</span>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <div className="sw-waiting">{copy.connection.waitingMessage}</div>
-              )}
-              <div className="sw-actions">
-                <button className="sw-btn ghost" disabled={saving} onClick={() => void onRefreshWeChat()}>
-                  <RefreshCw size={14} />
-                  {copy.refreshStatus}
-                </button>
-              </div>
-            </div>
-          ) : null}
-        </>
+        <button
+          className="sw-btn-icon danger"
+          disabled={saving || busyAccountId === account.id}
+          onClick={() => setConfirmDeleteId(account.id)}
+          title={copy.accounts.remove}
+          aria-label={`${copy.accounts.remove}: ${account.label}`}
+        >
+          <Trash2 size={13} />
+        </button>
       )}
-    </>
+    </div>
   );
 
-  /* ── Render ─────────────────────────────────────────────────── */
   return (
-    <section
-      className="panel settings-panel settings-wizard"
-      aria-label="Settings"
-      role="dialog"
-      aria-modal="true"
-    >
-      {/* Header */}
+    <section className="panel settings-panel settings-wizard" aria-label="Settings" role="dialog" aria-modal="true">
       <div className="sw-header">
         <div className="sw-header-left">
           <Settings size={16} />
@@ -467,7 +278,6 @@ export function SettingsWizard({
         </button>
       </div>
 
-      {/* Tab Navigation */}
       <nav className="sw-tabs" aria-label={copy.tabsLabel}>
         {tabs.map((tab) => (
           <button
@@ -487,327 +297,303 @@ export function SettingsWizard({
         <span className="sw-tab-indicator" />
       </nav>
 
-      {/* Error banner */}
       {actionError ? <div className="notice error sw-notice">{actionError}</div> : null}
 
-      {/* Account card (shown when logged in, on connection tab) */}
-      {wechatStatus.loggedIn && activeTab === "connection" ? (
-        <div className="sw-account-card">
-          <div className="sw-account-main">
-            <div className="sw-account-avatar">
-              <UserRound size={18} />
-            </div>
-            <div className="sw-account-info">
-              <span className="sw-account-label">{copy.account.loggedInAs}</span>
-              <strong>{wechatStatus.botUserId ?? copy.account.unknownUser}</strong>
-            </div>
-          </div>
-          {confirmAction ? (
-            <div className="sw-account-confirm">
-              <p>{confirmAction === "logout" ? copy.account.confirmLogout : copy.account.confirmSwitch}</p>
-              <div className="sw-actions">
-                <button className="sw-btn danger" disabled={accountBusy || saving} onClick={() => void handleAccountAction(confirmAction)}>
-                  {copy.account.confirm}
-                </button>
-                <button className="sw-btn ghost" disabled={accountBusy || saving} onClick={() => setConfirmAction(null)}>
-                  {copy.account.cancel}
-                </button>
-              </div>
-            </div>
-          ) : (
-            <div className="sw-account-actions">
-              <button className="sw-btn-icon" disabled={accountBusy || saving} onClick={() => setConfirmAction("switch")} title={copy.account.switch}>
-                <RefreshCw size={14} />
-              </button>
-              <button className="sw-btn-icon danger" disabled={accountBusy || saving} onClick={() => setConfirmAction("logout")} title={copy.account.logout}>
-                <LogOut size={14} />
-              </button>
-            </div>
-          )}
-        </div>
-      ) : null}
-
-      {/* Tab Content */}
       <div className="sw-body">
-        {/* ── Connection Tab ─────────────────────────────────── */}
-        {activeTab === "connection" ? (
-          <div className="sw-tab-panel">
-            {showStoredSessionPrompt ? (
-              weChatLoginFlow
-            ) : (
-              <>
-                <h4>{copy.connection.title}</h4>
-                <p className="sw-help">{copy.connection.detail}</p>
-                {weChatLoginFlow}
-              </>
-            )}
-          </div>
-        ) : null}
-
-        {/* ── Recipients Tab ─────────────────────────────────── */}
         {activeTab === "recipients" ? (
           <div className="sw-tab-panel">
             <div className="sw-recipients-header">
               <div>
-                <h4>{copy.recipients.title}</h4>
-                <p className="sw-help">{copy.recipients.detail}</p>
+                <h4>{copy.accounts.title}</h4>
+                <p className="sw-help">{copy.accounts.detail}</p>
               </div>
-              {!showAddForm ? (
-                <button
-                  className="sw-btn primary compact"
-                  onClick={() => void handleAddRecipientIntent()}
-                  disabled={saving || accountBusy}
-                >
-                  <Plus size={14} />
-                  {copy.recipients.add}
-                </button>
-              ) : null}
+              <button
+                className="sw-btn primary compact"
+                onClick={() => void handleCreateAccount()}
+                disabled={saving || busyAccountId === "__new__"}
+              >
+                <Plus size={14} />
+                {copy.accounts.add}
+              </button>
             </div>
 
-            {!wechatStatus.loggedIn ? (
-              <div className="sw-recipients-login">
-                <h4>{copy.recipients.loginRequiredTitle}</h4>
-                <p className="sw-help">{copy.recipients.loginRequired}</p>
-              </div>
-            ) : (
-              <>
-
-            {/* Add recipient form */}
-            {showAddForm ? (
-              <div className="sw-add-form">
-                <div className="sw-add-form-fields">
-                  <div className="sw-field">
-                    <label>{copy.recipients.contactId}</label>
-                    <input
-                      value={addContactId}
-                      onChange={(e) => setAddContactId(e.target.value)}
-                      placeholder="user_id or 12345@chatroom"
-                      autoFocus
-                    />
-                  </div>
-                  <div className="sw-field">
-                    <label>{copy.recipients.labelField}</label>
-                    <input
-                      value={addLabel}
-                      onChange={(e) => setAddLabel(e.target.value)}
-                      placeholder={copy.recipients.labelPlaceholder}
-                    />
-                  </div>
-                </div>
-                {/* Auto-suggest from recent chats */}
-                {wechatStatus.recentChats.length > 0 ? (
-                  <div className="sw-suggestions">
-                    <span className="sw-suggestions-label">{copy.recipients.suggestions}:</span>
-                    {wechatStatus.recentChats.map((chat) => (
-                      <button
-                        key={chat.userId}
-                        className="sw-suggestion-chip"
-                        onClick={() => {
-                          setAddContactId(chat.userId);
-                          if (!addLabel) setAddLabel(chat.userId);
-                        }}
-                      >
-                        {chat.userId}
-                      </button>
-                    ))}
-                  </div>
-                ) : null}
-                <div className="sw-add-form-actions">
-                  <button
-                    className="sw-btn primary compact"
-                    disabled={addingRecipient || !addContactId.trim() || saving}
-                    onClick={() => void handleAddRecipient()}
-                  >
-                    {addingRecipient ? copy.recipients.adding : copy.recipients.addBtn}
-                  </button>
-                  <button
-                    className="sw-btn ghost compact"
-                    onClick={() => { setShowAddForm(false); setAddContactId(""); setAddLabel(""); }}
-                    disabled={addingRecipient}
-                  >
-                    {copy.account.cancel}
-                  </button>
-                </div>
-              </div>
-            ) : null}
-
-            {/* Recipient list */}
-            {settings.wechatRecipients.length > 0 ? (
+            {accounts.length > 0 ? (
               <div className="sw-recipient-list">
-                {settings.wechatRecipients.map((recipient) => (
-                  <div key={recipient.id} className={`sw-recipient-card${recipient.enabled ? " enabled" : " disabled"}`}>
-                    {editingRecipientId === recipient.id ? (
+                {accounts.map((account) => (
+                  <div
+                    key={account.id}
+                    className={`sw-recipient-card${account.enabled ? " enabled" : " disabled"}${account.verified ? " verified" : ""}`}
+                  >
+                    {editingAccountId === account.id ? (
                       <div className="sw-recipient-edit">
-                        <div className="sw-recipient-edit-fields">
+                        <div className="sw-recipient-edit-fields one">
                           <div className="sw-field">
-                            <label>{copy.recipients.contactId}</label>
-                            <input
-                              value={editContactId}
-                              onChange={(e) => setEditContactId(e.target.value)}
-                            />
-                          </div>
-                          <div className="sw-field">
-                            <label>{copy.recipients.labelField}</label>
-                            <input
-                              value={editLabel}
-                              onChange={(e) => setEditLabel(e.target.value)}
-                              placeholder={copy.recipients.labelPlaceholder}
-                            />
+                            <label>{copy.accounts.labelField}</label>
+                            <input value={editLabel} onChange={(event) => setEditLabel(event.target.value)} autoFocus />
                           </div>
                         </div>
                         <div className="sw-recipient-edit-actions">
                           <button
                             className="sw-btn primary compact"
-                            disabled={saving || updatingRecipientId === recipient.id || !editContactId.trim()}
-                            onClick={() => void handleSaveRecipientEdit(recipient)}
+                            disabled={saving || busyAccountId === account.id || !editLabel.trim()}
+                            onClick={() => void saveAccountLabel(account)}
                           >
                             <Check size={14} />
-                            {copy.recipients.saveRecipient}
+                            {copy.accounts.saveAccount}
                           </button>
                           <button
                             className="sw-btn ghost compact"
-                            disabled={updatingRecipientId === recipient.id}
-                            onClick={cancelEditRecipient}
+                            disabled={busyAccountId === account.id}
+                            onClick={() => {
+                              setEditingAccountId(null);
+                              setEditLabel("");
+                            }}
                           >
-                            {copy.account.cancel}
+                            {copy.common.cancel}
                           </button>
                         </div>
                       </div>
                     ) : (
                       <div className="sw-recipient-main">
                         <div className="sw-recipient-info">
-                          <strong className="sw-recipient-label">{recipient.label}</strong>
-                          {recipient.label !== recipient.contactId ? (
-                            <span className="sw-recipient-contact">{recipient.contactId}</span>
-                          ) : null}
-                          <span className="sw-recipient-date">
-                            {copy.recipients.added} {formatDate(recipient.addedAt)}
+                          <strong className="sw-recipient-label">{account.label}</strong>
+                          <span className="sw-recipient-contact">
+                            {account.botUserId ?? account.connector.botUserId ?? copy.accounts.pendingBotId}
                           </span>
+                          <span className="sw-recipient-date">
+                            {accountStatusLabel(account, copy)} · {copy.accounts.added} {formatDate(account.addedAt)}
+                          </span>
+                          {account.alertTargetUserId ? (
+                            <span className="sw-recipient-contact muted">{copy.accounts.target}: {account.alertTargetUserId}</span>
+                          ) : null}
                         </div>
-                        <div className="sw-recipient-controls">
-                          {/* Toggle switch */}
-                          <label className="sw-toggle" title={recipient.enabled ? copy.recipients.enabled : copy.recipients.disabled}>
-                            <input
-                              type="checkbox"
-                              checked={recipient.enabled}
-                              onChange={(e) => void handleToggleRecipient(recipient.id, e.target.checked)}
-                              disabled={saving}
-                            />
-                            <span className="sw-toggle-track">
-                              <span className="sw-toggle-thumb" />
-                            </span>
-                          </label>
-                          <button
-                            className="sw-btn-icon"
-                            disabled={saving}
-                            onClick={() => startEditRecipient(recipient)}
-                            title={copy.recipients.edit}
-                            aria-label={`${copy.recipients.edit}: ${recipient.label}`}
-                          >
-                            <Pencil size={13} />
-                          </button>
-                          {/* Test button */}
-                          <button
-                            className="sw-btn-icon"
-                            disabled={saving || testingId === recipient.id || !recipient.enabled}
-                            onClick={() => void handleTestRecipient(recipient.id)}
-                            title={copy.recipients.test}
-                            aria-label={`${copy.recipients.test}: ${recipient.label}`}
-                          >
-                            <Send size={13} />
-                          </button>
-                          {/* Delete button */}
-                          {confirmDeleteId === recipient.id ? (
-                            <div className="sw-delete-confirm">
-                              <button
-                                className="sw-btn danger compact"
-                                onClick={() => void handleRemoveRecipient(recipient.id)}
-                                disabled={saving}
-                              >
-                                {copy.account.confirm}
-                              </button>
-                              <button
-                                className="sw-btn ghost compact"
-                                onClick={() => setConfirmDeleteId(null)}
-                              >
-                                {copy.account.cancel}
-                              </button>
-                            </div>
-                          ) : (
-                            <button
-                              className="sw-btn-icon danger"
-                              onClick={() => setConfirmDeleteId(recipient.id)}
-                              disabled={saving}
-                              title={copy.recipients.remove}
-                              aria-label={`${copy.recipients.remove}: ${recipient.label}`}
-                            >
-                              <Trash2 size={13} />
-                            </button>
-                          )}
-                        </div>
+                        {renderAccountControls(account)}
                       </div>
                     )}
-                    {testingId === recipient.id ? (
-                      <div className="sw-recipient-testing">{copy.recipients.testing}</div>
+                    {testingAccountId === account.id ? (
+                      <div className="sw-recipient-testing">{copy.accounts.testing}</div>
+                    ) : null}
+                    {!account.verified && account.connector.loggedIn ? (
+                      <div className="sw-recipient-testing warning">{copy.accounts.needsVerification}</div>
                     ) : null}
                   </div>
                 ))}
               </div>
-            ) : !showAddForm ? (
+            ) : (
               <div className="sw-empty-state">
-                <p>{copy.recipients.empty}</p>
-                <button className="sw-btn primary" onClick={() => void handleAddRecipientIntent()}>
+                <p>{copy.accounts.empty}</p>
+                <button className="sw-btn primary" onClick={() => void handleCreateAccount()}>
                   <Plus size={14} />
-                  {copy.recipients.addFirst}
+                  {copy.accounts.addFirst}
                 </button>
               </div>
-            ) : null}
+            )}
 
-            {/* Global settings */}
             <div className="sw-global-settings">
-              <h4>{copy.recipients.globalSettings}</h4>
+              <h4>{copy.accounts.globalSettings}</h4>
               <div className="sw-settings-grid">
                 <div className="sw-field">
-                  <label>{copy.recipients.language}</label>
+                  <label>{copy.accounts.language}</label>
                   <select
                     value={draft.language ?? "en"}
-                    onChange={(e) => setDraft((c) => ({ ...c, language: e.target.value === "zh" ? "zh" : "en" }))}
+                    onChange={(event) => setDraft((current) => ({
+                      ...current,
+                      language: event.target.value === "zh" ? "zh" : "en"
+                    }))}
                   >
                     <option value="en">English</option>
                     <option value="zh">中文</option>
                   </select>
                 </div>
                 <div className="sw-field">
-                  <label>{copy.recipients.cooldown}</label>
+                  <label>{copy.accounts.cooldown}</label>
                   <input
                     type="number"
                     min="1"
                     value={draft.cooldownMinutes || ""}
-                    onChange={(e) => setDraft((c) => ({
-                      ...c,
-                      cooldownMinutes: e.target.value === "" ? 0 : Math.max(1, Number(e.target.value) || 1)
+                    onChange={(event) => setDraft((current) => ({
+                      ...current,
+                      cooldownMinutes: event.target.value === "" ? 0 : Math.max(1, Number(event.target.value) || 1)
                     }))}
                   />
-                  <span className="sw-field-hint">{copy.recipients.cooldownHelp}</span>
+                  <span className="sw-field-hint">{copy.accounts.cooldownHelp}</span>
                 </div>
               </div>
               <div className="sw-actions">
                 <button className="sw-btn primary" disabled={saving} onClick={() => void handleSave()}>
-                  {copy.recipients.saveSettings}
+                  {copy.accounts.saveSettings}
+                </button>
+                <button className="sw-btn ghost" disabled={saving} onClick={() => void onTest(draft)}>
+                  <Send size={14} />
+                  {copy.accounts.testAll}
                 </button>
               </div>
             </div>
+          </div>
+        ) : null}
+
+        {activeTab === "connection" ? (
+          <div className="sw-tab-panel">
+            <div className="sw-recipients-header">
+              <div>
+                <h4>{copy.connection.title}</h4>
+                <p className="sw-help">{copy.connection.detail}</p>
+              </div>
+              <button className="sw-btn ghost compact" disabled={saving} onClick={() => void onRefreshWeChatAccounts()}>
+                <RefreshCw size={14} />
+                {copy.refreshStatus}
+              </button>
+            </div>
+
+            {selectedAccount ? (
+              <>
+                <div className="sw-account-card">
+                  <div className="sw-account-main">
+                    <div className="sw-account-avatar">
+                      <UserRound size={18} />
+                    </div>
+                    <div className="sw-account-info">
+                      <span className="sw-account-label">{copy.connection.selected}</span>
+                      <strong>{selectedAccount.label}</strong>
+                    </div>
+                  </div>
+                  <div className="sw-account-actions">
+                    <button
+                      className="sw-btn-icon"
+                      disabled={saving || busyAccountId === selectedAccount.id}
+                      onClick={() => void runAccountAction(
+                        selectedAccount.id,
+                        () => onRefreshWeChatAccountQr(selectedAccount.id)
+                      )}
+                      title={copy.connection.refreshQr}
+                    >
+                      <RefreshCw size={14} />
+                    </button>
+                    <button
+                      className="sw-btn-icon danger"
+                      disabled={saving || busyAccountId === selectedAccount.id}
+                      onClick={() => void runAccountAction(
+                        selectedAccount.id,
+                        () => onLogoutWeChatAccount(selectedAccount.id)
+                      )}
+                      title={copy.connection.logout}
+                    >
+                      <LogOut size={14} />
+                    </button>
+                  </div>
+                </div>
+
+                {selectedConnector?.lastError && !selectedConnector.loggedIn ? (
+                  <div className="notice error">{selectedConnector.lastError}</div>
+                ) : null}
+
+                {selectedConnector?.qrUrl ? (
+                  <WeChatQrPanel
+                    url={selectedConnector.qrUrl}
+                    language={language}
+                    refreshing={saving || busyAccountId === selectedAccount.id}
+                    onRefresh={() => void runAccountAction(
+                      selectedAccount.id,
+                      () => onRefreshWeChatAccountQr(selectedAccount.id)
+                    )}
+                  />
+                ) : selectedConnector?.awaitingQr ? (
+                  <div className="sw-waiting">{copy.connection.fetchingQr}</div>
+                ) : selectedConnector?.loggedIn ? (
+                  <div className="sw-inline-success">{copy.connection.loggedIn}</div>
+                ) : (
+                  <div className="sw-actions">
+                    {selectedConnector?.storedSession.available ? (
+                      <button
+                        className="sw-btn ghost"
+                        disabled={saving || busyAccountId === selectedAccount.id}
+                        onClick={() => void runAccountAction(
+                          selectedAccount.id,
+                          () => onRestoreWeChatAccount(selectedAccount.id)
+                        )}
+                      >
+                        {copy.connection.restore}
+                      </button>
+                    ) : null}
+                    <button
+                      className="sw-btn primary"
+                      disabled={saving || busyAccountId === selectedAccount.id}
+                      onClick={() => void runAccountAction(
+                        selectedAccount.id,
+                        () => onRefreshWeChatAccountQr(selectedAccount.id)
+                      )}
+                    >
+                      {copy.connection.startLogin}
+                    </button>
+                  </div>
+                )}
+
+                {selectedConnector?.loggedIn && !selectedAccount.verified ? (
+                  <div className="sw-context-hint">
+                    <p className="sw-help">{copy.connection.contextHint}</p>
+                    {selectedConnector.recentChats.length > 0 ? (
+                      <div className="sw-recent-chats">
+                        {selectedConnector.recentChats.map((chat) => (
+                          <button
+                            key={chat.userId}
+                            className="sw-chat-item as-button"
+                            disabled={saving || busyAccountId === selectedAccount.id}
+                            onClick={() => void runAccountAction(
+                              selectedAccount.id,
+                              () => onVerifyWeChatAccount(selectedAccount.id, chat.userId)
+                            )}
+                          >
+                            <strong>{chat.userId}</strong>
+                            <span>{chat.text || copy.connection.noPreview}</span>
+                            <span className="sw-chat-time">{formatDate(chat.receivedAt)}</span>
+                          </button>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="sw-waiting">{copy.connection.waitingMessage}</div>
+                    )}
+                    <div className="sw-actions">
+                      <button
+                        className="sw-btn primary"
+                        disabled={saving || busyAccountId === selectedAccount.id}
+                        onClick={() => void runAccountAction(
+                          selectedAccount.id,
+                          () => onVerifyWeChatAccount(selectedAccount.id)
+                        )}
+                      >
+                        <Check size={14} />
+                        {copy.connection.verify}
+                      </button>
+                      <button className="sw-btn ghost" disabled={saving} onClick={() => void onRefreshWeChatAccounts()}>
+                        <RefreshCw size={14} />
+                        {copy.refreshStatus}
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
+
+                {selectedAccount.verified ? (
+                  <div className="sw-inline-success">
+                    {copy.connection.verified} {selectedAccount.alertTargetUserId}
+                  </div>
+                ) : null}
               </>
+            ) : (
+              <div className="sw-empty-state">
+                <p>{copy.connection.empty}</p>
+                <button className="sw-btn primary" onClick={() => void handleCreateAccount()}>
+                  <Plus size={14} />
+                  {copy.accounts.addFirst}
+                </button>
+              </div>
             )}
           </div>
         ) : null}
 
-        {/* ── Connection Check Tab ───────────────────────────── */}
         {activeTab === "check" ? (
           <div className="sw-tab-panel">
             <h4>{copy.check.title}</h4>
             <p className="sw-help">{copy.check.detail}</p>
-
             <div className="sw-global-settings">
               <div className="sw-settings-grid">
                 <div className="sw-field">
@@ -816,11 +602,9 @@ export function SettingsWizard({
                     type="number"
                     min="1"
                     value={draft.sshConnectTimeoutSeconds || ""}
-                    onChange={(e) => setDraft((c) => ({
-                      ...c,
-                      sshConnectTimeoutSeconds: e.target.value === ""
-                        ? 0
-                        : Math.max(1, Number(e.target.value) || 1)
+                    onChange={(event) => setDraft((current) => ({
+                      ...current,
+                      sshConnectTimeoutSeconds: event.target.value === "" ? 0 : Math.max(1, Number(event.target.value) || 1)
                     }))}
                   />
                   <span className="sw-field-hint">{copy.check.connectTimeoutHelp}</span>
@@ -831,11 +615,9 @@ export function SettingsWizard({
                     type="number"
                     min="1"
                     value={draft.sshCommandTimeoutSeconds || ""}
-                    onChange={(e) => setDraft((c) => ({
-                      ...c,
-                      sshCommandTimeoutSeconds: e.target.value === ""
-                        ? 0
-                        : Math.max(1, Number(e.target.value) || 1)
+                    onChange={(event) => setDraft((current) => ({
+                      ...current,
+                      sshCommandTimeoutSeconds: event.target.value === "" ? 0 : Math.max(1, Number(event.target.value) || 1)
                     }))}
                   />
                   <span className="sw-field-hint">{copy.check.commandTimeoutHelp}</span>
@@ -851,99 +633,78 @@ export function SettingsWizard({
           </div>
         ) : null}
 
-        {/* ── Status Tab ─────────────────────────────────────── */}
         {activeTab === "status" ? (
           <div className="sw-tab-panel">
             <h4>{copy.status.title}</h4>
             <p className="sw-help">{copy.status.detail}</p>
 
-            {/* Delivery banner */}
-            <div className={`sw-delivery-banner severity-${wechatStatus.delivery.severity}`}>
-              <div className="sw-delivery-copy">
-                <strong>{deliveryCopy.title}</strong>
-                <p>{deliveryCopy.detail}</p>
-                {deliveryCopy.action ? <p className="sw-delivery-action">{deliveryCopy.action}</p> : null}
-              </div>
-            </div>
-
-            {/* Checklist */}
-            <div className="sw-checklist">
-              {checklist.map((item) => (
-                <div key={item.id} className={`sw-checklist-item state-${item.state}`}>
-                  <span className="sw-checklist-icon" aria-hidden="true">
-                    {item.state === "done" ? "✓" : item.state === "error" ? "!" : item.state === "active" ? "…" : "○"}
-                  </span>
-                  <div>
-                    <strong>{item.title}</strong>
-                    <span>{item.detail}</span>
-                  </div>
-                </div>
-              ))}
-            </div>
-
-            {/* Status grid */}
             <div className="sw-status-grid">
               <div>
-                <span className="sw-status-label">{copy.status.botLogin}</span>
-                <strong>{wechatStatus.loggedIn ? copy.status.online : copy.status.offline}</strong>
+                <span className="sw-status-label">{copy.status.accounts}</span>
+                <strong>{accounts.length}</strong>
               </div>
               <div>
-                <span className="sw-status-label">{copy.status.polling}</span>
-                <strong>{wechatStatus.polling && wechatStatus.ready ? copy.status.running : copy.status.stopped}</strong>
+                <span className="sw-status-label">{copy.status.enabledAccounts}</span>
+                <strong>{wechatAccountsStatus.enabledCount}</strong>
+              </div>
+              <div>
+                <span className="sw-status-label">{copy.status.verifiedAccounts}</span>
+                <strong>{wechatAccountsStatus.verifiedCount}</strong>
               </div>
               <div>
                 <span className="sw-status-label">{copy.status.alertStatus}</span>
                 <strong>{status?.enabled && status.configured ? copy.status.enabled : copy.status.disabled}</strong>
               </div>
-              <div>
-                <span className="sw-status-label">{copy.status.delivery}</span>
-                <strong>{deliveryCopy.title}</strong>
-              </div>
-              {wechatStatus.target ? (
-                <>
-                  <div>
-                    <span className="sw-status-label">{copy.status.botAccount}</span>
-                    <strong>{wechatStatus.botUserId ?? "-"}</strong>
-                  </div>
-                  <div>
-                    <span className="sw-status-label">{copy.status.lastInbound}</span>
-                    <strong>{formatDate(wechatStatus.target.lastInboundAt)}</strong>
-                  </div>
-                  <div>
-                    <span className="sw-status-label">{copy.status.lastSuccess}</span>
-                    <strong>{formatDate(wechatStatus.target.lastSendSuccessAt)}</strong>
-                  </div>
-                </>
-              ) : wechatStatus.botUserId ? (
-                <div>
-                  <span className="sw-status-label">{copy.status.botAccount}</span>
-                  <strong>{wechatStatus.botUserId}</strong>
-                </div>
-              ) : null}
-              {wechatStatus.lastError ? (
-                <div className="sw-status-span-2">
-                  <span className="sw-status-label">{copy.status.lastError}</span>
-                  <strong className="sw-error-text">{wechatStatus.lastError}</strong>
-                </div>
-              ) : null}
             </div>
 
-            {/* Recipients summary */}
-            {settings.wechatRecipients.length > 0 ? (
+            {selectedDeliveryCopy ? (
+              <div className={`sw-delivery-banner severity-${selectedConnector?.delivery.severity}`}>
+                <div className="sw-delivery-copy">
+                  <strong>{selectedDeliveryCopy.title}</strong>
+                  <p>{selectedDeliveryCopy.detail}</p>
+                  {selectedDeliveryCopy.action ? <p className="sw-delivery-action">{selectedDeliveryCopy.action}</p> : null}
+                </div>
+              </div>
+            ) : null}
+
+            {selectedChecklist.length > 0 ? (
+              <div className="sw-checklist">
+                {selectedChecklist.map((item) => (
+                  <div key={item.id} className={`sw-checklist-item state-${item.state}`}>
+                    <span className="sw-checklist-icon" aria-hidden="true">
+                      {item.state === "done" ? "✓" : item.state === "error" ? "!" : item.state === "active" ? "…" : "○"}
+                    </span>
+                    <div>
+                      <strong>{item.title}</strong>
+                      <span>{item.detail}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+
+            {accounts.length > 0 ? (
               <div className="sw-recipients-summary">
                 <span className="sw-status-label">{copy.status.activeRecipients}</span>
                 <div className="sw-recipients-chips">
-                  {settings.wechatRecipients.map((r) => (
-                    <span key={r.id} className={`sw-recipient-chip${r.enabled ? " active" : ""}`}>
-                      {r.label}
-                    </span>
+                  {accounts.map((account) => (
+                    <button
+                      key={account.id}
+                      className={`sw-recipient-chip${account.enabled && account.verified ? " active" : ""}`}
+                      onClick={() => {
+                        setSelectedAccountId(account.id);
+                        setActiveTab("connection");
+                      }}
+                    >
+                      {account.label}
+                    </button>
                   ))}
                 </div>
               </div>
             ) : null}
 
             <div className="sw-actions">
-              <button className="sw-btn ghost" disabled={saving} onClick={() => void onRefreshWeChat()}>
+              <button className="sw-btn ghost" disabled={saving} onClick={() => void onRefreshWeChatAccounts()}>
                 <RefreshCw size={14} />
                 {copy.refreshStatus}
               </button>
@@ -958,95 +719,83 @@ export function SettingsWizard({
   );
 }
 
-/* ── Helpers ──────────────────────────────────────────────────── */
-
-function initialSessionChoice(wechatStatus: WeChatConnectorStatus): SessionChoice {
-  if (wechatStatus.loggedIn) return "reuse";
-  if (shouldOfferStoredSessionReuse(wechatStatus)) return "pending";
-  return "new";
-}
-
-function deriveInitialTab(): SettingsTab {
-  return "recipients";
+function accountStatusLabel(
+  account: WeChatAccountConnectorStatus,
+  copy: (typeof COPY)[keyof typeof COPY]
+): string {
+  if (account.verified) return copy.accounts.verified;
+  if (account.connector.loggedIn) return copy.accounts.loggedIn;
+  if (account.connector.awaitingQr || account.connector.qrUrl) return copy.accounts.waitingScan;
+  if (account.connector.lastError) return copy.accounts.error;
+  return copy.accounts.notConnected;
 }
 
 function formatDate(value: string | null | undefined): string {
   return value ? new Date(value).toLocaleString() : "-";
 }
 
-/* ── Bilingual copy ──────────────────────────────────────────── */
 const COPY = {
   en: {
     title: "WeChat Alert Settings",
     tabsLabel: "Settings sections",
+    refreshStatus: "Refresh",
     tabs: {
       recipients: "Recipients",
       connection: "Connection",
       check: "Connection Check",
       status: "Status"
     },
-    refreshStatus: "Refresh",
-    session: {
-      title: "Previous session found",
-      detail: "A saved bot login was detected. Reuse it to skip QR scan when the cached connection is still valid.",
-      account: "Saved account",
-      savedAt: "Last saved",
-      contextCount: "Cached contacts",
-      verifiedTarget: "Session matches your configured alert target.",
-      hasContext: "Cached message sessions found. You can reuse this connection.",
-      loginOnly: "Only login credentials cached. You may still need to send a setup message.",
-      reuse: "Continue with saved session",
-      useNew: "Sign in with another account",
-      restoring: "Restoring saved session…"
-    },
-    account: {
-      loggedInAs: "Logged in as",
-      unknownUser: "WeChat bot (ID pending)",
-      switch: "Switch account",
-      logout: "Log out",
+    common: {
       confirm: "Confirm",
-      cancel: "Cancel",
-      confirmLogout: "Log out the current bot? Alert delivery will stop until you scan a new QR code.",
-      confirmSwitch: "Switch to another account? You will need to scan a new QR code."
+      cancel: "Cancel"
     },
-    connection: {
-      title: "Bot Connection",
-      detail: "Start WeChat login, then scan the QR code with your phone to authorize the bot.",
-      startLogin: "Start WeChat Login",
-      retryLogin: "Retry Login",
-      fetchingQr: "Fetching login QR code…",
-      loggedIn: "Bot connected successfully.",
-      contextHint: "Send any message from your WeChat to the bot to establish the session token for proactive alerts.",
-      waitingMessage: "Waiting for an inbound message…",
-      noPreview: "No text preview"
-    },
-    recipients: {
-      title: "Notification Recipients",
-      detail: "Manage WeChat accounts that receive alert notifications.",
+    accounts: {
+      title: "Alert Recipients",
+      detail: "Each recipient signs in with their own WeChat ClawBot account. Alerts are sent to every enabled, verified account.",
       add: "Add",
       addFirst: "Add first recipient",
-      addBtn: "Add recipient",
-      adding: "Adding…",
-      edit: "Edit recipient",
-      saveRecipient: "Save recipient",
-      contactId: "WeChat Contact ID",
+      empty: "No recipients configured yet.",
       labelField: "Display Name",
-      labelPlaceholder: "e.g. Team Lead, Ops Room",
-      suggestions: "Recent contacts",
-      empty: "No recipients configured yet. Add a WeChat contact to start receiving alerts.",
-      loginRequiredTitle: "Log in the bot first",
-      loginRequired: "Adding a recipient opens a new QR login flow in the Connection tab.",
-      added: "Added",
-      enabled: "Receiving alerts",
-      disabled: "Alerts paused",
+      saveAccount: "Save recipient",
+      edit: "Edit recipient",
+      remove: "Remove recipient",
+      connection: "Open connection",
       test: "Send test alert",
       testing: "Sending test alert…",
-      remove: "Remove recipient",
+      testAll: "Test all",
+      enabled: "Receiving alerts",
+      disabled: "Alerts paused",
+      added: "Added",
+      target: "Verified target",
+      pendingBotId: "WeChat account pending",
+      needsVerification: "Logged in, waiting for verification message.",
+      verified: "Verified",
+      loggedIn: "Logged in",
+      waitingScan: "Waiting for scan",
+      error: "Connection error",
+      notConnected: "Not connected",
       globalSettings: "Alert Settings",
       language: "Alert Language",
       cooldown: "Alert Interval (min)",
       cooldownHelp: "Minimum interval between auto alerts. Manual refresh always sends.",
       saveSettings: "Save Settings"
+    },
+    connection: {
+      title: "Recipient Connection",
+      detail: "Add a recipient from the first tab, then scan the QR code here to authorize that WeChat account.",
+      selected: "Selected recipient",
+      startLogin: "Generate login QR",
+      refreshQr: "Refresh QR",
+      fetchingQr: "Fetching login QR code…",
+      restore: "Restore saved session",
+      logout: "Log out",
+      loggedIn: "WeChat account is connected.",
+      contextHint: "After QR login, send any message from this WeChat account to ClawBot, then select the latest message to verify alert delivery.",
+      waitingMessage: "Waiting for an inbound message…",
+      verify: "Verify recipient",
+      verified: "Verified delivery target:",
+      noPreview: "No text preview",
+      empty: "Choose or add a recipient before connecting."
     },
     check: {
       title: "Connection Check Settings",
@@ -1059,21 +808,13 @@ const COPY = {
     },
     status: {
       title: "Connection Status",
-      detail: "Review bot login, polling, and alert delivery status.",
-      botLogin: "Bot Login",
-      botAccount: "Bot Account",
-      polling: "Polling",
+      detail: "Review WeChat account, verification, polling, and alert delivery status.",
+      accounts: "Accounts",
+      enabledAccounts: "Enabled",
+      verifiedAccounts: "Verified",
       alertStatus: "Alerts",
-      delivery: "Delivery",
-      online: "Connected",
-      offline: "Disconnected",
-      running: "Running",
-      stopped: "Stopped",
       enabled: "Enabled",
       disabled: "Disabled",
-      lastInbound: "Last Message",
-      lastSuccess: "Last Sent",
-      lastError: "Last Error",
       saveSettings: "Save Settings",
       activeRecipients: "Recipients"
     }
@@ -1081,74 +822,64 @@ const COPY = {
   zh: {
     title: "微信告警设置",
     tabsLabel: "设置项",
+    refreshStatus: "刷新",
     tabs: {
       recipients: "接收人",
       connection: "连接",
       check: "连接检查",
       status: "状态"
     },
-    refreshStatus: "刷新",
-    session: {
-      title: "检测到已保存的会话",
-      detail: "服务器上已有 Bot 登录缓存。若连接仍有效，复用后可跳过扫码步骤。",
-      account: "已保存账号",
-      savedAt: "上次保存",
-      contextCount: "已缓存联系人",
-      verifiedTarget: "缓存会话与当前配置的告警目标一致。",
-      hasContext: "检测到已缓存的消息会话，可复用并继续。",
-      loginOnly: "仅检测到登录凭证。复用后可能仍需发送消息建立会话。",
-      reuse: "继续复用此会话",
-      useNew: "登录新账号",
-      restoring: "正在恢复会话…"
-    },
-    account: {
-      loggedInAs: "当前登录",
-      unknownUser: "微信 Bot（ID 同步中）",
-      switch: "切换账号",
-      logout: "退出登录",
+    common: {
       confirm: "确认",
-      cancel: "取消",
-      confirmLogout: "确定退出当前 Bot？退出后告警将暂停。",
-      confirmSwitch: "确定切换账号？需重新扫码登录。"
+      cancel: "取消"
     },
-    connection: {
-      title: "Bot 连接",
-      detail: "启动微信登录后，用手机微信扫描二维码完成授权。",
-      startLogin: "开始微信登录",
-      retryLogin: "重试登录",
-      fetchingQr: "正在获取登录二维码…",
-      loggedIn: "Bot 已成功连接。",
-      contextHint: "请用接收告警的微信账号给 Bot 发送任意一条消息，以建立会话。",
-      waitingMessage: "等待入站消息…",
-      noPreview: "无文本预览"
-    },
-    recipients: {
-      title: "通知接收人",
-      detail: "管理接收告警通知的微信账号。",
+    accounts: {
+      title: "告警接收人",
+      detail: "每个接收人用自己的微信 ClawBot 扫码登录。告警会发送给所有启用且已验证的账号。",
       add: "添加",
       addFirst: "添加第一个接收人",
-      addBtn: "添加接收人",
-      adding: "添加中…",
-      edit: "编辑接收人",
-      saveRecipient: "保存接收人",
-      contactId: "微信联系人 ID",
+      empty: "尚未配置接收人。",
       labelField: "显示名称",
-      labelPlaceholder: "例如：运维组、技术负责人",
-      suggestions: "最近联系人",
-      empty: "尚未配置接收人。添加微信联系人以开始接收告警。",
-      loginRequiredTitle: "请先登录 Bot",
-      loginRequired: "点击添加会跳转到连接页，并启动新的微信扫码登录流程。",
-      added: "添加于",
-      enabled: "接收告警中",
-      disabled: "告警已暂停",
+      saveAccount: "保存接收人",
+      edit: "编辑接收人",
+      remove: "移除接收人",
+      connection: "打开连接",
       test: "发送测试告警",
       testing: "正在发送测试告警…",
-      remove: "移除接收人",
+      testAll: "测试全部",
+      enabled: "接收告警中",
+      disabled: "告警已暂停",
+      added: "添加于",
+      target: "验证目标",
+      pendingBotId: "微信账号待同步",
+      needsVerification: "已登录，等待验证消息。",
+      verified: "已验证",
+      loggedIn: "已登录",
+      waitingScan: "等待扫码",
+      error: "连接异常",
+      notConnected: "未连接",
       globalSettings: "告警设置",
       language: "告警语言",
       cooldown: "告警间隔（分钟）",
       cooldownHelp: "自动检查的最小间隔。手动刷新始终发送。",
       saveSettings: "保存设置"
+    },
+    connection: {
+      title: "接收人连接",
+      detail: "先在第一个 tab 添加接收人，然后在这里扫描二维码授权该微信账号。",
+      selected: "当前接收人",
+      startLogin: "生成登录二维码",
+      refreshQr: "刷新二维码",
+      fetchingQr: "正在获取登录二维码…",
+      restore: "恢复已保存会话",
+      logout: "退出登录",
+      loggedIn: "微信账号已连接。",
+      contextHint: "扫码登录后，请用该微信账号给 ClawBot 发送任意消息，然后选择最新消息完成告警验证。",
+      waitingMessage: "等待入站消息…",
+      verify: "验证接收人",
+      verified: "已验证投递目标：",
+      noPreview: "无文本预览",
+      empty: "请先选择或添加接收人。"
     },
     check: {
       title: "连接检查设置",
@@ -1161,21 +892,13 @@ const COPY = {
     },
     status: {
       title: "连接状态",
-      detail: "查看 Bot 登录、轮询和告警投递状态。",
-      botLogin: "Bot 登录",
-      botAccount: "Bot 账号",
-      polling: "消息轮询",
+      detail: "查看微信账号、验证、轮询和告警投递状态。",
+      accounts: "账号数",
+      enabledAccounts: "已启用",
+      verifiedAccounts: "已验证",
       alertStatus: "告警开关",
-      delivery: "投递状态",
-      online: "已连接",
-      offline: "未连接",
-      running: "运行中",
-      stopped: "未运行",
       enabled: "已启用",
       disabled: "未启用",
-      lastInbound: "最近消息",
-      lastSuccess: "最近发送",
-      lastError: "最近错误",
       saveSettings: "保存设置",
       activeRecipients: "接收人"
     }

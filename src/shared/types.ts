@@ -43,12 +43,30 @@ export type WeChatRecipient = {
   addedAt: string;
 };
 
+/** A logged-in WeChat ClawBot account that can receive alert pushes. */
+export type WeChatAccount = {
+  /** Stable local account identifier. */
+  id: string;
+  /** User-friendly display label. */
+  label: string;
+  /** Whether this account is active for alert delivery. */
+  enabled: boolean;
+  /** ISO timestamp when this account entry was created. */
+  addedAt: string;
+  /** WeChat account id returned by the login credentials, if known. */
+  botUserId: string | null;
+  /** User id that has produced a valid context token for proactive alert pushes. */
+  alertTargetUserId: string | null;
+};
+
 export type AlertSettings = {
   enabled: boolean;
   /** Legacy single target — derived from the first enabled recipient. */
   wechatRoomId: string;
   /** All configured notification recipients. */
   wechatRecipients: WeChatRecipient[];
+  /** Logged-in personal WeChat accounts used as alert recipients. */
+  wechatAccounts: WeChatAccount[];
   cooldownMinutes: number;
   language: "en" | "zh";
   /** SSH command execution timeout in seconds. */
@@ -95,6 +113,19 @@ export type WeChatConnectorStatus = {
   recentChats: WeChatChatCandidate[];
   delivery: WeChatDeliveryInfo;
   target: WeChatTargetActivity | null;
+};
+
+export type WeChatAccountConnectorStatus = WeChatAccount & {
+  storageDir: string;
+  verified: boolean;
+  connector: WeChatConnectorStatus;
+};
+
+export type WeChatAccountsStatus = {
+  accounts: WeChatAccountConnectorStatus[];
+  activeLoginAccountId: string | null;
+  enabledCount: number;
+  verifiedCount: number;
 };
 
 export const PIPELINE_FILE_STATUSES = [

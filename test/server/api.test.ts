@@ -154,6 +154,7 @@ describe("monitor API", () => {
       enabled: false,
       wechatRoomId: "",
       wechatRecipients: [],
+      wechatAccounts: [],
       cooldownMinutes: 60,
       language: "en",
       sshCommandTimeoutSeconds: 15,
@@ -245,6 +246,66 @@ describe("monitor API", () => {
     expect(sent[0]?.message).toContain("Server Monitor test alert");
   });
 
+  it("sends a global test alert to every enabled verified WeChat account", async () => {
+    const sent: Array<{ message: string; targetId: string }> = [];
+
+    const response = await request(createApp({
+      db,
+      refreshService: service,
+      alertSettingsPath,
+      sendTestAlert: async (message, targetId) => {
+        sent.push({ message, targetId });
+      }
+    }))
+      .post("/api/settings/alerts/test")
+      .send({
+        enabled: true,
+        wechatRoomId: "",
+        wechatRecipients: [
+          {
+            id: "recipient-1",
+            contactId: "legacy@im.wechat",
+            label: "Legacy",
+            enabled: true,
+            addedAt: "2026-05-20T10:00:00.000Z"
+          }
+        ],
+        wechatAccounts: [
+          {
+            id: "account-1",
+            label: "One",
+            enabled: true,
+            addedAt: "2026-05-20T10:00:00.000Z",
+            botUserId: "bot-one@im.wechat",
+            alertTargetUserId: "one@im.wechat"
+          },
+          {
+            id: "account-2",
+            label: "Two",
+            enabled: true,
+            addedAt: "2026-05-20T10:00:00.000Z",
+            botUserId: "bot-two@im.wechat",
+            alertTargetUserId: "two@im.wechat"
+          },
+          {
+            id: "account-3",
+            label: "Pending",
+            enabled: true,
+            addedAt: "2026-05-20T10:00:00.000Z",
+            botUserId: "pending@im.wechat",
+            alertTargetUserId: null
+          }
+        ],
+        cooldownMinutes: 15,
+        language: "en"
+      });
+
+    expect(response.status).toBe(202);
+    expect(response.body.targetCount).toBe(2);
+    expect(sent.map((item) => item.targetId)).toEqual(["account-1", "account-2"]);
+    expect(sent[0]?.message).toContain("Server Monitor test alert");
+  });
+
   it("sends a Chinese test alert when alert language is zh", async () => {
     const sent: string[] = [];
 
@@ -305,6 +366,145 @@ describe("monitor API", () => {
     expect(response.body.loggedIn).toBe(true);
     expect(response.body.storedSession.available).toBe(true);
     expect(response.body.recentChats[0].userId).toBe("12345@chatroom");
+  });
+
+  it("returns WeChat account status list", async () => {
+    const response = await request(createApp({
+      db,
+      refreshService: service,
+      getWeChatAccountsStatus: () => ({
+        accounts: [
+          {
+            id: "account-1",
+            label: "Ops owner",
+            enabled: true,
+            addedAt: "2026-05-20T10:00:00.000Z",
+            botUserId: "bot@im.wechat",
+            alertTargetUserId: "owner@im.wechat",
+            storageDir: "/tmp/wechat-account",
+            verified: true,
+            connector: {
+              started: true,
+              loggedIn: true,
+              polling: true,
+              ready: true,
+              qrUrl: null,
+              awaitingQr: false,
+              botUserId: "bot@im.wechat",
+              storedSession: {
+                available: true,
+                botUserId: "bot@im.wechat",
+                savedAt: "2026-05-20T10:00:00.000Z",
+                contextUserIds: ["owner@im.wechat"],
+                verifiedForTarget: true
+              },
+              lastError: null,
+              messageCount: 1,
+              lastMessageAt: "2026-05-20T10:00:00.000Z",
+              recentChats: [],
+              target: null,
+              delivery: { phase: "ready", severity: "success" }
+            }
+          }
+        ],
+        activeLoginAccountId: null,
+        enabledCount: 1,
+        verifiedCount: 1
+      })
+    })).get("/api/settings/wechat/accounts");
+
+    expect(response.status).toBe(200);
+    expect(response.body.accounts[0].label).toBe("Ops owner");
+    expect(response.body.verifiedCount).toBe(1);
+  });
+
+  it("creates a WeChat account and starts a QR login flow", async () => {
+    const createWeChatAccount = vi.fn(async () => ({
+      id: "account-1",
+      label: "WeChat 1",
+      enabled: true,
+      addedAt: "2026-05-20T10:00:00.000Z",
+      botUserId: null,
+      alertTargetUserId: null,
+      storageDir: "/tmp/wechat-account",
+      verified: false,
+      connector: {
+        started: true,
+        loggedIn: false,
+        polling: false,
+        ready: false,
+        qrUrl: "https://example.com/qr",
+        awaitingQr: true,
+        botUserId: null,
+        storedSession: {
+          available: false,
+          botUserId: null,
+          savedAt: null,
+          contextUserIds: [],
+          verifiedForTarget: false
+        },
+        lastError: null,
+        messageCount: 0,
+        lastMessageAt: null,
+        recentChats: [],
+        target: null,
+        delivery: { phase: "awaiting_qr" as const, severity: "warning" as const }
+      }
+    }));
+    const getWeChatAccountsStatus = () => ({
+      accounts: [
+        {
+          id: "account-1",
+          label: "WeChat 1",
+          enabled: true,
+          addedAt: "2026-05-20T10:00:00.000Z",
+          botUserId: null,
+          alertTargetUserId: null,
+          storageDir: "/tmp/wechat-account",
+          verified: false,
+          connector: {
+            started: true,
+            loggedIn: false,
+            polling: false,
+            ready: false,
+            qrUrl: "https://example.com/qr",
+            awaitingQr: true,
+            botUserId: null,
+            storedSession: {
+              available: false,
+              botUserId: null,
+              savedAt: null,
+              contextUserIds: [],
+              verifiedForTarget: false
+            },
+            lastError: null,
+            messageCount: 0,
+            lastMessageAt: null,
+            recentChats: [],
+            target: null,
+            delivery: { phase: "awaiting_qr" as const, severity: "warning" as const }
+          }
+        }
+      ],
+      activeLoginAccountId: "account-1",
+      enabledCount: 1,
+      verifiedCount: 0
+    });
+
+    const response = await request(createApp({
+      db,
+      refreshService: service,
+      alertSettingsPath,
+      createWeChatAccount,
+      getWeChatAccountsStatus
+    }))
+      .post("/api/settings/wechat/accounts")
+      .send({});
+
+    expect(response.status).toBe(201);
+    expect(createWeChatAccount).toHaveBeenCalledTimes(1);
+    expect(response.body.account.connector.qrUrl).toBe("https://example.com/qr");
+    expect(response.body.wechatAccounts.activeLoginAccountId).toBe("account-1");
   });
 
   it("starts the WeChat connector", async () => {

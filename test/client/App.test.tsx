@@ -161,6 +161,61 @@ const storageMock = {
   key: () => null
 };
 
+const emptyWeChatAccountsStatus = {
+  accounts: [],
+  activeLoginAccountId: null,
+  enabledCount: 0,
+  verifiedCount: 0
+};
+
+function weChatAccountStatus(overrides: Record<string, unknown> = {}) {
+  const connectorOverrides = (overrides.connector ?? {}) as Record<string, unknown>;
+  const connector = {
+    started: false,
+    loggedIn: false,
+    polling: false,
+    ready: false,
+    qrUrl: null,
+    awaitingQr: false,
+    botUserId: null,
+    storedSession: {
+      available: false,
+      botUserId: null,
+      savedAt: null,
+      contextUserIds: [],
+      verifiedForTarget: false
+    },
+    lastError: null,
+    messageCount: 0,
+    lastMessageAt: null,
+    recentChats: [],
+    target: null,
+    delivery: { phase: "bot_offline", severity: "warning" },
+    ...connectorOverrides
+  };
+  return {
+    id: "account-1",
+    label: "WeChat 1",
+    enabled: true,
+    addedAt: "2026-05-20T10:00:00.000Z",
+    botUserId: connector.botUserId,
+    alertTargetUserId: null,
+    storageDir: "/tmp/wechat-account-1",
+    verified: false,
+    ...overrides,
+    connector
+  };
+}
+
+function weChatAccountsStatus(accounts: Array<ReturnType<typeof weChatAccountStatus>>, activeLoginAccountId: string | null = null) {
+  return {
+    accounts,
+    activeLoginAccountId,
+    enabledCount: accounts.filter((account) => account.enabled).length,
+    verifiedCount: accounts.filter((account) => account.enabled && account.verified).length
+  };
+}
+
 describe("App", () => {
   beforeEach(() => {
     fakeStorage.clear();
@@ -228,6 +283,9 @@ describe("App", () => {
         }
         if (url === "/api/settings/wechat/qr/refresh" && init?.method === "POST") {
           return json({ accepted: true }, 202);
+        }
+        if (url === "/api/settings/wechat/accounts") {
+          return json(emptyWeChatAccountsStatus);
         }
         if (url === "/api/settings/alerts") {
           if (init?.method === "PATCH") {
@@ -356,7 +414,7 @@ describe("App", () => {
     await userEvent.click(await screen.findByRole("button", { name: "Open settings" }));
     expect(await screen.findByRole("dialog", { name: "Settings" })).toBeInTheDocument();
     expect(await screen.findByText("WeChat Alert Settings")).toBeInTheDocument();
-    expect(await screen.findByText("Notification Recipients")).toBeInTheDocument();
+    expect(await screen.findByText("Alert Recipients")).toBeInTheDocument();
 
     const [cooldownInput] = screen.getAllByRole("spinbutton");
     await userEvent.clear(cooldownInput);
@@ -376,9 +434,19 @@ describe("App", () => {
   });
 
   it("shows a waiting state before the QR URL arrives", async () => {
+    const pendingAccount = weChatAccountStatus({
+      connector: {
+        started: true,
+        loggedIn: false,
+        qrUrl: null,
+        awaitingQr: true,
+        delivery: { phase: "awaiting_qr", severity: "warning" }
+      }
+    });
+    let created = false;
     vi.stubGlobal(
       "fetch",
-      vi.fn(async (url: string) => {
+      vi.fn(async (url: string, init?: RequestInit) => {
         if (url === "/api/overview") return json(overview);
         if (url === "/api/settings/alerts") {
           return json({
@@ -391,6 +459,18 @@ describe("App", () => {
             }] }),
             status: { enabled: true, configured: true }
           });
+        }
+        if (url === "/api/settings/wechat/accounts" && init?.method === "POST") {
+          created = true;
+          return json({
+            account: pendingAccount,
+            settings: enabledRecipientSettings({ language: "zh" }),
+            status: { enabled: true, configured: false },
+            wechatAccounts: weChatAccountsStatus([pendingAccount], "account-1")
+          }, 201);
+        }
+        if (url === "/api/settings/wechat/accounts") {
+          return json(created ? weChatAccountsStatus([pendingAccount], "account-1") : emptyWeChatAccountsStatus);
         }
         if (url === "/api/settings/wechat") {
           return json({
@@ -427,9 +507,26 @@ describe("App", () => {
   });
 
   it("shows the WeChat login QR code in settings while waiting for scan", async () => {
+    const qrAccount = weChatAccountStatus({
+      connector: {
+        started: true,
+        loggedIn: false,
+        qrUrl: "https://liteapp.weixin.qq.com/q/test",
+        awaitingQr: true,
+        target: {
+          userId: "123@im.wechat",
+          lastInboundAt: null,
+          lastSendSuccessAt: null,
+          lastSendFailureAt: null,
+          lastSendFailureCode: null
+        },
+        delivery: { phase: "awaiting_qr", severity: "warning" }
+      }
+    });
+    let created = false;
     vi.stubGlobal(
       "fetch",
-      vi.fn(async (url: string) => {
+      vi.fn(async (url: string, init?: RequestInit) => {
         if (url === "/api/overview") return json(overview);
         if (url === "/api/settings/alerts") {
           return json({
@@ -442,6 +539,18 @@ describe("App", () => {
             }] }),
             status: { enabled: true, configured: true }
           });
+        }
+        if (url === "/api/settings/wechat/accounts" && init?.method === "POST") {
+          created = true;
+          return json({
+            account: qrAccount,
+            settings: enabledRecipientSettings({ language: "zh" }),
+            status: { enabled: true, configured: false },
+            wechatAccounts: weChatAccountsStatus([qrAccount], "account-1")
+          }, 201);
+        }
+        if (url === "/api/settings/wechat/accounts") {
+          return json(created ? weChatAccountsStatus([qrAccount], "account-1") : emptyWeChatAccountsStatus);
         }
         if (url === "/api/settings/wechat") {
           return json({
@@ -485,6 +594,16 @@ describe("App", () => {
   });
 
   it("manually refreshes the WeChat login QR code from settings", async () => {
+    const qrAccount = weChatAccountStatus({
+      connector: {
+        started: true,
+        loggedIn: false,
+        qrUrl: "https://liteapp.weixin.qq.com/q/test",
+        awaitingQr: true,
+        delivery: { phase: "awaiting_qr", severity: "warning" }
+      }
+    });
+    let created = false;
     vi.stubGlobal(
       "fetch",
       vi.fn(async (url: string, init?: RequestInit) => {
@@ -501,8 +620,24 @@ describe("App", () => {
             status: { enabled: true, configured: true }
           });
         }
-        if (url === "/api/settings/wechat/qr/refresh" && init?.method === "POST") {
-          return json({ accepted: true }, 202);
+        if (url === "/api/settings/wechat/accounts" && init?.method === "POST") {
+          created = true;
+          return json({
+            account: qrAccount,
+            settings: enabledRecipientSettings({ language: "zh" }),
+            status: { enabled: true, configured: false },
+            wechatAccounts: weChatAccountsStatus([qrAccount], "account-1")
+          }, 201);
+        }
+        if (url === "/api/settings/wechat/accounts") {
+          return json(created ? weChatAccountsStatus([qrAccount], "account-1") : emptyWeChatAccountsStatus);
+        }
+        if (url === "/api/settings/wechat/accounts/account-1/qr/refresh" && init?.method === "POST") {
+          return json({
+            accepted: true,
+            account: qrAccount,
+            wechatAccounts: weChatAccountsStatus([qrAccount], "account-1")
+          }, 202);
         }
         if (url === "/api/settings/wechat") {
           return json({
@@ -535,26 +670,49 @@ describe("App", () => {
     render(<App />);
     await userEvent.click(await screen.findByRole("button", { name: "Open settings" }));
     await userEvent.click(await screen.findByRole("button", { name: "添加" }));
-    await userEvent.click(await screen.findByRole("button", { name: "刷新二维码" }));
+    const refreshButtons = await screen.findAllByRole("button", { name: "刷新二维码" });
+    await userEvent.click(refreshButtons[1]);
 
     await waitFor(() => {
       expect(fetch).toHaveBeenCalledWith(
-        "/api/settings/wechat/qr/refresh",
+        "/api/settings/wechat/accounts/account-1/qr/refresh",
         expect.objectContaining({ method: "POST" })
       );
     });
   });
 
   it("opens the QR connection tab when adding recipients before bot login", async () => {
+    const qrAccount = weChatAccountStatus({
+      connector: {
+        started: true,
+        loggedIn: false,
+        qrUrl: "https://liteapp.weixin.qq.com/q/test",
+        awaitingQr: true,
+        delivery: { phase: "awaiting_qr", severity: "warning" }
+      }
+    });
+    let created = false;
     vi.stubGlobal(
       "fetch",
-      vi.fn(async (url: string) => {
+      vi.fn(async (url: string, init?: RequestInit) => {
         if (url === "/api/overview") return json(overview);
         if (url === "/api/settings/alerts") {
           return json({
             settings: defaultAlertSettingsFixture,
             status: { enabled: false, configured: false }
           });
+        }
+        if (url === "/api/settings/wechat/accounts" && init?.method === "POST") {
+          created = true;
+          return json({
+            account: qrAccount,
+            settings: defaultAlertSettingsFixture,
+            status: { enabled: false, configured: false },
+            wechatAccounts: weChatAccountsStatus([qrAccount], "account-1")
+          }, 201);
+        }
+        if (url === "/api/settings/wechat/accounts") {
+          return json(created ? weChatAccountsStatus([qrAccount], "account-1") : emptyWeChatAccountsStatus);
         }
         if (url === "/api/settings/wechat") {
           return json({
@@ -586,7 +744,7 @@ describe("App", () => {
 
     render(<App />);
     await userEvent.click(await screen.findByRole("button", { name: "Open settings" }));
-    expect(await screen.findByText("Log in the bot first")).toBeInTheDocument();
+    expect(await screen.findByText("No recipients configured yet.")).toBeInTheDocument();
     expect(screen.queryByAltText("WeChat login QR code")).not.toBeInTheDocument();
 
     await userEvent.click(await screen.findByRole("button", { name: "Add" }));
@@ -595,8 +753,41 @@ describe("App", () => {
     expect(screen.getByRole("button", { name: "Connection" })).toHaveClass("active");
   });
 
-  it("opens a new QR login when adding another recipient from a logged-in state", async () => {
-    let switchStarted = false;
+  it("creates a new QR login when adding a second recipient account", async () => {
+    const firstAccount = weChatAccountStatus({
+      id: "account-1",
+      label: "First recipient",
+      botUserId: "first-bot@im.wechat",
+      alertTargetUserId: "first@im.wechat",
+      verified: true,
+      connector: {
+        started: true,
+        loggedIn: true,
+        polling: true,
+        ready: true,
+        botUserId: "first-bot@im.wechat",
+        storedSession: {
+          available: true,
+          botUserId: "first-bot@im.wechat",
+          savedAt: "2026-05-20T10:00:00.000Z",
+          contextUserIds: ["first@im.wechat"],
+          verifiedForTarget: true
+        },
+        delivery: { phase: "ready", severity: "success" }
+      }
+    });
+    const secondAccount = weChatAccountStatus({
+      id: "account-2",
+      label: "WeChat 2",
+      connector: {
+        started: true,
+        loggedIn: false,
+        qrUrl: "https://liteapp.weixin.qq.com/q/second",
+        awaitingQr: true,
+        delivery: { phase: "awaiting_qr", severity: "warning" }
+      }
+    });
+    let created = false;
     vi.stubGlobal(
       "fetch",
       vi.fn(async (url: string, init?: RequestInit) => {
@@ -604,34 +795,39 @@ describe("App", () => {
         if (url === "/api/settings/alerts") {
           return json({
             settings: enabledRecipientSettings({
-              wechatRoomId: "first@im.wechat",
-              wechatRecipients: [{
-                id: "recipient-1",
-                contactId: "first@im.wechat",
-                label: "First recipient",
-                enabled: true,
-                addedAt: "2026-05-20T10:00:00.000Z"
-              }]
+              wechatAccounts: [firstAccount]
             }),
             status: { enabled: true, configured: true }
           });
         }
-        if (url === "/api/settings/wechat/switch" && init?.method === "POST") {
-          switchStarted = true;
-          return json({ accepted: true }, 202);
+        if (url === "/api/settings/wechat/accounts" && init?.method === "POST") {
+          created = true;
+          return json({
+            settings: enabledRecipientSettings({
+              wechatAccounts: [firstAccount, secondAccount]
+            }),
+            status: { enabled: true, configured: true },
+            account: secondAccount,
+            wechatAccounts: weChatAccountsStatus([firstAccount, secondAccount], "account-2")
+          }, 201);
+        }
+        if (url === "/api/settings/wechat/accounts") {
+          return json(created
+            ? weChatAccountsStatus([firstAccount, secondAccount], "account-2")
+            : weChatAccountsStatus([firstAccount]));
         }
         if (url === "/api/settings/wechat") {
           return json({
             started: true,
-            loggedIn: !switchStarted,
-            polling: !switchStarted,
-            ready: !switchStarted,
-            qrUrl: switchStarted ? "https://liteapp.weixin.qq.com/q/second" : null,
-            awaitingQr: switchStarted,
-            botUserId: switchStarted ? null : "bot@im.wechat",
+            loggedIn: true,
+            polling: true,
+            ready: true,
+            qrUrl: null,
+            awaitingQr: false,
+            botUserId: "bot@im.wechat",
             storedSession: {
-              available: !switchStarted,
-              botUserId: switchStarted ? null : "bot@im.wechat",
+              available: true,
+              botUserId: "bot@im.wechat",
               savedAt: "2026-05-20T10:00:00.000Z",
               contextUserIds: ["first@im.wechat"],
               verifiedForTarget: true
@@ -640,10 +836,11 @@ describe("App", () => {
             messageCount: 1,
             lastMessageAt: "2026-05-20T10:00:00.000Z",
             recentChats: [
+              { userId: "second@im.wechat", text: "setup", receivedAt: "2026-05-20T10:01:00.000Z" },
               { userId: "first@im.wechat", text: "setup", receivedAt: "2026-05-20T10:00:00.000Z" }
             ],
             target: null,
-            delivery: { phase: switchStarted ? "awaiting_qr" : "ready", severity: switchStarted ? "warning" : "success" }
+            delivery: { phase: "ready", severity: "success" }
           });
         }
         return json({}, 404);
@@ -658,17 +855,28 @@ describe("App", () => {
 
     await waitFor(() => {
       expect(fetch).toHaveBeenCalledWith(
-        "/api/settings/wechat/switch",
+        "/api/settings/wechat/accounts",
         expect.objectContaining({ method: "POST" })
       );
     });
-    expect(screen.queryByPlaceholderText("user_id or 12345@chatroom")).not.toBeInTheDocument();
     expect(await screen.findByAltText("WeChat login QR code")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Connection" })).toHaveClass("active");
+    expect(fetch).not.toHaveBeenCalledWith(
+      "/api/settings/alerts/recipients",
+      expect.objectContaining({ method: "POST" })
+    );
   });
 
   it("starts a new QR login when adding recipients from a disconnected state", async () => {
-    let loginStarted = false;
+    const qrAccount = weChatAccountStatus({
+      connector: {
+        started: true,
+        loggedIn: false,
+        qrUrl: "https://liteapp.weixin.qq.com/q/test",
+        awaitingQr: true,
+        delivery: { phase: "awaiting_qr", severity: "warning" }
+      }
+    });
+    let accountCreated = false;
     vi.stubGlobal(
       "fetch",
       vi.fn(async (url: string, init?: RequestInit) => {
@@ -679,18 +887,26 @@ describe("App", () => {
             status: { enabled: false, configured: false }
           });
         }
-        if (url === "/api/settings/wechat/start" && init?.method === "POST") {
-          loginStarted = true;
-          return json({ accepted: true }, 202);
+        if (url === "/api/settings/wechat/accounts" && init?.method === "POST") {
+          accountCreated = true;
+          return json({
+            account: qrAccount,
+            settings: defaultAlertSettingsFixture,
+            status: { enabled: false, configured: false },
+            wechatAccounts: weChatAccountsStatus([qrAccount], "account-1")
+          }, 201);
+        }
+        if (url === "/api/settings/wechat/accounts") {
+          return json(accountCreated ? weChatAccountsStatus([qrAccount], "account-1") : emptyWeChatAccountsStatus);
         }
         if (url === "/api/settings/wechat") {
           return json({
-            started: loginStarted,
+            started: false,
             loggedIn: false,
             polling: false,
             ready: false,
-            qrUrl: loginStarted ? "https://liteapp.weixin.qq.com/q/test" : null,
-            awaitingQr: loginStarted,
+            qrUrl: null,
+            awaitingQr: false,
             botUserId: null,
             storedSession: {
               available: false,
@@ -704,7 +920,7 @@ describe("App", () => {
             lastMessageAt: null,
             recentChats: [],
             target: null,
-            delivery: { phase: loginStarted ? "awaiting_qr" : "bot_offline", severity: "warning" }
+            delivery: { phase: "bot_offline", severity: "warning" }
           });
         }
         return json({}, 404);
@@ -717,7 +933,7 @@ describe("App", () => {
 
     await waitFor(() => {
       expect(fetch).toHaveBeenCalledWith(
-        "/api/settings/wechat/start",
+        "/api/settings/wechat/accounts",
         expect.objectContaining({ method: "POST" })
       );
     });

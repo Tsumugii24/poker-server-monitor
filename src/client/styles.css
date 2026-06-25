@@ -1603,6 +1603,18 @@ td .port-value {
   background: var(--bg-elevated);
 }
 
+.sw-chat-item.as-button {
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+}
+
+.sw-chat-item.as-button:hover {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+  background: color-mix(in srgb, var(--accent) 5%, var(--bg-elevated));
+}
+
 .sw-chat-item strong {
   font-size: 12px;
   color: var(--accent);
@@ -1656,6 +1668,20 @@ td .port-value {
   background: color-mix(in srgb, var(--accent) 3%, var(--bg-elevated));
   margin-bottom: 16px;
   animation: fadeIn 0.15s ease-out;
+}
+
+.sw-recipient-setup {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.sw-recipient-setup p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .sw-add-form-fields {
@@ -1772,6 +1798,10 @@ td .port-value {
   border-left: 3px solid var(--green);
 }
 
+.sw-recipient-card.verified {
+  background: color-mix(in srgb, var(--green) 3%, var(--bg-elevated));
+}
+
 .sw-recipient-card.disabled {
   border-left: 3px solid var(--text-disabled);
   opacity: 0.7;
@@ -1814,6 +1844,10 @@ td .port-value {
   margin-bottom: 2px;
 }
 
+.sw-recipient-contact.muted {
+  color: var(--text-tertiary);
+}
+
 .sw-recipient-date {
   font-size: 10px;
   color: var(--text-disabled);
@@ -1833,6 +1867,10 @@ td .port-value {
   font-weight: 600;
 }
 
+.sw-recipient-testing.warning {
+  color: var(--yellow);
+}
+
 .sw-recipient-edit {
   display: flex;
   flex-direction: column;
@@ -1843,6 +1881,10 @@ td .port-value {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 12px;
+}
+
+.sw-recipient-edit-fields.one {
+  grid-template-columns: 1fr;
 }
 
 .sw-recipient-edit-actions {
@@ -2140,6 +2182,13 @@ td .port-value {
   border: 1px solid var(--border);
   color: var(--text-tertiary);
   background: var(--bg-base);
+  font: inherit;
+  cursor: pointer;
+}
+
+.sw-recipient-chip:hover {
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+  color: var(--accent);
 }
 
 .sw-recipient-chip.active {

@@ -6,6 +6,7 @@ import { resolveSshTimeouts } from "../shared/sshSettings";
 import { loadAlertSettings, loadRuntimeConfig, loadServerInventory } from "./config";
 import { MonitorDatabase } from "./db";
 import { RefreshService } from "./refreshService";
+import { WeChatAccountManager } from "./wechatAccountManager";
 import { WeChatNotifier } from "./wechatNotifier";
 
 async function main(): Promise<void> {
@@ -13,21 +14,35 @@ async function main(): Promise<void> {
   const servers = loadServerInventory(config.inventoryPath);
   const db = await MonitorDatabase.open(config.databasePath);
   db.syncServers(servers);
-  const notifier = new WeChatNotifier();
+  const legacyNotifier = new WeChatNotifier();
+  const weChatAccounts = new WeChatAccountManager({
+    alertSettingsPath: config.alertSettingsPath
+  });
+  const sendWeChatTarget = async (message: string, targetId: string) => {
+    const settings = loadAlertSettings(config.alertSettingsPath);
+    const account = settings.wechatAccounts.find((candidate) => candidate.id === targetId);
+    if (account) {
+      await weChatAccounts.sendToAccount(account.id, message);
+      return;
+    }
+
+    const status = legacyNotifier.getStatus(settings.enabled ? settings.wechatRoomId : "");
+    if (!status.loggedIn) {
+      throw new Error("WeChat bot is not logged in yet.");
+    }
+    await legacyNotifier.send(message, targetId);
+  };
   const alertService = new AlertService({
     getSettings: () => loadAlertSettings(config.alertSettingsPath),
-    send: async (message, roomId) => {
-      const settings = loadAlertSettings(config.alertSettingsPath);
-      const status = notifier.getStatus(settings.enabled ? settings.wechatRoomId : "");
-      if (!status.loggedIn) {
-        throw new Error("WeChat bot is not logged in yet.");
-      }
-      await notifier.send(message, roomId);
-    }
+    send: sendWeChatTarget
   });
   const alertSettings = loadAlertSettings(config.alertSettingsPath);
   if (alertSettings.enabled) {
-    notifier.startInBackground();
+    if (alertSettings.wechatAccounts.length > 0) {
+      weChatAccounts.startEnabledAccounts();
+    } else {
+      legacyNotifier.startInBackground();
+    }
   }
 
   const refreshService = new RefreshService({
@@ -47,17 +62,25 @@ async function main(): Promise<void> {
     inventoryPath: config.inventoryPath,
     alertSettingsPath: config.alertSettingsPath,
     defaultRefreshIntervalMs: config.refreshIntervalMs,
-    sendTestAlert: (message, roomId) => notifier.send(message, roomId),
-    startAlertConnector: () => notifier.ensureStarted(),
-    restartAlertConnector: () => notifier.restartLogin(),
-    refreshWeChatConnector: () => notifier.refreshLoginQr(),
-    restoreAlertConnector: () => notifier.restoreSession(),
-    logoutWeChatConnector: () => notifier.logout(),
-    switchWeChatConnector: () => notifier.switchAccount(),
+    sendTestAlert: sendWeChatTarget,
+    startAlertConnector: () => legacyNotifier.ensureStarted(),
+    restartAlertConnector: () => legacyNotifier.restartLogin(),
+    refreshWeChatConnector: () => legacyNotifier.refreshLoginQr(),
+    restoreAlertConnector: () => legacyNotifier.restoreSession(),
+    logoutWeChatConnector: () => legacyNotifier.logout(),
+    switchWeChatConnector: () => legacyNotifier.switchAccount(),
     getWeChatStatus: () => {
       const settings = loadAlertSettings(config.alertSettingsPath);
-      return notifier.getStatus(settings.enabled ? settings.wechatRoomId : "");
-    }
+      return legacyNotifier.getStatus(settings.enabled ? settings.wechatRoomId : "");
+    },
+    getWeChatAccountsStatus: () => weChatAccounts.getAccountsStatus(),
+    createWeChatAccount: (label) => weChatAccounts.createAccount(label),
+    refreshWeChatAccountQr: (accountId) => weChatAccounts.refreshQr(accountId),
+    restoreWeChatAccount: (accountId) => weChatAccounts.restoreAccount(accountId),
+    logoutWeChatAccount: (accountId) => weChatAccounts.logoutAccount(accountId),
+    removeWeChatAccount: (accountId) => weChatAccounts.removeAccount(accountId),
+    updateWeChatAccount: (accountId, patch) => weChatAccounts.updateAccount(accountId, patch),
+    verifyWeChatAccount: (accountId, targetUserId) => weChatAccounts.verifyAccount(accountId, targetUserId)
   });
   const clientDist = path.resolve("dist/client");
   app.use(express.static(clientDist));

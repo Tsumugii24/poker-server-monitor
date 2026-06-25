@@ -148,6 +148,7 @@ describe("alert settings loading", () => {
       enabled: false,
       wechatRoomId: "",
       wechatRecipients: [],
+      wechatAccounts: [],
       cooldownMinutes: 60,
       language: "en",
       sshCommandTimeoutSeconds: 15,
@@ -162,6 +163,7 @@ describe("alert settings loading", () => {
       enabled: true,
       wechatRoomId: "12345@chatroom",
       wechatRecipients: [],
+      wechatAccounts: [],
       cooldownMinutes: 30,
       language: "zh",
       sshCommandTimeoutSeconds: 20,
@@ -171,6 +173,7 @@ describe("alert settings loading", () => {
     expect(loadAlertSettings(file)).toMatchObject({
       enabled: true,
       wechatRoomId: "12345@chatroom",
+      wechatAccounts: [],
       cooldownMinutes: 30,
       language: "zh",
       sshCommandTimeoutSeconds: 20,
@@ -186,5 +189,40 @@ describe("alert settings loading", () => {
       sshCommandTimeoutSeconds: 15,
       sshConnectTimeoutSeconds: 10
     });
+  });
+
+  it("normalizes persisted WeChat account entries", () => {
+    const file = path.join(tempDir, "alerts-accounts.json");
+    fs.writeFileSync(file, JSON.stringify({
+      enabled: true,
+      cooldownMinutes: 30,
+      language: "zh",
+      wechatAccounts: [
+        {
+          id: "account-1",
+          label: "Ops owner",
+          enabled: true,
+          addedAt: "2026-05-20T10:00:00.000Z",
+          botUserId: "bot@im.wechat",
+          alertTargetUserId: "owner@im.wechat"
+        },
+        {
+          id: "account-1",
+          label: "Duplicate",
+          enabled: true
+        }
+      ]
+    }));
+
+    expect(loadAlertSettings(file).wechatAccounts).toEqual([
+      {
+        id: "account-1",
+        label: "Ops owner",
+        enabled: true,
+        addedAt: "2026-05-20T10:00:00.000Z",
+        botUserId: "bot@im.wechat",
+        alertTargetUserId: "owner@im.wechat"
+      }
+    ]);
   });
 });

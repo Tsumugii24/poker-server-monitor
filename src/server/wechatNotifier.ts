@@ -39,6 +39,10 @@ type IncomingWeChatMessage = {
   timestamp?: Date;
 };
 
+export type WeChatNotifierOptions = {
+  storageDir?: string;
+};
+
 export class WeChatNotifier {
   private bot: WeChatBotInstance | null = null;
   private botPromise: Promise<WeChatBotInstance> | null = null;
@@ -58,6 +62,12 @@ export class WeChatNotifier {
   private lastMessageAt: string | null = null;
   private readonly recentChats: WeChatChatCandidate[] = [];
   private readonly targetActivity = new Map<string, WeChatTargetActivity>();
+
+  constructor(private readonly options: WeChatNotifierOptions = {}) {}
+
+  getStorageDir(): string | undefined {
+    return this.options.storageDir;
+  }
 
   async ensureStarted(): Promise<void> {
     if (this.loggedIn || this.isLoginFailed() || this.loginTask) {
@@ -141,7 +151,7 @@ export class WeChatNotifier {
     const configuredTarget = alertTargetUserId.trim();
     const target = configuredTarget ? this.getTargetActivity(configuredTarget) : null;
     const awaitingQr = this.isAwaitingQr();
-    const storedSession = readStoredWeChatSession(configuredTarget);
+    const storedSession = readStoredWeChatSession(configuredTarget, this.options.storageDir);
 
     return {
       started: this.started,
@@ -250,7 +260,7 @@ export class WeChatNotifier {
     this.lastError = null;
     this.loginAttemptStartedAt = Date.now();
     const generation = ++this.loginGeneration;
-    const bot = new Bot();
+    const bot = new Bot(this.options.storageDir ? { storageDir: this.options.storageDir } : undefined);
     bot.on("poll:start", () => {
       this.polling = true;
       this.ready = true;
@@ -345,7 +355,7 @@ export class WeChatNotifier {
     }
     const Bot = mod.WeChatBot ?? mod.default;
     if (!Bot) return;
-    const ephemeral = new Bot();
+    const ephemeral = new Bot(this.options.storageDir ? { storageDir: this.options.storageDir } : undefined);
     if (ephemeral.storage) {
       await this.deleteStorageKeys(ephemeral.storage);
     }

@@ -30,6 +30,8 @@ import type {
   ServerDetailResponse,
   ServerConfig,
   ServerRow,
+  WeChatAccountConnectorStatus,
+  WeChatAccountsStatus,
   WeChatConnectorStatus
 } from "../shared/types";
 import {
@@ -51,6 +53,13 @@ type SortDirection = "asc" | "desc";
 type AlertSettingsResponse = {
   settings: AlertSettings;
   status: AlertStatus;
+};
+
+type WeChatAccountMutationResponse = {
+  account?: WeChatAccountConnectorStatus;
+  settings?: AlertSettings;
+  status?: AlertStatus;
+  wechatAccounts: WeChatAccountsStatus;
 };
 
 const EMPTY_WECHAT_STATUS: WeChatConnectorStatus = {
@@ -78,6 +87,13 @@ const EMPTY_WECHAT_STATUS: WeChatConnectorStatus = {
     lastError: null,
     target: null
   })
+};
+
+const EMPTY_WECHAT_ACCOUNTS_STATUS: WeChatAccountsStatus = {
+  accounts: [],
+  activeLoginAccountId: null,
+  enabledCount: 0,
+  verifiedCount: 0
 };
 
 const THEME_KEY = "server-monitor-theme";
@@ -118,6 +134,7 @@ export default function App() {
   const [alertSettings, setAlertSettings] = useState<AlertSettings | null>(null);
   const [alertStatus, setAlertStatus] = useState<AlertStatus | null>(null);
   const [wechatStatus, setWeChatStatus] = useState<WeChatConnectorStatus>(EMPTY_WECHAT_STATUS);
+  const [wechatAccountsStatus, setWeChatAccountsStatus] = useState<WeChatAccountsStatus>(EMPTY_WECHAT_ACCOUNTS_STATUS);
   const [settingsSaving, setSettingsSaving] = useState(false);
 
   useEffect(() => {
@@ -134,9 +151,14 @@ export default function App() {
     setError(null);
     try {
       const response = await fetchJson<AlertSettingsResponse>("/api/settings/alerts");
+      const [legacyWeChat, accountsWeChat] = await Promise.all([
+        fetchJson<WeChatConnectorStatus>("/api/settings/wechat"),
+        fetchJson<WeChatAccountsStatus>("/api/settings/wechat/accounts")
+      ]);
       setAlertSettings(response.settings);
       setAlertStatus(response.status);
-      setWeChatStatus(await fetchJson<WeChatConnectorStatus>("/api/settings/wechat"));
+      setWeChatStatus(legacyWeChat);
+      setWeChatAccountsStatus(accountsWeChat);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     }
@@ -153,7 +175,12 @@ export default function App() {
       });
       setAlertSettings(response.settings);
       setAlertStatus(response.status);
-      setWeChatStatus(await fetchJson<WeChatConnectorStatus>("/api/settings/wechat"));
+      const [legacyWeChat, accountsWeChat] = await Promise.all([
+        fetchJson<WeChatConnectorStatus>("/api/settings/wechat"),
+        fetchJson<WeChatAccountsStatus>("/api/settings/wechat/accounts")
+      ]);
+      setWeChatStatus(legacyWeChat);
+      setWeChatAccountsStatus(accountsWeChat);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     } finally {
@@ -165,7 +192,11 @@ export default function App() {
     setSettingsSaving(true);
     setError(null);
     try {
-      const response = await fetchJson<{ status: AlertStatus; wechat?: WeChatConnectorStatus }>(
+      const response = await fetchJson<{
+        status: AlertStatus;
+        wechat?: WeChatConnectorStatus;
+        wechatAccounts?: WeChatAccountsStatus;
+      }>(
         "/api/settings/alerts/test",
         {
           method: "POST",
@@ -180,10 +211,20 @@ export default function App() {
       } else {
         setWeChatStatus(await fetchJson<WeChatConnectorStatus>("/api/settings/wechat"));
       }
+      if (response.wechatAccounts) {
+        setWeChatAccountsStatus(response.wechatAccounts);
+      } else {
+        setWeChatAccountsStatus(await fetchJson<WeChatAccountsStatus>("/api/settings/wechat/accounts"));
+      }
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
       try {
-        setWeChatStatus(await fetchJson<WeChatConnectorStatus>("/api/settings/wechat"));
+        const [legacyWeChat, accountsWeChat] = await Promise.all([
+          fetchJson<WeChatConnectorStatus>("/api/settings/wechat"),
+          fetchJson<WeChatAccountsStatus>("/api/settings/wechat/accounts")
+        ]);
+        setWeChatStatus(legacyWeChat);
+        setWeChatAccountsStatus(accountsWeChat);
       } catch {
         /* ignore secondary refresh failure */
       }
@@ -268,6 +309,145 @@ export default function App() {
     }
   };
 
+  const applyWeChatAccountResponse = (response: WeChatAccountMutationResponse) => {
+    if (response.settings) {
+      setAlertSettings(response.settings);
+    }
+    if (response.status) {
+      setAlertStatus(response.status);
+    }
+    setWeChatAccountsStatus(response.wechatAccounts);
+  };
+
+  const refreshWeChatAccountsStatus = useCallback(async () => {
+    setError(null);
+    try {
+      setWeChatAccountsStatus(await fetchJson<WeChatAccountsStatus>("/api/settings/wechat/accounts"));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    }
+  }, []);
+
+  const createWeChatAccount = async (): Promise<WeChatAccountConnectorStatus | null> => {
+    setSettingsSaving(true);
+    setError(null);
+    try {
+      const response = await fetchJson<WeChatAccountMutationResponse>("/api/settings/wechat/accounts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({})
+      });
+      applyWeChatAccountResponse(response);
+      return response.account ?? null;
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+      throw caught;
+    } finally {
+      setSettingsSaving(false);
+    }
+  };
+
+  const updateWeChatAccount = async (id: string, patch: { label?: string; enabled?: boolean }) => {
+    setError(null);
+    try {
+      const response = await fetchJson<WeChatAccountMutationResponse>(`/api/settings/wechat/accounts/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(patch)
+      });
+      applyWeChatAccountResponse(response);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+      throw caught;
+    }
+  };
+
+  const removeWeChatAccount = async (id: string) => {
+    setError(null);
+    try {
+      const response = await fetchJson<WeChatAccountMutationResponse>(`/api/settings/wechat/accounts/${id}`, {
+        method: "DELETE"
+      });
+      applyWeChatAccountResponse(response);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+      throw caught;
+    }
+  };
+
+  const refreshWeChatAccountQr = async (id: string) => {
+    setError(null);
+    try {
+      const response = await fetchJson<WeChatAccountMutationResponse>(`/api/settings/wechat/accounts/${id}/qr/refresh`, {
+        method: "POST"
+      });
+      applyWeChatAccountResponse(response);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+      throw caught;
+    }
+  };
+
+  const restoreWeChatAccount = async (id: string) => {
+    setError(null);
+    try {
+      const response = await fetchJson<WeChatAccountMutationResponse>(`/api/settings/wechat/accounts/${id}/restore`, {
+        method: "POST"
+      });
+      applyWeChatAccountResponse(response);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+      throw caught;
+    }
+  };
+
+  const logoutWeChatAccount = async (id: string) => {
+    setError(null);
+    try {
+      const response = await fetchJson<WeChatAccountMutationResponse>(`/api/settings/wechat/accounts/${id}/logout`, {
+        method: "POST"
+      });
+      applyWeChatAccountResponse(response);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+      throw caught;
+    }
+  };
+
+  const verifyWeChatAccount = async (id: string, targetUserId?: string) => {
+    setError(null);
+    try {
+      const response = await fetchJson<WeChatAccountMutationResponse>(`/api/settings/wechat/accounts/${id}/verify`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(targetUserId ? { targetUserId } : {})
+      });
+      applyWeChatAccountResponse(response);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+      throw caught;
+    }
+  };
+
+  const testWeChatAccount = async (id: string) => {
+    setError(null);
+    try {
+      const response = await fetchJson<{ status: AlertStatus; wechatAccounts?: WeChatAccountsStatus }>(
+        `/api/settings/alerts/test/account/${id}`,
+        { method: "POST" }
+      );
+      setAlertStatus(response.status);
+      if (response.wechatAccounts) {
+        setWeChatAccountsStatus(response.wechatAccounts);
+      } else {
+        await refreshWeChatAccountsStatus();
+      }
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+      throw caught;
+    }
+  };
+
   const addRecipient = async (contactId: string, label: string) => {
     setError(null);
     try {
@@ -346,6 +526,21 @@ export default function App() {
     }, 1500);
     return () => window.clearInterval(timer);
   }, [settingsOpen, wechatStatus.loggedIn, refreshWeChatStatus]);
+
+  const shouldPollWeChatAccounts = settingsOpen && wechatAccountsStatus.accounts.some((account) =>
+    account.connector.awaitingQr ||
+    Boolean(account.connector.qrUrl) ||
+    (account.connector.loggedIn && !account.verified)
+  );
+
+  useEffect(() => {
+    if (!shouldPollWeChatAccounts) return undefined;
+    void refreshWeChatAccountsStatus();
+    const timer = window.setInterval(() => {
+      void refreshWeChatAccountsStatus();
+    }, 1500);
+    return () => window.clearInterval(timer);
+  }, [refreshWeChatAccountsStatus, shouldPollWeChatAccounts]);
 
   useEffect(() => {
     const onPopState = () => setRoute(routeFromLocation());
@@ -465,17 +660,16 @@ export default function App() {
             onClose={() => setSettingsOpen(false)}
             onSave={saveAlertSettings}
             onTest={sendTestAlert}
-            wechatStatus={wechatStatus}
-            onStartWeChat={startWeChatLogin}
-            onRefreshWeChat={refreshWeChatStatus}
-            onRefreshWeChatQr={refreshWeChatQr}
-            onRestoreWeChat={restoreWeChatSession}
-            onLogoutWeChat={logoutWeChat}
-            onSwitchWeChat={switchWeChatAccount}
-            onAddRecipient={addRecipient}
-            onUpdateRecipient={updateRecipient}
-            onRemoveRecipient={removeRecipient}
-            onTestRecipient={testRecipient}
+            wechatAccountsStatus={wechatAccountsStatus}
+            onCreateWeChatAccount={createWeChatAccount}
+            onRefreshWeChatAccounts={refreshWeChatAccountsStatus}
+            onRefreshWeChatAccountQr={refreshWeChatAccountQr}
+            onRestoreWeChatAccount={restoreWeChatAccount}
+            onLogoutWeChatAccount={logoutWeChatAccount}
+            onUpdateWeChatAccount={updateWeChatAccount}
+            onRemoveWeChatAccount={removeWeChatAccount}
+            onVerifyWeChatAccount={verifyWeChatAccount}
+            onTestWeChatAccount={testWeChatAccount}
           />
         </div>
       ) : null}

@@ -5,11 +5,19 @@ import type {
   OverviewResponse,
   OverviewSummary,
   ServerDetailResponse,
+  WeChatAccountConnectorStatus,
+  WeChatAccountsStatus,
   WeChatConnectorStatus,
   WeChatRecipient
 } from "../shared/types";
 import { loadAlertSettings, loadServerInventory, saveAlertSettings, updateServerInventoryNote } from "./config";
-import { formatTestAlertMessage, alertRefreshIntervalMs } from "./alertService";
+import {
+  enabledAlertTargets,
+  findAlertTarget,
+  formatTestAlertMessage,
+  alertRefreshIntervalMs,
+  type AlertDeliveryTarget
+} from "./alertService";
 import type { MonitorDatabase } from "./db";
 import type { RefreshService } from "./refreshService";
 import { buildWeChatDelivery } from "../shared/wechatDelivery";
@@ -29,6 +37,20 @@ export type AppDependencies = {
   logoutWeChatConnector?: () => Promise<void> | void;
   switchWeChatConnector?: () => Promise<void> | void;
   getWeChatStatus?: () => WeChatConnectorStatus;
+  getWeChatAccountsStatus?: () => WeChatAccountsStatus;
+  createWeChatAccount?: (label?: string) => Promise<WeChatAccountConnectorStatus> | WeChatAccountConnectorStatus;
+  refreshWeChatAccountQr?: (accountId: string) => Promise<WeChatAccountConnectorStatus> | WeChatAccountConnectorStatus;
+  restoreWeChatAccount?: (accountId: string) => Promise<WeChatAccountConnectorStatus> | WeChatAccountConnectorStatus;
+  logoutWeChatAccount?: (accountId: string) => Promise<WeChatAccountConnectorStatus> | WeChatAccountConnectorStatus;
+  removeWeChatAccount?: (accountId: string) => Promise<WeChatAccountsStatus> | WeChatAccountsStatus;
+  updateWeChatAccount?: (
+    accountId: string,
+    patch: { label?: string; enabled?: boolean }
+  ) => Promise<WeChatAccountConnectorStatus> | WeChatAccountConnectorStatus;
+  verifyWeChatAccount?: (
+    accountId: string,
+    targetUserId?: string
+  ) => Promise<WeChatAccountConnectorStatus> | WeChatAccountConnectorStatus;
 };
 
 export function createApp({
@@ -44,7 +66,15 @@ export function createApp({
   restoreAlertConnector,
   logoutWeChatConnector,
   switchWeChatConnector,
-  getWeChatStatus
+  getWeChatStatus,
+  getWeChatAccountsStatus,
+  createWeChatAccount,
+  refreshWeChatAccountQr,
+  restoreWeChatAccount,
+  logoutWeChatAccount,
+  removeWeChatAccount,
+  updateWeChatAccount,
+  verifyWeChatAccount
 }: AppDependencies): Express {
   const app = express();
   app.use(express.json());
@@ -150,18 +180,20 @@ export function createApp({
 
     try {
       const settings = saveAlertSettings(alertSettingsPath, request.body);
-      const enabledRecipients = settings.wechatRecipients.filter((r) => r.enabled);
-      if (!settings.enabled || enabledRecipients.length === 0) {
+      const targets = enabledAlertTargets(settings);
+      if (!settings.enabled || targets.length === 0) {
         response.status(400).json({ error: "alert_not_configured" });
         return;
       }
 
-      await sendTestAlertToRecipients(sendTestAlert, formatTestAlertMessage(settings.language), enabledRecipients);
+      await sendTestAlertToTargets(sendTestAlert, formatTestAlertMessage(settings.language), targets);
       response.status(202).json({
         accepted: true,
-        recipientCount: enabledRecipients.length,
+        recipientCount: targets.length,
+        targetCount: targets.length,
         status: alertStatus(settings),
-        wechat: getWeChatStatus?.() ?? defaultWeChatStatus(settings.wechatRoomId)
+        wechat: getWeChatStatus?.() ?? defaultWeChatStatus(settings.wechatRoomId),
+        wechatAccounts: getWeChatAccountsStatus?.() ?? defaultWeChatAccountsStatus(settings)
       });
     } catch (error) {
       response.status(500).json({
@@ -174,6 +206,182 @@ export function createApp({
   app.get("/api/settings/wechat", (_request, response) => {
     const settings = loadAlertSettings(alertSettingsPath);
     response.json(getWeChatStatus?.() ?? defaultWeChatStatus(settings.enabled ? settings.wechatRoomId : ""));
+  });
+
+  app.get("/api/settings/wechat/accounts", (_request, response) => {
+    const settings = loadAlertSettings(alertSettingsPath);
+    response.json(getWeChatAccountsStatus?.() ?? defaultWeChatAccountsStatus(settings));
+  });
+
+  app.post("/api/settings/wechat/accounts", async (request, response) => {
+    if (!createWeChatAccount) {
+      response.status(501).json({ error: "wechat_accounts_unavailable" });
+      return;
+    }
+    if (!isRecord(request.body) && request.body != null) {
+      response.status(400).json({ error: "invalid_request" });
+      return;
+    }
+
+    try {
+      const label = isRecord(request.body) && typeof request.body.label === "string"
+        ? request.body.label
+        : undefined;
+      const account = await Promise.resolve(createWeChatAccount(label));
+      const settings = loadAlertSettings(alertSettingsPath);
+      response.status(201).json({
+        account,
+        settings,
+        status: alertStatus(settings),
+        wechatAccounts: getWeChatAccountsStatus?.() ?? defaultWeChatAccountsStatus(settings)
+      });
+    } catch (error) {
+      response.status(500).json({
+        error: "wechat_account_create_failed",
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  app.patch("/api/settings/wechat/accounts/:accountId", async (request, response) => {
+    if (!updateWeChatAccount) {
+      response.status(501).json({ error: "wechat_accounts_unavailable" });
+      return;
+    }
+    if (!isRecord(request.body)) {
+      response.status(400).json({ error: "invalid_request" });
+      return;
+    }
+
+    const patch: { label?: string; enabled?: boolean } = {};
+    if (request.body.label != null) {
+      if (typeof request.body.label !== "string") {
+        response.status(400).json({ error: "invalid_wechat_account", message: "label must be a string" });
+        return;
+      }
+      patch.label = request.body.label;
+    }
+    if (request.body.enabled != null) {
+      if (typeof request.body.enabled !== "boolean") {
+        response.status(400).json({ error: "invalid_wechat_account", message: "enabled must be a boolean" });
+        return;
+      }
+      patch.enabled = request.body.enabled;
+    }
+
+    try {
+      const account = await Promise.resolve(updateWeChatAccount(request.params.accountId, patch));
+      const settings = loadAlertSettings(alertSettingsPath);
+      response.json({
+        account,
+        settings,
+        status: alertStatus(settings),
+        wechatAccounts: getWeChatAccountsStatus?.() ?? defaultWeChatAccountsStatus(settings)
+      });
+    } catch (error) {
+      respondWeChatAccountError(response, error, "wechat_account_update_failed");
+    }
+  });
+
+  app.delete("/api/settings/wechat/accounts/:accountId", async (request, response) => {
+    if (!removeWeChatAccount) {
+      response.status(501).json({ error: "wechat_accounts_unavailable" });
+      return;
+    }
+
+    try {
+      const wechatAccounts = await Promise.resolve(removeWeChatAccount(request.params.accountId));
+      const settings = loadAlertSettings(alertSettingsPath);
+      response.json({
+        settings,
+        status: alertStatus(settings),
+        wechatAccounts
+      });
+    } catch (error) {
+      respondWeChatAccountError(response, error, "wechat_account_delete_failed");
+    }
+  });
+
+  app.post("/api/settings/wechat/accounts/:accountId/qr/refresh", async (request, response) => {
+    if (!refreshWeChatAccountQr) {
+      response.status(501).json({ error: "wechat_accounts_unavailable" });
+      return;
+    }
+
+    try {
+      const account = await Promise.resolve(refreshWeChatAccountQr(request.params.accountId));
+      response.status(202).json({
+        accepted: true,
+        account,
+        wechatAccounts: getWeChatAccountsStatus?.() ?? defaultWeChatAccountsStatus(loadAlertSettings(alertSettingsPath))
+      });
+    } catch (error) {
+      respondWeChatAccountError(response, error, "wechat_qr_refresh_failed");
+    }
+  });
+
+  app.post("/api/settings/wechat/accounts/:accountId/restore", async (request, response) => {
+    if (!restoreWeChatAccount) {
+      response.status(501).json({ error: "wechat_accounts_unavailable" });
+      return;
+    }
+
+    try {
+      const account = await Promise.resolve(restoreWeChatAccount(request.params.accountId));
+      response.json({
+        account,
+        wechatAccounts: getWeChatAccountsStatus?.() ?? defaultWeChatAccountsStatus(loadAlertSettings(alertSettingsPath))
+      });
+    } catch (error) {
+      respondWeChatAccountError(response, error, "wechat_restore_failed");
+    }
+  });
+
+  app.post("/api/settings/wechat/accounts/:accountId/logout", async (request, response) => {
+    if (!logoutWeChatAccount) {
+      response.status(501).json({ error: "wechat_accounts_unavailable" });
+      return;
+    }
+
+    try {
+      const account = await Promise.resolve(logoutWeChatAccount(request.params.accountId));
+      const settings = loadAlertSettings(alertSettingsPath);
+      response.json({
+        account,
+        settings,
+        status: alertStatus(settings),
+        wechatAccounts: getWeChatAccountsStatus?.() ?? defaultWeChatAccountsStatus(settings)
+      });
+    } catch (error) {
+      respondWeChatAccountError(response, error, "wechat_logout_failed");
+    }
+  });
+
+  app.post("/api/settings/wechat/accounts/:accountId/verify", async (request, response) => {
+    if (!verifyWeChatAccount) {
+      response.status(501).json({ error: "wechat_accounts_unavailable" });
+      return;
+    }
+    if (!isRecord(request.body) && request.body != null) {
+      response.status(400).json({ error: "invalid_request" });
+      return;
+    }
+
+    try {
+      const targetUserId = isRecord(request.body) && typeof request.body.targetUserId === "string"
+        ? request.body.targetUserId
+        : undefined;
+      const account = await Promise.resolve(verifyWeChatAccount(request.params.accountId, targetUserId));
+      const settings = loadAlertSettings(alertSettingsPath);
+      response.json({
+        account,
+        settings,
+        status: alertStatus(settings),
+        wechatAccounts: getWeChatAccountsStatus?.() ?? defaultWeChatAccountsStatus(settings)
+      });
+    } catch (error) {
+      respondWeChatAccountError(response, error, "wechat_account_verify_failed");
+    }
   });
 
   app.post("/api/settings/wechat/start", (_request, response) => {
@@ -362,21 +570,46 @@ export function createApp({
     }
   });
 
+  app.post("/api/settings/alerts/test/account/:accountId", async (request, response) => {
+    try {
+      const settings = loadAlertSettings(alertSettingsPath);
+      const target = findAlertTarget(settings, request.params.accountId);
+      if (!target || target.kind !== "wechat-account") {
+        response.status(404).json({ error: "wechat_account_not_found" });
+        return;
+      }
+
+      await sendTestAlert?.(formatTestAlertMessage(settings.language), target.targetId);
+      response.status(202).json({
+        accepted: true,
+        accountId: target.id,
+        status: alertStatus(settings),
+        wechatAccounts: getWeChatAccountsStatus?.() ?? defaultWeChatAccountsStatus(settings)
+      });
+    } catch (error) {
+      response.status(500).json({
+        error: "alert_test_failed",
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
   app.post("/api/settings/alerts/test/:recipientId", async (request, response) => {
     try {
       const settings = loadAlertSettings(alertSettingsPath);
-      const recipient = settings.wechatRecipients.find((r) => r.id === request.params.recipientId);
-      if (!recipient) {
+      const target = findAlertTarget(settings, request.params.recipientId);
+      if (!target) {
         response.status(404).json({ error: "recipient_not_found" });
         return;
       }
 
-      await sendTestAlert?.(formatTestAlertMessage(settings.language), recipient.contactId);
+      await sendTestAlert?.(formatTestAlertMessage(settings.language), target.targetId);
       response.status(202).json({
         accepted: true,
-        recipientId: recipient.id,
+        recipientId: target.id,
         status: alertStatus(settings),
-        wechat: getWeChatStatus?.() ?? defaultWeChatStatus(recipient.contactId)
+        wechat: getWeChatStatus?.() ?? defaultWeChatStatus(target.targetId),
+        wechatAccounts: getWeChatAccountsStatus?.() ?? defaultWeChatAccountsStatus(settings)
       });
     } catch (error) {
       response.status(500).json({
@@ -496,28 +729,30 @@ function isAlertSettingsInput(value: unknown): value is AlertSettings {
   if (value.wechatRoomId != null && typeof value.wechatRoomId !== "string") return false;
   // wechatRecipients is optional in input (config normalizer handles it)
   if (value.wechatRecipients != null && !Array.isArray(value.wechatRecipients)) return false;
+  // wechatAccounts is optional in input (config normalizer handles it)
+  if (value.wechatAccounts != null && !Array.isArray(value.wechatAccounts)) return false;
   return true;
 }
 
 function alertStatus(settings: AlertSettings): { enabled: boolean; configured: boolean } {
   return {
     enabled: settings.enabled,
-    configured: settings.wechatRecipients.some((r) => r.enabled)
+    configured: enabledAlertTargets(settings).length > 0
   };
 }
 
-async function sendTestAlertToRecipients(
+async function sendTestAlertToTargets(
   sendTestAlert: AppDependencies["sendTestAlert"],
   message: string,
-  recipients: WeChatRecipient[]
+  targets: AlertDeliveryTarget[]
 ): Promise<void> {
   const failures: string[] = [];
 
-  for (const recipient of recipients) {
+  for (const target of targets) {
     try {
-      await sendTestAlert?.(message, recipient.contactId);
+      await sendTestAlert?.(message, target.targetId);
     } catch (error) {
-      failures.push(`${recipient.contactId}: ${error instanceof Error ? error.message : String(error)}`);
+      failures.push(`${target.label}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
@@ -570,4 +805,33 @@ function defaultWeChatStatus(alertTargetUserId = ""): WeChatConnectorStatus {
         : null
     })
   };
+}
+
+function defaultWeChatAccountsStatus(settings: AlertSettings): WeChatAccountsStatus {
+  const accounts = settings.wechatAccounts.map((account): WeChatAccountConnectorStatus => {
+    const connector = defaultWeChatStatus(account.alertTargetUserId ?? "");
+    return {
+      ...account,
+      storageDir: "",
+      verified: Boolean(account.alertTargetUserId),
+      connector
+    };
+  });
+
+  return {
+    accounts,
+    activeLoginAccountId: null,
+    enabledCount: accounts.filter((account) => account.enabled).length,
+    verifiedCount: accounts.filter((account) => account.enabled && account.verified).length
+  };
+}
+
+function respondWeChatAccountError(
+  response: express.Response,
+  error: unknown,
+  code: string
+): void {
+  const message = error instanceof Error ? error.message : String(error);
+  const status = /not found/i.test(message) ? 404 : /must be|No inbound|not verified/i.test(message) ? 400 : 500;
+  response.status(status).json({ error: code, message });
 }

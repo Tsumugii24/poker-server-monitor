@@ -1,4 +1,4 @@
-import type { AlertSettings, MetricSnapshot, RefreshTrigger, ServerConfig, WeChatRecipient } from "../shared/types";
+import type { AlertSettings, MetricSnapshot, RefreshTrigger, ServerConfig } from "../shared/types";
 
 export type AlertRefreshEvent = {
   servers: ServerConfig[];
@@ -9,7 +9,14 @@ export type AlertRefreshEvent = {
 
 export type AlertServiceOptions = {
   getSettings: () => AlertSettings;
-  send: (message: string, roomId: string) => Promise<void> | void;
+  send: (message: string, targetId: string) => Promise<void> | void;
+};
+
+export type AlertDeliveryTarget = {
+  id: string;
+  label: string;
+  targetId: string;
+  kind: "wechat-account" | "legacy-recipient";
 };
 
 export class AlertService {
@@ -23,8 +30,8 @@ export class AlertService {
       return;
     }
 
-    const enabledRecipients = settings.wechatRecipients.filter((r) => r.enabled);
-    if (enabledRecipients.length === 0) {
+    const targets = enabledAlertTargets(settings);
+    if (targets.length === 0) {
       return;
     }
 
@@ -42,12 +49,12 @@ export class AlertService {
 
     let anySent = false;
     const errors: string[] = [];
-    for (const recipient of enabledRecipients) {
+    for (const target of targets) {
       try {
-        await this.options.send(message, recipient.contactId);
+        await this.options.send(message, target.targetId);
         anySent = true;
       } catch (error) {
-        errors.push(`${recipient.contactId}: ${error instanceof Error ? error.message : String(error)}`);
+        errors.push(`${target.label}: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
 
@@ -71,22 +78,21 @@ export class AlertService {
     const message = formatTestAlertMessage(settings.language);
 
     if (recipientId) {
-      const recipient = settings.wechatRecipients.find((r) => r.id === recipientId);
-      if (!recipient) {
-        throw new Error(`Recipient ${recipientId} not found`);
+      const target = findAlertTarget(settings, recipientId);
+      if (!target) {
+        throw new Error(`Alert target ${recipientId} not found`);
       }
-      await this.options.send(message, recipient.contactId);
+      await this.options.send(message, target.targetId);
       return;
     }
 
-    // Send to all enabled recipients
-    const enabledRecipients = settings.wechatRecipients.filter((r) => r.enabled);
-    if (enabledRecipients.length === 0) {
-      throw new Error("No enabled recipients configured");
+    const targets = enabledAlertTargets(settings);
+    if (targets.length === 0) {
+      throw new Error("No enabled WeChat alert accounts configured");
     }
 
-    for (const recipient of enabledRecipients) {
-      await this.options.send(message, recipient.contactId);
+    for (const target of targets) {
+      await this.options.send(message, target.targetId);
     }
   }
 
@@ -94,9 +100,59 @@ export class AlertService {
     const settings = this.options.getSettings();
     return {
       enabled: settings.enabled,
-      configured: settings.wechatRecipients.some((r) => r.enabled)
+      configured: enabledAlertTargets(settings).length > 0
     };
   }
+}
+
+export function enabledAlertTargets(settings: AlertSettings): AlertDeliveryTarget[] {
+  const accountTargets = settings.wechatAccounts
+    .filter((account) => account.enabled && account.alertTargetUserId)
+    .map((account): AlertDeliveryTarget => ({
+      id: account.id,
+      label: account.label || account.botUserId || account.alertTargetUserId || account.id,
+      targetId: account.id,
+      kind: "wechat-account"
+    }));
+
+  if (settings.wechatAccounts.length > 0) {
+    return accountTargets;
+  }
+
+  return settings.wechatRecipients
+    .filter((recipient) => recipient.enabled)
+    .map((recipient): AlertDeliveryTarget => ({
+      id: recipient.id,
+      label: recipient.label || recipient.contactId,
+      targetId: recipient.contactId,
+      kind: "legacy-recipient"
+    }));
+}
+
+export function findAlertTarget(settings: AlertSettings, targetId: string): AlertDeliveryTarget | null {
+  const account = settings.wechatAccounts.find((candidate) => candidate.id === targetId);
+  if (account) {
+    if (!account.alertTargetUserId) {
+      throw new Error(`WeChat account ${account.label} is not verified for alert delivery`);
+    }
+    return {
+      id: account.id,
+      label: account.label || account.botUserId || account.alertTargetUserId,
+      targetId: account.id,
+      kind: "wechat-account"
+    };
+  }
+
+  const recipient = settings.wechatRecipients.find((candidate) => candidate.id === targetId);
+  if (!recipient) {
+    return null;
+  }
+  return {
+    id: recipient.id,
+    label: recipient.label || recipient.contactId,
+    targetId: recipient.contactId,
+    kind: "legacy-recipient"
+  };
 }
 
 export function shouldSendOfflineAlert(

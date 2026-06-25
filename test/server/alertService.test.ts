@@ -147,6 +147,51 @@ describe("AlertService", () => {
     expect(send.mock.calls.map((call) => call[1])).toEqual(["one@im.wechat", "two@im.wechat"]);
   });
 
+  it("sends offline alerts to every enabled verified WeChat account", async () => {
+    const send = vi.fn();
+    const service = new AlertService({
+      getSettings: () => enabledRecipientSettings({
+        wechatAccounts: [
+          {
+            id: "account-1",
+            label: "One",
+            enabled: true,
+            addedAt: "2026-05-20T10:00:00.000Z",
+            botUserId: "bot-one@im.wechat",
+            alertTargetUserId: "target-one@im.wechat"
+          },
+          {
+            id: "account-2",
+            label: "Two",
+            enabled: true,
+            addedAt: "2026-05-20T10:00:00.000Z",
+            botUserId: "bot-two@im.wechat",
+            alertTargetUserId: "target-two@im.wechat"
+          },
+          {
+            id: "account-3",
+            label: "Pending",
+            enabled: true,
+            addedAt: "2026-05-20T10:00:00.000Z",
+            botUserId: "pending@im.wechat",
+            alertTargetUserId: null
+          }
+        ]
+      }),
+      send
+    });
+
+    await service.handleRefresh({
+      servers,
+      snapshots: [snapshot("prod-01", "offline")],
+      trigger: "scheduled",
+      startedAt: "2026-05-20T10:00:00.000Z"
+    });
+
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(send.mock.calls.map((call) => call[1])).toEqual(["account-1", "account-2"]);
+  });
+
   it("formats offline alerts in Chinese", async () => {
     const send = vi.fn();
     const service = new AlertService({

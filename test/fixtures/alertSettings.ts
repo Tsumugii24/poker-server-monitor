@@ -4,6 +4,7 @@ export const defaultAlertSettingsFixture: AlertSettings = {
   enabled: false,
   wechatRoomId: "",
   wechatRecipients: [],
+  wechatAccounts: [],
   cooldownMinutes: 60,
   language: "en",
   sshCommandTimeoutSeconds: 15,
