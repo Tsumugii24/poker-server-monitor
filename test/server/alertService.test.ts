@@ -5,6 +5,7 @@ import {
   formatTestAlertMessage,
   shouldSendOfflineAlert
 } from "../../src/server/alertService";
+import { defaultAlertSettingsFixture, enabledRecipientSettings } from "../fixtures/alertSettings";
 
 const servers: ServerConfig[] = [
   { id: "prod-01", name: "Production 01", host: "10.0.0.1", port: 22, enabled: true, note: "TBD" },
@@ -68,7 +69,7 @@ describe("AlertService", () => {
   it("does not send alerts when disabled", async () => {
     const send = vi.fn();
     const service = new AlertService({
-      getSettings: () => ({ enabled: false, wechatRoomId: "", cooldownMinutes: 60, language: "en" }),
+      getSettings: () => defaultAlertSettingsFixture,
       send
     });
 
@@ -85,7 +86,7 @@ describe("AlertService", () => {
   it("sends one WeChat alert when a server becomes offline", async () => {
     const send = vi.fn();
     const service = new AlertService({
-      getSettings: () => ({ enabled: true, wechatRoomId: "12345@chatroom", cooldownMinutes: 60, language: "en" }),
+      getSettings: () => enabledRecipientSettings(),
       send
     });
 
@@ -106,7 +107,7 @@ describe("AlertService", () => {
   it("formats offline alerts in Chinese", async () => {
     const send = vi.fn();
     const service = new AlertService({
-      getSettings: () => ({ enabled: true, wechatRoomId: "12345@chatroom", cooldownMinutes: 60, language: "zh" }),
+      getSettings: () => enabledRecipientSettings({ language: "zh" }),
       send
     });
 
@@ -131,7 +132,7 @@ describe("AlertService", () => {
       .mockRejectedValueOnce(new Error("WeChat bot is not logged in yet."))
       .mockResolvedValue(undefined);
     const service = new AlertService({
-      getSettings: () => ({ enabled: true, wechatRoomId: "12345@chatroom", cooldownMinutes: 120, language: "en" }),
+      getSettings: () => enabledRecipientSettings({ cooldownMinutes: 120 }),
       send
     });
 
@@ -155,7 +156,7 @@ describe("AlertService", () => {
   it("always sends on manual refresh even inside the cooldown window", async () => {
     const send = vi.fn();
     const service = new AlertService({
-      getSettings: () => ({ enabled: true, wechatRoomId: "12345@chatroom", cooldownMinutes: 120, language: "en" }),
+      getSettings: () => enabledRecipientSettings({ cooldownMinutes: 120 }),
       send
     });
 
@@ -178,7 +179,7 @@ describe("AlertService", () => {
   it("does not repeat automatic alerts before the global cooldown expires", async () => {
     const send = vi.fn();
     const service = new AlertService({
-      getSettings: () => ({ enabled: true, wechatRoomId: "12345@chatroom", cooldownMinutes: 120, language: "en" }),
+      getSettings: () => enabledRecipientSettings({ cooldownMinutes: 120 }),
       send
     });
 

@@ -1626,6 +1626,16 @@ td .port-value {
   margin-bottom: 16px;
 }
 
+.sw-recipients-login {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sw-recipients-login h4 {
+  margin: 0;
+}
+
 .sw-recipients-header h4 {
   margin-bottom: 4px;
 }

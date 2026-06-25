@@ -40,19 +40,26 @@ export class AlertService {
     const serverById = new Map(event.servers.map((server) => [server.id, server]));
     const message = formatOfflineMessage(offlineSnapshots, serverById, event, settings.language);
 
+    let anySent = false;
     const errors: string[] = [];
     for (const recipient of enabledRecipients) {
       try {
         await this.options.send(message, recipient.contactId);
+        anySent = true;
       } catch (error) {
         errors.push(`${recipient.contactId}: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
 
-    this.lastAlertSentAt = Date.now();
+    if (anySent) {
+      this.lastAlertSentAt = Date.now();
+    }
 
     if (errors.length > 0) {
       console.error(`Alert delivery failed for ${errors.length} recipient(s):\n${errors.join("\n")}`);
+      if (!anySent) {
+        throw new Error(errors[0]?.split(": ").slice(1).join(": ") ?? "Alert delivery failed");
+      }
     }
   }
 

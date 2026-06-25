@@ -51,6 +51,10 @@ export type AlertSettings = {
   wechatRecipients: WeChatRecipient[];
   cooldownMinutes: number;
   language: "en" | "zh";
+  /** SSH command execution timeout in seconds. */
+  sshCommandTimeoutSeconds: number;
+  /** SSH connection handshake timeout in seconds. */
+  sshConnectTimeoutSeconds: number;
 };
 
 export type AlertStatus = {

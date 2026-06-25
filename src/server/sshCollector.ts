@@ -1,6 +1,17 @@
 import { Client } from "ssh2";
+import {
+  DEFAULT_SSH_COMMAND_TIMEOUT_SECONDS,
+  DEFAULT_SSH_CONNECT_TIMEOUT_SECONDS,
+  type SshTimeoutOptions
+} from "../shared/sshSettings";
 import type { MetricSnapshot, ServerConfig } from "../shared/types";
 import { buildFailureSnapshot, buildMetricSnapshot, parseCollectorOutput } from "./metrics";
+
+export type { SshTimeoutOptions } from "../shared/sshSettings";
+export {
+  DEFAULT_SSH_COMMAND_TIMEOUT_SECONDS,
+  DEFAULT_SSH_CONNECT_TIMEOUT_SECONDS
+} from "../shared/sshSettings";
 
 export type SshCredentials = {
   username: string;
@@ -72,14 +83,21 @@ export async function collectServerMetrics(
 }
 
 export class Ssh2Executor implements SshExecutor {
+  constructor(private readonly timeouts: Partial<SshTimeoutOptions> = {}) {}
+
   run(server: ServerConfig, credentials: SshCredentials, command: string): Promise<string> {
+    const commandTimeoutMs =
+      this.timeouts.commandTimeoutMs ?? DEFAULT_SSH_COMMAND_TIMEOUT_SECONDS * 1000;
+    const connectTimeoutMs =
+      this.timeouts.connectTimeoutMs ?? DEFAULT_SSH_CONNECT_TIMEOUT_SECONDS * 1000;
+
     return new Promise((resolve, reject) => {
       const client = new Client();
       let settled = false;
 
       const timeout = setTimeout(() => {
         settle(new Error("SSH command timed out"), true);
-      }, 15_000);
+      }, commandTimeoutMs);
 
       const settle = (value: Error | string, failed: boolean) => {
         if (settled) return;
@@ -123,7 +141,7 @@ export class Ssh2Executor implements SshExecutor {
           port: server.port,
           username: credentials.username,
           password: credentials.password,
-          readyTimeout: 10_000
+          readyTimeout: connectTimeoutMs
         });
     });
   }

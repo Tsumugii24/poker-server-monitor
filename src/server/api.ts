@@ -438,6 +438,18 @@ function isAlertSettingsInput(value: unknown): value is AlertSettings {
   if (typeof value.enabled !== "boolean") return false;
   if (typeof value.cooldownMinutes !== "number" || !Number.isFinite(value.cooldownMinutes)) return false;
   if (value.language !== "en" && value.language !== "zh") return false;
+  if (
+    value.sshCommandTimeoutSeconds != null &&
+    (typeof value.sshCommandTimeoutSeconds !== "number" || !Number.isFinite(value.sshCommandTimeoutSeconds))
+  ) {
+    return false;
+  }
+  if (
+    value.sshConnectTimeoutSeconds != null &&
+    (typeof value.sshConnectTimeoutSeconds !== "number" || !Number.isFinite(value.sshConnectTimeoutSeconds))
+  ) {
+    return false;
+  }
   // wechatRoomId is optional now (derived from recipients), but accept it for backward compat
   if (value.wechatRoomId != null && typeof value.wechatRoomId !== "string") return false;
   // wechatRecipients is optional in input (config normalizer handles it)

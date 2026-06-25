@@ -1,4 +1,4 @@
-import { LogOut, Plus, RefreshCw, Send, Settings, Trash2, UserRound, X } from "lucide-react";
+import { LogOut, Plus, RefreshCw, Send, Settings, Timer, Trash2, UserRound, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import type { AlertSettings, AlertStatus, WeChatConnectorStatus, WeChatRecipient } from "../shared/types";
 import {
@@ -12,7 +12,7 @@ import {
 import { WeChatQrPanel } from "./WeChatQrPanel";
 
 /* ── Tab types ────────────────────────────────────────────────── */
-type SettingsTab = "connection" | "recipients" | "status";
+type SettingsTab = "connection" | "recipients" | "check" | "status";
 
 type SessionChoice = "pending" | "reuse" | "new";
 
@@ -101,15 +101,21 @@ export function SettingsWizard({
   /* ── Derived state ──────────────────────────────────────────── */
   const hasContext = hasWeChatMessageContext(wechatStatus, draft.wechatRoomId);
   const showStoredSessionPrompt = sessionChoice === "pending" && offerStoredSession;
-  const showQr = sessionChoice === "new" && Boolean(wechatStatus.qrUrl) && !wechatStatus.loggedIn;
+  const loginUiActive = !wechatStatus.loggedIn && sessionChoice !== "pending";
+  const showQr = loginUiActive && Boolean(wechatStatus.qrUrl);
   const waitingForQr =
-    sessionChoice === "new" &&
-    !wechatStatus.loggedIn &&
+    loginUiActive &&
     wechatStatus.awaitingQr &&
     !wechatStatus.qrUrl &&
     !wechatStatus.lastError;
   const restoringSession = sessionChoice === "reuse" && !wechatStatus.loggedIn && !wechatStatus.lastError;
   const loginFailed = !wechatStatus.loggedIn && Boolean(wechatStatus.lastError) && !wechatStatus.awaitingQr;
+  const showStartLogin =
+    loginUiActive &&
+    !showQr &&
+    !waitingForQr &&
+    !restoringSession &&
+    !loginFailed;
 
   /* ── Tab configuration ──────────────────────────────────────── */
   const tabs: Array<{ id: SettingsTab; label: string; badge?: string }> = useMemo(() => [
@@ -126,6 +132,10 @@ export function SettingsWizard({
         : undefined
     },
     {
+      id: "check",
+      label: copy.tabs.check
+    },
+    {
       id: "status",
       label: copy.tabs.status
     }
@@ -135,7 +145,13 @@ export function SettingsWizard({
   const handleSave = async () => {
     setActionError(null);
     try {
-      await onSave({ ...draft, enabled: true, cooldownMinutes: Math.max(1, draft.cooldownMinutes) });
+      await onSave({
+        ...draft,
+        enabled: true,
+        cooldownMinutes: Math.max(1, draft.cooldownMinutes),
+        sshCommandTimeoutSeconds: Math.max(1, draft.sshCommandTimeoutSeconds),
+        sshConnectTimeoutSeconds: Math.max(1, draft.sshConnectTimeoutSeconds)
+      });
     } catch (error) {
       setActionError(error instanceof Error ? error.message : String(error));
     }
@@ -238,6 +254,118 @@ export function SettingsWizard({
     }
   };
 
+  const handleStartLogin = async () => {
+    setAccountBusy(true);
+    setActionError(null);
+    setSessionChoice("new");
+    try {
+      await onStartWeChat();
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setAccountBusy(false);
+    }
+  };
+
+  const weChatLoginFlow = (
+    <>
+      {showStoredSessionPrompt ? (
+        <>
+          <h4>{copy.session.title}</h4>
+          <p className="sw-help">{copy.session.detail}</p>
+          <div className="sw-session-card">
+            <div className="sw-session-meta">
+              <div>
+                <span className="sw-meta-label">{copy.session.account}</span>
+                <strong>{wechatStatus.storedSession.botUserId ?? copy.account.unknownUser}</strong>
+              </div>
+              {wechatStatus.storedSession.savedAt ? (
+                <div>
+                  <span className="sw-meta-label">{copy.session.savedAt}</span>
+                  <strong>{formatDate(wechatStatus.storedSession.savedAt)}</strong>
+                </div>
+              ) : null}
+              {wechatStatus.storedSession.contextUserIds.length > 0 ? (
+                <div>
+                  <span className="sw-meta-label">{copy.session.contextCount}</span>
+                  <strong>{wechatStatus.storedSession.contextUserIds.length}</strong>
+                </div>
+              ) : null}
+            </div>
+            {wechatStatus.storedSession.verifiedForTarget ? (
+              <div className="sw-inline-success">{copy.session.verifiedTarget}</div>
+            ) : wechatStatus.storedSession.contextUserIds.length > 0 ? (
+              <div className="sw-hint">{copy.session.hasContext}</div>
+            ) : (
+              <div className="sw-hint">{copy.session.loginOnly}</div>
+            )}
+            <div className="sw-actions">
+              <button className="sw-btn primary" disabled={accountBusy || saving} onClick={() => void handleRestoreSession()}>
+                {copy.session.reuse}
+              </button>
+              <button className="sw-btn ghost" disabled={accountBusy || saving} onClick={() => void handleNewSession()}>
+                {copy.session.useNew}
+              </button>
+            </div>
+          </div>
+        </>
+      ) : (
+        <>
+          {wechatStatus.lastError && !wechatStatus.loggedIn ? (
+            <div className="notice error">{wechatStatus.lastError}</div>
+          ) : null}
+
+          {showQr ? (
+            <WeChatQrPanel url={wechatStatus.qrUrl!} language={language} />
+          ) : waitingForQr ? (
+            <div className="sw-waiting">{copy.connection.fetchingQr}</div>
+          ) : restoringSession ? (
+            <div className="sw-waiting">{copy.session.restoring}</div>
+          ) : wechatStatus.loggedIn ? (
+            <div className="sw-inline-success">{copy.connection.loggedIn}</div>
+          ) : loginFailed ? (
+            <div className="sw-actions">
+              <button className="sw-btn primary" disabled={saving || accountBusy} onClick={() => void handleStartLogin()}>
+                {copy.connection.retryLogin}
+              </button>
+            </div>
+          ) : showStartLogin ? (
+            <div className="sw-actions">
+              <button className="sw-btn primary" disabled={saving || accountBusy} onClick={() => void handleStartLogin()}>
+                {copy.connection.startLogin}
+              </button>
+            </div>
+          ) : null}
+
+          {wechatStatus.loggedIn && !hasContext ? (
+            <div className="sw-context-hint">
+              <p className="sw-help">{copy.connection.contextHint}</p>
+              {wechatStatus.recentChats.length > 0 ? (
+                <div className="sw-recent-chats">
+                  {wechatStatus.recentChats.map((chat) => (
+                    <div key={chat.userId} className="sw-chat-item">
+                      <strong>{chat.userId}</strong>
+                      <span>{chat.text || copy.connection.noPreview}</span>
+                      <span className="sw-chat-time">{formatDate(chat.receivedAt)}</span>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="sw-waiting">{copy.connection.waitingMessage}</div>
+              )}
+              <div className="sw-actions">
+                <button className="sw-btn ghost" disabled={saving} onClick={() => void onRefreshWeChat()}>
+                  <RefreshCw size={14} />
+                  {copy.refreshStatus}
+                </button>
+              </div>
+            </div>
+          ) : null}
+        </>
+      )}
+    </>
+  );
+
   /* ── Render ─────────────────────────────────────────────────── */
   return (
     <section
@@ -323,101 +451,12 @@ export function SettingsWizard({
         {activeTab === "connection" ? (
           <div className="sw-tab-panel">
             {showStoredSessionPrompt ? (
-              <>
-                <h4>{copy.session.title}</h4>
-                <p className="sw-help">{copy.session.detail}</p>
-                <div className="sw-session-card">
-                  <div className="sw-session-meta">
-                    <div>
-                      <span className="sw-meta-label">{copy.session.account}</span>
-                      <strong>{wechatStatus.storedSession.botUserId ?? copy.account.unknownUser}</strong>
-                    </div>
-                    {wechatStatus.storedSession.savedAt ? (
-                      <div>
-                        <span className="sw-meta-label">{copy.session.savedAt}</span>
-                        <strong>{formatDate(wechatStatus.storedSession.savedAt)}</strong>
-                      </div>
-                    ) : null}
-                    {wechatStatus.storedSession.contextUserIds.length > 0 ? (
-                      <div>
-                        <span className="sw-meta-label">{copy.session.contextCount}</span>
-                        <strong>{wechatStatus.storedSession.contextUserIds.length}</strong>
-                      </div>
-                    ) : null}
-                  </div>
-                  {wechatStatus.storedSession.verifiedForTarget ? (
-                    <div className="sw-inline-success">{copy.session.verifiedTarget}</div>
-                  ) : wechatStatus.storedSession.contextUserIds.length > 0 ? (
-                    <div className="sw-hint">{copy.session.hasContext}</div>
-                  ) : (
-                    <div className="sw-hint">{copy.session.loginOnly}</div>
-                  )}
-                  <div className="sw-actions">
-                    <button className="sw-btn primary" disabled={accountBusy || saving} onClick={() => void handleRestoreSession()}>
-                      {copy.session.reuse}
-                    </button>
-                    <button className="sw-btn ghost" disabled={accountBusy || saving} onClick={() => void handleNewSession()}>
-                      {copy.session.useNew}
-                    </button>
-                  </div>
-                </div>
-              </>
+              weChatLoginFlow
             ) : (
               <>
                 <h4>{copy.connection.title}</h4>
                 <p className="sw-help">{copy.connection.detail}</p>
-
-                {wechatStatus.lastError && !wechatStatus.loggedIn ? (
-                  <div className="notice error">{wechatStatus.lastError}</div>
-                ) : null}
-
-                {showQr ? (
-                  <WeChatQrPanel url={wechatStatus.qrUrl!} language={language} />
-                ) : waitingForQr ? (
-                  <div className="sw-waiting">{copy.connection.fetchingQr}</div>
-                ) : restoringSession ? (
-                  <div className="sw-waiting">{copy.session.restoring}</div>
-                ) : wechatStatus.loggedIn ? (
-                  <div className="sw-inline-success">{copy.connection.loggedIn}</div>
-                ) : loginFailed ? (
-                  <div className="sw-actions">
-                    <button className="sw-btn primary" disabled={saving || accountBusy} onClick={() => void onStartWeChat()}>
-                      {copy.connection.retryLogin}
-                    </button>
-                  </div>
-                ) : sessionChoice === "new" ? (
-                  <div className="sw-actions">
-                    <button className="sw-btn primary" disabled={saving || accountBusy} onClick={() => void onStartWeChat()}>
-                      {copy.connection.startLogin}
-                    </button>
-                  </div>
-                ) : null}
-
-                {/* Context check hint */}
-                {wechatStatus.loggedIn && !hasContext ? (
-                  <div className="sw-context-hint">
-                    <p className="sw-help">{copy.connection.contextHint}</p>
-                    {wechatStatus.recentChats.length > 0 ? (
-                      <div className="sw-recent-chats">
-                        {wechatStatus.recentChats.map((chat) => (
-                          <div key={chat.userId} className="sw-chat-item">
-                            <strong>{chat.userId}</strong>
-                            <span>{chat.text || copy.connection.noPreview}</span>
-                            <span className="sw-chat-time">{formatDate(chat.receivedAt)}</span>
-                          </div>
-                        ))}
-                      </div>
-                    ) : (
-                      <div className="sw-waiting">{copy.connection.waitingMessage}</div>
-                    )}
-                    <div className="sw-actions">
-                      <button className="sw-btn ghost" disabled={saving} onClick={() => void onRefreshWeChat()}>
-                        <RefreshCw size={14} />
-                        {copy.refreshStatus}
-                      </button>
-                    </div>
-                  </div>
-                ) : null}
+                {weChatLoginFlow}
               </>
             )}
           </div>
@@ -426,6 +465,14 @@ export function SettingsWizard({
         {/* ── Recipients Tab ─────────────────────────────────── */}
         {activeTab === "recipients" ? (
           <div className="sw-tab-panel">
+            {!wechatStatus.loggedIn ? (
+              <div className="sw-recipients-login">
+                <h4>{copy.recipients.loginRequiredTitle}</h4>
+                <p className="sw-help">{copy.recipients.loginRequired}</p>
+                {weChatLoginFlow}
+              </div>
+            ) : (
+              <>
             <div className="sw-recipients-header">
               <div>
                 <h4>{copy.recipients.title}</h4>
@@ -618,6 +665,57 @@ export function SettingsWizard({
                 </button>
               </div>
             </div>
+              </>
+            )}
+          </div>
+        ) : null}
+
+        {/* ── Connection Check Tab ───────────────────────────── */}
+        {activeTab === "check" ? (
+          <div className="sw-tab-panel">
+            <h4>{copy.check.title}</h4>
+            <p className="sw-help">{copy.check.detail}</p>
+
+            <div className="sw-global-settings">
+              <div className="sw-settings-grid">
+                <div className="sw-field">
+                  <label>{copy.check.connectTimeout}</label>
+                  <input
+                    type="number"
+                    min="1"
+                    value={draft.sshConnectTimeoutSeconds || ""}
+                    onChange={(e) => setDraft((c) => ({
+                      ...c,
+                      sshConnectTimeoutSeconds: e.target.value === ""
+                        ? 0
+                        : Math.max(1, Number(e.target.value) || 1)
+                    }))}
+                  />
+                  <span className="sw-field-hint">{copy.check.connectTimeoutHelp}</span>
+                </div>
+                <div className="sw-field">
+                  <label>{copy.check.commandTimeout}</label>
+                  <input
+                    type="number"
+                    min="1"
+                    value={draft.sshCommandTimeoutSeconds || ""}
+                    onChange={(e) => setDraft((c) => ({
+                      ...c,
+                      sshCommandTimeoutSeconds: e.target.value === ""
+                        ? 0
+                        : Math.max(1, Number(e.target.value) || 1)
+                    }))}
+                  />
+                  <span className="sw-field-hint">{copy.check.commandTimeoutHelp}</span>
+                </div>
+              </div>
+              <div className="sw-actions">
+                <button className="sw-btn primary" disabled={saving} onClick={() => void handleSave()}>
+                  <Timer size={14} />
+                  {copy.check.saveSettings}
+                </button>
+              </div>
+            </div>
           </div>
         ) : null}
 
@@ -753,6 +851,7 @@ const COPY = {
     tabs: {
       connection: "Connection",
       recipients: "Recipients",
+      check: "Connection Check",
       status: "Status"
     },
     refreshStatus: "Refresh",
@@ -802,6 +901,8 @@ const COPY = {
       labelPlaceholder: "e.g. Team Lead, Ops Room",
       suggestions: "Recent contacts",
       empty: "No recipients configured yet. Add a WeChat contact to start receiving alerts.",
+      loginRequiredTitle: "Log in the bot first",
+      loginRequired: "Scan the QR code below to authorize the WeChat bot before adding notification recipients.",
       added: "Added",
       enabled: "Receiving alerts",
       disabled: "Alerts paused",
@@ -812,6 +913,15 @@ const COPY = {
       language: "Alert Language",
       cooldown: "Alert Interval (min)",
       cooldownHelp: "Minimum interval between auto alerts. Manual refresh always sends.",
+      saveSettings: "Save Settings"
+    },
+    check: {
+      title: "Connection Check Settings",
+      detail: "Configure SSH timeouts used when refreshing server metrics and pipeline status.",
+      connectTimeout: "SSH Connect Timeout (sec)",
+      connectTimeoutHelp: "Maximum wait for the SSH handshake. Default: 10 seconds.",
+      commandTimeout: "SSH Command Timeout (sec)",
+      commandTimeoutHelp: "Maximum wait for metric collection commands. Default: 15 seconds.",
       saveSettings: "Save Settings"
     },
     status: {
@@ -841,6 +951,7 @@ const COPY = {
     tabs: {
       connection: "连接",
       recipients: "接收人",
+      check: "连接检查",
       status: "状态"
     },
     refreshStatus: "刷新",
@@ -890,6 +1001,8 @@ const COPY = {
       labelPlaceholder: "例如：运维组、技术负责人",
       suggestions: "最近联系人",
       empty: "尚未配置接收人。添加微信联系人以开始接收告警。",
+      loginRequiredTitle: "请先登录 Bot",
+      loginRequired: "添加通知接收人之前，请先扫描下方二维码完成微信 Bot 授权登录。",
       added: "添加于",
       enabled: "接收告警中",
       disabled: "告警已暂停",
@@ -900,6 +1013,15 @@ const COPY = {
       language: "告警语言",
       cooldown: "告警间隔（分钟）",
       cooldownHelp: "自动检查的最小间隔。手动刷新始终发送。",
+      saveSettings: "保存设置"
+    },
+    check: {
+      title: "连接检查设置",
+      detail: "配置刷新服务器指标与 Pipeline 状态时使用的 SSH 超时时间。",
+      connectTimeout: "SSH 连接超时（秒）",
+      connectTimeoutHelp: "等待 SSH 握手的最大时间。默认 10 秒。",
+      commandTimeout: "SSH 命令超时（秒）",
+      commandTimeoutHelp: "等待指标采集命令完成的最大时间。默认 15 秒。",
       saveSettings: "保存设置"
     },
     status: {

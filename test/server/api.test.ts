@@ -153,8 +153,11 @@ describe("monitor API", () => {
     expect(response.body.settings).toEqual({
       enabled: false,
       wechatRoomId: "",
+      wechatRecipients: [],
       cooldownMinutes: 60,
-      language: "en"
+      language: "en",
+      sshCommandTimeoutSeconds: 15,
+      sshConnectTimeoutSeconds: 10
     });
     expect(response.body.status).toEqual({ enabled: false, configured: false });
   });

@@ -3,6 +3,10 @@ import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import dotenv from "dotenv";
+import {
+  DEFAULT_SSH_COMMAND_TIMEOUT_SECONDS,
+  DEFAULT_SSH_CONNECT_TIMEOUT_SECONDS
+} from "../shared/sshSettings";
 import type { AlertSettings, ServerConfig, WeChatRecipient } from "../shared/types";
 
 export type RuntimeConfig = {
@@ -184,7 +188,9 @@ function defaultAlertSettings(): AlertSettings {
     wechatRoomId: "",
     wechatRecipients: [],
     cooldownMinutes: 60,
-    language: "en"
+    language: "en",
+    sshCommandTimeoutSeconds: DEFAULT_SSH_COMMAND_TIMEOUT_SECONDS,
+    sshConnectTimeoutSeconds: DEFAULT_SSH_CONNECT_TIMEOUT_SECONDS
   };
 }
 
@@ -194,6 +200,12 @@ function normalizeAlertSettings(value: Record<string, unknown>): AlertSettings {
     ? 60
     : requiredPositiveNumber(value.cooldownMinutes, "alerts.cooldownMinutes");
   const language = value.language == null ? "en" : requiredAlertLanguage(value.language);
+  const sshCommandTimeoutSeconds = value.sshCommandTimeoutSeconds == null
+    ? DEFAULT_SSH_COMMAND_TIMEOUT_SECONDS
+    : requiredPositiveNumber(value.sshCommandTimeoutSeconds, "alerts.sshCommandTimeoutSeconds");
+  const sshConnectTimeoutSeconds = value.sshConnectTimeoutSeconds == null
+    ? DEFAULT_SSH_CONNECT_TIMEOUT_SECONDS
+    : requiredPositiveNumber(value.sshConnectTimeoutSeconds, "alerts.sshConnectTimeoutSeconds");
 
   // Normalize recipients array
   let recipients: WeChatRecipient[] = [];
@@ -231,7 +243,9 @@ function normalizeAlertSettings(value: Record<string, unknown>): AlertSettings {
     wechatRoomId,
     wechatRecipients: recipients,
     cooldownMinutes,
-    language
+    language,
+    sshCommandTimeoutSeconds,
+    sshConnectTimeoutSeconds
   };
 }
 

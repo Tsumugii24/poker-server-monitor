@@ -2,6 +2,7 @@ import path from "node:path";
 import express from "express";
 import { createApp } from "./api";
 import { AlertService, alertRefreshIntervalMs } from "./alertService";
+import { resolveSshTimeouts } from "../shared/sshSettings";
 import { loadAlertSettings, loadRuntimeConfig, loadServerInventory } from "./config";
 import { MonitorDatabase } from "./db";
 import { RefreshService } from "./refreshService";
@@ -35,6 +36,7 @@ async function main(): Promise<void> {
     intervalMs: alertRefreshIntervalMs(alertSettings, config.refreshIntervalMs),
     credentials: config.ssh,
     pipelineStatusFilePath: config.pipelineStatusFilePath,
+    getSshTimeouts: () => resolveSshTimeouts(loadAlertSettings(config.alertSettingsPath)),
     alerts: alertService
   });
   refreshService.startScheduler({ runImmediately: true });

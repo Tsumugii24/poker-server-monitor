@@ -147,8 +147,11 @@ describe("alert settings loading", () => {
     expect(loadAlertSettings(file)).toEqual({
       enabled: false,
       wechatRoomId: "",
+      wechatRecipients: [],
       cooldownMinutes: 60,
-      language: "en"
+      language: "en",
+      sshCommandTimeoutSeconds: 15,
+      sshConnectTimeoutSeconds: 10
     });
   });
 
@@ -158,15 +161,30 @@ describe("alert settings loading", () => {
     saveAlertSettings(file, {
       enabled: true,
       wechatRoomId: "12345@chatroom",
+      wechatRecipients: [],
       cooldownMinutes: 30,
-      language: "zh"
+      language: "zh",
+      sshCommandTimeoutSeconds: 20,
+      sshConnectTimeoutSeconds: 8
     });
 
-    expect(loadAlertSettings(file)).toEqual({
+    expect(loadAlertSettings(file)).toMatchObject({
       enabled: true,
       wechatRoomId: "12345@chatroom",
       cooldownMinutes: 30,
-      language: "zh"
+      language: "zh",
+      sshCommandTimeoutSeconds: 20,
+      sshConnectTimeoutSeconds: 8
+    });
+  });
+
+  it("applies SSH timeout defaults when fields are omitted", () => {
+    const file = path.join(tempDir, "alerts-partial.json");
+    fs.writeFileSync(file, JSON.stringify({ enabled: true, cooldownMinutes: 30, language: "en" }));
+
+    expect(loadAlertSettings(file)).toMatchObject({
+      sshCommandTimeoutSeconds: 15,
+      sshConnectTimeoutSeconds: 10
     });
   });
 });

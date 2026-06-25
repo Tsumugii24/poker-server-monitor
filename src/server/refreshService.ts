@@ -9,6 +9,7 @@ import type {
 } from "../shared/types";
 import type { MonitorDatabase } from "./db";
 import { collectServerPipelineStatus, buildPipelineFailureSnapshot } from "./pipelineStatusCollector";
+import type { SshTimeoutOptions } from "./sshCollector";
 import { collectServerMetrics, type SshCredentials, Ssh2Executor } from "./sshCollector";
 import type { AlertService } from "./alertService";
 import { classifyWeChatSendError } from "./wechatNotifier";
@@ -21,6 +22,7 @@ export type RefreshServiceOptions = {
   pipelineStatusFilePath?: string;
   collect?: (server: ServerConfig) => Promise<MetricSnapshot>;
   collectPipeline?: (server: ServerConfig) => Promise<PipelineStatusSnapshot>;
+  getSshTimeouts?: () => SshTimeoutOptions;
   alerts?: AlertService;
 };
 
@@ -35,14 +37,13 @@ export class RefreshService {
 
   constructor(private readonly options: RefreshServiceOptions) {
     this.intervalMs = options.intervalMs;
-    const executor = new Ssh2Executor();
     this.collect =
       options.collect ??
       ((server) => {
         if (!options.credentials) {
           throw new Error("SSH credentials are required for refresh collection");
         }
-        return collectServerMetrics(server, options.credentials, executor);
+        return collectServerMetrics(server, options.credentials, this.createExecutor());
       });
     this.collectPipeline =
       options.collectPipeline ??
@@ -56,9 +57,13 @@ export class RefreshService {
           server,
           options.credentials,
           options.pipelineStatusFilePath ?? "~/run/solver_running_status.json",
-          executor
+          this.createExecutor()
         );
       });
+  }
+
+  private createExecutor(): Ssh2Executor {
+    return new Ssh2Executor(this.options.getSshTimeouts?.());
   }
 
   async refreshAll(trigger: RefreshTrigger): Promise<RefreshResponse> {

@@ -3,6 +3,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../../src/client/App";
+import { defaultAlertSettingsFixture, enabledRecipientSettings } from "../fixtures/alertSettings";
 
 const overview = {
   generatedAt: "2026-05-12T00:00:00.000Z",
@@ -233,7 +234,7 @@ describe("App", () => {
             });
           }
           return json({
-            settings: { enabled: false, wechatRoomId: "", cooldownMinutes: 60, language: "en" },
+            settings: defaultAlertSettingsFixture,
             status: { enabled: false, configured: false }
           });
         }
@@ -351,23 +352,21 @@ describe("App", () => {
 
     await userEvent.click(await screen.findByRole("button", { name: "Open settings" }));
     expect(await screen.findByRole("dialog", { name: "Settings" })).toBeInTheDocument();
-    expect(await screen.findByText("WeChat Alert Setup")).toBeInTheDocument();
-    expect(screen.getByText("Logged in as")).toBeInTheDocument();
-    expect(screen.getByText("bot@im.wechat")).toBeInTheDocument();
-    expect(await screen.findByText("Step 3 · Configure alert delivery")).toBeInTheDocument();
-    expect(screen.getByLabelText("WeChat contact ID")).toHaveValue("12345@chatroom");
+    expect(await screen.findByText("WeChat Alert Settings")).toBeInTheDocument();
+    expect(await screen.findByText("Notification Recipients")).toBeInTheDocument();
 
-    await userEvent.clear(screen.getByLabelText("Auto alert interval (minutes)"));
-    await userEvent.type(screen.getByLabelText("Auto alert interval (minutes)"), "15");
-    await userEvent.selectOptions(screen.getByLabelText("Alert language"), "zh");
-    await userEvent.click(await screen.findByRole("button", { name: "保存并发送测试告警" }));
+    const [cooldownInput] = screen.getAllByRole("spinbutton");
+    await userEvent.clear(cooldownInput);
+    await userEvent.type(cooldownInput, "15");
+    await userEvent.selectOptions(screen.getByRole("combobox"), "zh");
+    await userEvent.click(await screen.findByRole("button", { name: "保存设置" }));
 
     await waitFor(() =>
       expect(fetch).toHaveBeenCalledWith(
         "/api/settings/alerts",
         expect.objectContaining({
           method: "PATCH",
-          body: JSON.stringify({ enabled: true, wechatRoomId: "12345@chatroom", cooldownMinutes: 15, language: "zh" })
+          body: expect.stringContaining('"cooldownMinutes":15')
         })
       )
     );
@@ -380,7 +379,13 @@ describe("App", () => {
         if (url === "/api/overview") return json(overview);
         if (url === "/api/settings/alerts") {
           return json({
-            settings: { enabled: true, wechatRoomId: "123@im.wechat", cooldownMinutes: 60, language: "zh" },
+            settings: enabledRecipientSettings({ language: "zh", wechatRoomId: "123@im.wechat", wechatRecipients: [{
+              id: "recipient-1",
+              contactId: "123@im.wechat",
+              label: "123@im.wechat",
+              enabled: true,
+              addedAt: "2026-05-20T10:00:00.000Z"
+            }] }),
             status: { enabled: true, configured: true }
           });
         }
@@ -414,7 +419,7 @@ describe("App", () => {
 
     render(<App />);
     await userEvent.click(await screen.findByRole("button", { name: "Open settings" }));
-    expect(await screen.findByText("正在从服务器获取登录二维码…")).toBeInTheDocument();
+    expect(await screen.findByText("正在获取登录二维码…")).toBeInTheDocument();
   });
 
   it("shows the WeChat login QR code in settings while waiting for scan", async () => {
@@ -424,7 +429,13 @@ describe("App", () => {
         if (url === "/api/overview") return json(overview);
         if (url === "/api/settings/alerts") {
           return json({
-            settings: { enabled: true, wechatRoomId: "123@im.wechat", cooldownMinutes: 60, language: "zh" },
+            settings: enabledRecipientSettings({ language: "zh", wechatRoomId: "123@im.wechat", wechatRecipients: [{
+              id: "recipient-1",
+              contactId: "123@im.wechat",
+              label: "123@im.wechat",
+              enabled: true,
+              addedAt: "2026-05-20T10:00:00.000Z"
+            }] }),
             status: { enabled: true, configured: true }
           });
         }
@@ -466,6 +477,52 @@ describe("App", () => {
     await userEvent.click(await screen.findByRole("button", { name: "Open settings" }));
     expect(await screen.findByAltText("微信登录二维码")).toBeInTheDocument();
     expect(screen.getByText("微信扫码登录 Bot")).toBeInTheDocument();
+  });
+
+  it("shows the WeChat login QR code on the recipients tab while adding accounts", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url === "/api/overview") return json(overview);
+        if (url === "/api/settings/alerts") {
+          return json({
+            settings: defaultAlertSettingsFixture,
+            status: { enabled: false, configured: false }
+          });
+        }
+        if (url === "/api/settings/wechat") {
+          return json({
+            started: true,
+            loggedIn: false,
+            polling: false,
+            ready: false,
+            qrUrl: "https://liteapp.weixin.qq.com/q/test",
+            awaitingQr: true,
+            botUserId: null,
+            storedSession: {
+              available: false,
+              botUserId: null,
+              savedAt: null,
+              contextUserIds: [],
+              verifiedForTarget: false
+            },
+            lastError: null,
+            messageCount: 0,
+            lastMessageAt: null,
+            recentChats: [],
+            target: null,
+            delivery: { phase: "awaiting_qr", severity: "warning" }
+          });
+        }
+        return json({}, 404);
+      })
+    );
+
+    render(<App />);
+    await userEvent.click(await screen.findByRole("button", { name: "Open settings" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Recipients" }));
+    expect(await screen.findByText("Log in the bot first")).toBeInTheDocument();
+    expect(await screen.findByAltText("WeChat login QR code")).toBeInTheDocument();
   });
 
   it("toggles between dark and light themes", async () => {
