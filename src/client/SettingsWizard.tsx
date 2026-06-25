@@ -230,16 +230,27 @@ export function SettingsWizard({
   };
 
   const handleAddRecipientIntent = async () => {
-    if (wechatStatus.loggedIn) {
-      setShowAddForm(true);
+    setShowAddForm(false);
+    setAddContactId("");
+    setAddLabel("");
+    setActiveTab("connection");
+    setSessionChoice("new");
+    setActionError(null);
+    if (wechatStatus.awaitingQr || wechatStatus.qrUrl) {
       return;
     }
 
-    setShowAddForm(false);
-    setActiveTab("connection");
-    setSessionChoice("new");
-    if (!wechatStatus.awaitingQr && !wechatStatus.qrUrl) {
-      await handleStartLogin();
+    setAccountBusy(true);
+    try {
+      if (wechatStatus.loggedIn) {
+        await onSwitchWeChat();
+      } else {
+        await onStartWeChat();
+      }
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setAccountBusy(false);
     }
   };
 

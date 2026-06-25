@@ -595,6 +595,78 @@ describe("App", () => {
     expect(screen.getByRole("button", { name: "Connection" })).toHaveClass("active");
   });
 
+  it("opens a new QR login when adding another recipient from a logged-in state", async () => {
+    let switchStarted = false;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (url === "/api/overview") return json(overview);
+        if (url === "/api/settings/alerts") {
+          return json({
+            settings: enabledRecipientSettings({
+              wechatRoomId: "first@im.wechat",
+              wechatRecipients: [{
+                id: "recipient-1",
+                contactId: "first@im.wechat",
+                label: "First recipient",
+                enabled: true,
+                addedAt: "2026-05-20T10:00:00.000Z"
+              }]
+            }),
+            status: { enabled: true, configured: true }
+          });
+        }
+        if (url === "/api/settings/wechat/switch" && init?.method === "POST") {
+          switchStarted = true;
+          return json({ accepted: true }, 202);
+        }
+        if (url === "/api/settings/wechat") {
+          return json({
+            started: true,
+            loggedIn: !switchStarted,
+            polling: !switchStarted,
+            ready: !switchStarted,
+            qrUrl: switchStarted ? "https://liteapp.weixin.qq.com/q/second" : null,
+            awaitingQr: switchStarted,
+            botUserId: switchStarted ? null : "bot@im.wechat",
+            storedSession: {
+              available: !switchStarted,
+              botUserId: switchStarted ? null : "bot@im.wechat",
+              savedAt: "2026-05-20T10:00:00.000Z",
+              contextUserIds: ["first@im.wechat"],
+              verifiedForTarget: true
+            },
+            lastError: null,
+            messageCount: 1,
+            lastMessageAt: "2026-05-20T10:00:00.000Z",
+            recentChats: [
+              { userId: "first@im.wechat", text: "setup", receivedAt: "2026-05-20T10:00:00.000Z" }
+            ],
+            target: null,
+            delivery: { phase: switchStarted ? "awaiting_qr" : "ready", severity: switchStarted ? "warning" : "success" }
+          });
+        }
+        return json({}, 404);
+      })
+    );
+
+    render(<App />);
+    await userEvent.click(await screen.findByRole("button", { name: "Open settings" }));
+    expect(await screen.findByText("First recipient")).toBeInTheDocument();
+
+    await userEvent.click(await screen.findByRole("button", { name: "Add" }));
+
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith(
+        "/api/settings/wechat/switch",
+        expect.objectContaining({ method: "POST" })
+      );
+    });
+    expect(screen.queryByPlaceholderText("user_id or 12345@chatroom")).not.toBeInTheDocument();
+    expect(await screen.findByAltText("WeChat login QR code")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Connection" })).toHaveClass("active");
+  });
+
   it("starts a new QR login when adding recipients from a disconnected state", async () => {
     let loginStarted = false;
     vi.stubGlobal(
