@@ -267,6 +267,7 @@ function normalizeWeChatAccounts(value: unknown): WeChatAccount[] {
   }
 
   const seenIds = new Set<string>();
+  const seenContacts = new Set<string>();
   return value
     .filter((item): item is Record<string, unknown> => isRecord(item))
     .map((item) => {
@@ -290,6 +291,11 @@ function normalizeWeChatAccounts(value: unknown): WeChatAccount[] {
     .filter((account) => {
       if (seenIds.has(account.id)) return false;
       seenIds.add(account.id);
+      const contactKeys = [account.botUserId, account.alertTargetUserId].filter((id): id is string => Boolean(id));
+      if (contactKeys.some((id) => seenContacts.has(id))) return false;
+      for (const id of contactKeys) {
+        seenContacts.add(id);
+      }
       return true;
     });
 }

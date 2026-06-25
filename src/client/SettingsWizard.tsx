@@ -88,6 +88,8 @@ export function SettingsWizard({
     ? getWeChatDeliveryCopy(selectedConnector.delivery, language, selectedConnector.target)
     : null;
   const selectedChecklist = selectedConnector ? buildWeChatChecklist(selectedConnector, language) : [];
+  const selectedNeedsVerification = Boolean(selectedAccount && selectedConnector?.loggedIn && !selectedAccount.verified);
+  const latestVerificationChat = selectedConnector?.recentChats[0] ?? null;
 
   useEffect(() => {
     setDraft(settings);
@@ -103,6 +105,18 @@ export function SettingsWizard({
     }
     setSelectedAccountId(accounts[0]?.id ?? null);
   }, [accounts, selectedAccountId, wechatAccountsStatus.activeLoginAccountId]);
+
+  useEffect(() => {
+    if (!wechatAccountsStatus.activeLoginAccountId) return;
+    const pendingVerificationAccount = accounts.find((account) =>
+      account.id === wechatAccountsStatus.activeLoginAccountId &&
+      account.connector.loggedIn &&
+      !account.verified
+    );
+    if (!pendingVerificationAccount) return;
+    setSelectedAccountId(pendingVerificationAccount.id);
+    setActiveTab("connection");
+  }, [accounts, wechatAccountsStatus.activeLoginAccountId]);
 
   const tabs: Array<{ id: SettingsTab; label: string; badge?: string }> = [
     {
@@ -499,7 +513,7 @@ export function SettingsWizard({
                   />
                 ) : selectedConnector?.awaitingQr ? (
                   <div className="sw-waiting">{copy.connection.fetchingQr}</div>
-                ) : selectedConnector?.loggedIn ? (
+                ) : selectedConnector?.loggedIn && !selectedNeedsVerification ? (
                   <div className="sw-inline-success">{copy.connection.loggedIn}</div>
                 ) : (
                   <div className="sw-actions">
@@ -528,9 +542,40 @@ export function SettingsWizard({
                   </div>
                 )}
 
-                {selectedConnector?.loggedIn && !selectedAccount.verified ? (
-                  <div className="sw-context-hint">
-                    <p className="sw-help">{copy.connection.contextHint}</p>
+                {selectedNeedsVerification ? (
+                  <div className="sw-verification-panel">
+                    <div className="sw-verification-header">
+                      <div>
+                        <h4>{copy.connection.verificationTitle}</h4>
+                        <p className="sw-help">{copy.connection.contextHint}</p>
+                      </div>
+                      <button className="sw-btn ghost compact" disabled={saving} onClick={() => void onRefreshWeChatAccounts()}>
+                        <RefreshCw size={14} />
+                        {copy.connection.detectMessages}
+                      </button>
+                    </div>
+                    <div className="sw-verification-steps">
+                      <div className="sw-verification-step done">
+                        <span>1</span>
+                        <strong>{copy.connection.stepLogin}</strong>
+                      </div>
+                      <div className={`sw-verification-step${selectedConnector.recentChats.length > 0 ? " done" : " active"}`}>
+                        <span>2</span>
+                        <strong>{copy.connection.stepMessage}</strong>
+                      </div>
+                      <div className={`sw-verification-step${selectedConnector.recentChats.length > 0 ? " active" : ""}`}>
+                        <span>3</span>
+                        <strong>{copy.connection.stepVerify}</strong>
+                      </div>
+                    </div>
+                    {latestVerificationChat ? (
+                      <div className="sw-latest-message">
+                        <span className="sw-status-label">{copy.connection.latestMessage}</span>
+                        <strong>{latestVerificationChat.userId}</strong>
+                        <p>{latestVerificationChat.text || copy.connection.noPreview}</p>
+                        <small>{formatDate(latestVerificationChat.receivedAt)}</small>
+                      </div>
+                    ) : null}
                     {selectedConnector.recentChats.length > 0 ? (
                       <div className="sw-recent-chats">
                         {selectedConnector.recentChats.map((chat) => (
@@ -555,10 +600,10 @@ export function SettingsWizard({
                     <div className="sw-actions">
                       <button
                         className="sw-btn primary"
-                        disabled={saving || busyAccountId === selectedAccount.id}
+                        disabled={saving || busyAccountId === selectedAccount.id || !latestVerificationChat}
                         onClick={() => void runAccountAction(
                           selectedAccount.id,
-                          () => onVerifyWeChatAccount(selectedAccount.id)
+                          () => onVerifyWeChatAccount(selectedAccount.id, latestVerificationChat?.userId)
                         )}
                       >
                         <Check size={14} />
@@ -790,8 +835,14 @@ const COPY = {
       restore: "Restore saved session",
       logout: "Log out",
       loggedIn: "WeChat account is connected.",
+      verificationTitle: "Verify message token",
       contextHint: "After QR login, send any message from this WeChat account to ClawBot, then select the latest message to verify alert delivery.",
       waitingMessage: "Waiting for an inbound message…",
+      detectMessages: "Detect messages",
+      stepLogin: "QR login",
+      stepMessage: "Send message",
+      stepVerify: "Save token",
+      latestMessage: "Latest detected message",
       verify: "Verify recipient",
       verified: "Verified delivery target:",
       noPreview: "No text preview",
@@ -874,8 +925,14 @@ const COPY = {
       restore: "恢复已保存会话",
       logout: "退出登录",
       loggedIn: "微信账号已连接。",
+      verificationTitle: "验证消息并获取 contact token",
       contextHint: "扫码登录后，请用该微信账号给 ClawBot 发送任意消息，然后选择最新消息完成告警验证。",
       waitingMessage: "等待入站消息…",
+      detectMessages: "检测消息",
+      stepLogin: "扫码登录",
+      stepMessage: "微信发消息",
+      stepVerify: "保存 token",
+      latestMessage: "最近检测到的消息",
       verify: "验证接收人",
       verified: "已验证投递目标：",
       noPreview: "无文本预览",

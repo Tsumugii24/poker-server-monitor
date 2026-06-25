@@ -832,6 +832,12 @@ function respondWeChatAccountError(
   code: string
 ): void {
   const message = error instanceof Error ? error.message : String(error);
-  const status = /not found/i.test(message) ? 404 : /must be|No inbound|not verified/i.test(message) ? 400 : 500;
+  const status = /not found/i.test(message)
+    ? 404
+    : /already configured|duplicate/i.test(message)
+      ? 409
+      : /must be|No inbound|not verified|no cached context/i.test(message)
+        ? 400
+        : 500;
   response.status(status).json({ error: code, message });
 }

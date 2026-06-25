@@ -210,6 +210,14 @@ describe("alert settings loading", () => {
           id: "account-1",
           label: "Duplicate",
           enabled: true
+        },
+        {
+          id: "account-2",
+          label: "Duplicate contact",
+          enabled: true,
+          addedAt: "2026-05-20T10:01:00.000Z",
+          botUserId: "another-bot@im.wechat",
+          alertTargetUserId: "owner@im.wechat"
         }
       ]
     }));

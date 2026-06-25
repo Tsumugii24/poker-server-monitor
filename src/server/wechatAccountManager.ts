@@ -12,6 +12,7 @@ import { WeChatNotifier } from "./wechatNotifier";
 export type WeChatAccountManagerOptions = {
   alertSettingsPath: string;
   storageRoot?: string;
+  notifierFactory?: (storageDir: string) => ManagedWeChatNotifier;
 };
 
 export type UpdateWeChatAccountInput = {
@@ -19,9 +20,21 @@ export type UpdateWeChatAccountInput = {
   enabled?: boolean;
 };
 
+type ManagedWeChatNotifier = Pick<
+  WeChatNotifier,
+  | "restartLogin"
+  | "refreshLoginQr"
+  | "restoreSession"
+  | "logout"
+  | "startInBackground"
+  | "ensureStarted"
+  | "send"
+  | "getStatus"
+>;
+
 export class WeChatAccountManager {
   private readonly storageRoot: string;
-  private readonly notifiers = new Map<string, WeChatNotifier>();
+  private readonly notifiers = new Map<string, ManagedWeChatNotifier>();
   private activeLoginAccountId: string | null = null;
 
   constructor(private readonly options: WeChatAccountManagerOptions) {
@@ -114,12 +127,26 @@ export class WeChatAccountManager {
     if (!selectedTarget) {
       throw new Error("No inbound WeChat message found. Send any message from this account, then verify again.");
     }
+    const targetObserved = connector.recentChats.some((chat) => chat.userId === selectedTarget) ||
+      connector.storedSession.contextUserIds.includes(selectedTarget);
+    if (!targetObserved) {
+      throw new Error("Selected WeChat contact has no cached context token. Send a fresh message, then verify again.");
+    }
+
+    const botUserId = connector.botUserId ?? connector.storedSession.botUserId ?? account.botUserId;
+    const duplicate = findDuplicateAccount(this.loadSettings(), accountId, [
+      selectedTarget,
+      botUserId
+    ]);
+    if (duplicate) {
+      throw new Error(`WeChat contact ${selectedTarget} is already configured as ${duplicate.label}.`);
+    }
 
     const settings = this.updateAccountRecord(accountId, (current) => ({
       ...current,
-      botUserId: connector.botUserId ?? connector.storedSession.botUserId ?? current.botUserId,
+      botUserId: botUserId ?? current.botUserId,
       alertTargetUserId: selectedTarget,
-      label: current.label || connector.botUserId || selectedTarget
+      label: current.label || botUserId || selectedTarget
     }));
     return this.buildAccountStatus(this.mustFindAccount(settings, accountId));
   }
@@ -160,10 +187,11 @@ export class WeChatAccountManager {
     return path.join(this.storageRoot, accountId);
   }
 
-  private getNotifier(accountId: string): WeChatNotifier {
+  private getNotifier(accountId: string): ManagedWeChatNotifier {
     let notifier = this.notifiers.get(accountId);
     if (!notifier) {
-      notifier = new WeChatNotifier({ storageDir: this.storageDirFor(accountId) });
+      const storageDir = this.storageDirFor(accountId);
+      notifier = this.options.notifierFactory?.(storageDir) ?? new WeChatNotifier({ storageDir });
       this.notifiers.set(accountId, notifier);
     }
     return notifier;
@@ -242,7 +270,7 @@ export class WeChatAccountManager {
 }
 
 function isLoginActive(account: WeChatAccountConnectorStatus): boolean {
-  return Boolean(account.connector.awaitingQr || account.connector.qrUrl);
+  return Boolean(account.connector.awaitingQr || account.connector.qrUrl || (account.connector.loggedIn && !account.verified));
 }
 
 function isAccountVerified(
@@ -255,4 +283,23 @@ function isAccountVerified(
   }
   return connector.storedSession.verifiedForTarget ||
     connector.recentChats.some((chat) => chat.userId === target);
+}
+
+function findDuplicateAccount(
+  settings: AlertSettings,
+  currentAccountId: string,
+  rawIds: Array<string | null | undefined>
+): WeChatAccount | null {
+  const ids = new Set(rawIds.map((id) => id?.trim()).filter((id): id is string => Boolean(id)));
+  if (ids.size === 0) {
+    return null;
+  }
+
+  return settings.wechatAccounts.find((account) => {
+    if (account.id === currentAccountId) return false;
+    const accountIds = [account.botUserId, account.alertTargetUserId]
+      .map((id) => id?.trim())
+      .filter((id): id is string => Boolean(id));
+    return accountIds.some((id) => ids.has(id));
+  }) ?? null;
 }

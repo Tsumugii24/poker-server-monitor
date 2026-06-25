@@ -866,6 +866,106 @@ describe("App", () => {
     );
   });
 
+  it("shows the verification guide with detected WeChat messages", async () => {
+    const pendingAccount = weChatAccountStatus({
+      id: "account-1",
+      label: "WeChat 1",
+      connector: {
+        started: true,
+        loggedIn: true,
+        polling: true,
+        ready: true,
+        botUserId: "bot-one@im.wechat",
+        storedSession: {
+          available: true,
+          botUserId: "bot-one@im.wechat",
+          savedAt: "2026-05-20T10:00:00.000Z",
+          contextUserIds: ["owner@im.wechat"],
+          verifiedForTarget: false
+        },
+        messageCount: 1,
+        lastMessageAt: "2026-05-20T10:02:00.000Z",
+        recentChats: [
+          { userId: "owner@im.wechat", text: "verify me", receivedAt: "2026-05-20T10:02:00.000Z" }
+        ],
+        delivery: { phase: "context_unverified", severity: "warning" }
+      }
+    });
+    const verifiedAccount = {
+      ...pendingAccount,
+      alertTargetUserId: "owner@im.wechat",
+      verified: true
+    };
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (url === "/api/overview") return json(overview);
+        if (url === "/api/settings/alerts") {
+          return json({
+            settings: enabledRecipientSettings({ wechatAccounts: [pendingAccount] }),
+            status: { enabled: true, configured: false }
+          });
+        }
+        if (url === "/api/settings/wechat/accounts") {
+          return json(weChatAccountsStatus([pendingAccount], "account-1"));
+        }
+        if (url === "/api/settings/wechat/accounts/account-1/verify" && init?.method === "POST") {
+          return json({
+            account: verifiedAccount,
+            settings: enabledRecipientSettings({ wechatAccounts: [verifiedAccount] }),
+            status: { enabled: true, configured: true },
+            wechatAccounts: weChatAccountsStatus([verifiedAccount])
+          });
+        }
+        if (url === "/api/settings/wechat") {
+          return json({
+            started: false,
+            loggedIn: false,
+            polling: false,
+            ready: false,
+            qrUrl: null,
+            awaitingQr: false,
+            botUserId: null,
+            storedSession: {
+              available: false,
+              botUserId: null,
+              savedAt: null,
+              contextUserIds: [],
+              verifiedForTarget: false
+            },
+            lastError: null,
+            messageCount: 0,
+            lastMessageAt: null,
+            recentChats: [],
+            target: null,
+            delivery: { phase: "bot_offline", severity: "warning" }
+          });
+        }
+        return json({}, 404);
+      })
+    );
+
+    render(<App />);
+    await userEvent.click(await screen.findByRole("button", { name: "Open settings" }));
+
+    expect(await screen.findByText("Verify message token")).toBeInTheDocument();
+    expect(screen.getAllByText("verify me").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText("owner@im.wechat").length).toBeGreaterThanOrEqual(1);
+
+    await userEvent.click(screen.getByRole("button", { name: "Verify recipient" }));
+
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith(
+        "/api/settings/wechat/accounts/account-1/verify",
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({ targetUserId: "owner@im.wechat" })
+        })
+      );
+    });
+  });
+
   it("starts a new QR login when adding recipients from a disconnected state", async () => {
     const qrAccount = weChatAccountStatus({
       connector: {

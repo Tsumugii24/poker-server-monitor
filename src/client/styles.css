@@ -1586,6 +1586,99 @@ td .port-value {
   border-top: 1px solid var(--divider);
 }
 
+.sw-verification-panel {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--divider);
+}
+
+.sw-verification-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.sw-verification-header h4 {
+  margin-bottom: 4px;
+}
+
+.sw-verification-steps {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin: 14px 0;
+}
+
+.sw-verification-step {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  color: var(--text-tertiary);
+}
+
+.sw-verification-step span {
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  font-size: 11px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.sw-verification-step strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}
+
+.sw-verification-step.active {
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+  color: var(--accent);
+}
+
+.sw-verification-step.done {
+  border-color: color-mix(in srgb, var(--green) 35%, var(--border));
+  color: var(--green);
+}
+
+.sw-latest-message {
+  margin-bottom: 12px;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border));
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--accent) 4%, var(--bg-elevated));
+}
+
+.sw-latest-message strong {
+  display: block;
+  color: var(--accent);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.sw-latest-message p {
+  margin: 6px 0;
+  color: var(--text-primary);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.sw-latest-message small {
+  color: var(--text-disabled);
+  font-size: 10px;
+}
+
 .sw-recent-chats {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
@@ -2314,6 +2407,14 @@ td .port-value {
   }
 
   .sw-recipient-edit-fields {
+    grid-template-columns: 1fr;
+  }
+
+  .sw-verification-header {
+    flex-direction: column;
+  }
+
+  .sw-verification-steps {
     grid-template-columns: 1fr;
   }
 
