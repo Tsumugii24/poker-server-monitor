@@ -52,6 +52,7 @@ export class WeChatNotifier {
   private qrUrl: string | null = null;
   private forceQrLogin = false;
   private loginAttemptStartedAt: number | null = null;
+  private loginGeneration = 0;
   private lastError: string | null = null;
   private messageCount = 0;
   private lastMessageAt: string | null = null;
@@ -71,6 +72,16 @@ export class WeChatNotifier {
 
   async restartLogin(): Promise<void> {
     this.restartPromise ??= this.doRestartLogin().finally(() => {
+      this.restartPromise = null;
+    });
+    await this.restartPromise;
+  }
+
+  async refreshLoginQr(): Promise<void> {
+    if (this.loggedIn) {
+      return;
+    }
+    this.restartPromise ??= this.doRestartLogin({ force: true }).finally(() => {
       this.restartPromise = null;
     });
     await this.restartPromise;
@@ -169,8 +180,8 @@ export class WeChatNotifier {
     return this.started && !this.loggedIn && this.lastError != null && this.loginTask == null;
   }
 
-  private async doRestartLogin(): Promise<void> {
-    if (this.loginTask && !this.isLoginFailed()) {
+  private async doRestartLogin(options: { force?: boolean } = {}): Promise<void> {
+    if (!options.force && this.loginTask && !this.isLoginFailed()) {
       const ageMs = this.loginAttemptStartedAt == null ? 0 : Date.now() - this.loginAttemptStartedAt;
       if (ageMs < 45_000 && !this.lastError) {
         return;
@@ -185,6 +196,7 @@ export class WeChatNotifier {
       }
     }
 
+    await this.stopActiveBot();
     this.forceQrLogin = true;
     this.resetConnector();
     try {
@@ -237,6 +249,7 @@ export class WeChatNotifier {
     this.started = true;
     this.lastError = null;
     this.loginAttemptStartedAt = Date.now();
+    const generation = ++this.loginGeneration;
     const bot = new Bot();
     bot.on("poll:start", () => {
       this.polling = true;
@@ -251,28 +264,38 @@ export class WeChatNotifier {
     });
 
     this.bot = bot;
-    this.loginTask = this.completeLogin(bot);
+    this.loginTask = this.completeLogin(bot, generation);
     void this.loginTask.catch((error: unknown) => {
+      if (generation !== this.loginGeneration) {
+        return;
+      }
       const classified = classifyWeChatStartupError(error);
       this.lastError = classified.message;
       console.error(classified.logMessage);
       this.resetConnector({ keepError: true, soft: true });
     }).finally(() => {
-      this.loginTask = null;
+      if (generation === this.loginGeneration) {
+        this.loginTask = null;
+      }
     });
 
     return bot;
   }
 
-  private async completeLogin(bot: WeChatBotInstance): Promise<void> {
+  private async completeLogin(bot: WeChatBotInstance, generation: number): Promise<void> {
     await bot.login({
       force: this.forceQrLogin,
       callbacks: {
         onQrUrl: (url: string) => {
-          this.qrUrl = url;
+          if (generation === this.loginGeneration) {
+            this.qrUrl = url;
+          }
         }
       }
     });
+    if (generation !== this.loginGeneration) {
+      return;
+    }
     this.loggedIn = true;
     this.qrUrl = null;
     this.lastError = null;
@@ -281,6 +304,10 @@ export class WeChatNotifier {
     this.readyPromise = new Promise<void>((resolve, reject) => {
       bot.on("poll:start", () => resolve());
       void bot.start().catch((error: unknown) => {
+        if (generation !== this.loginGeneration) {
+          reject(error);
+          return;
+        }
         const classified = classifyWeChatStartupError(error);
         this.lastError = classified.message;
         console.error(classified.logMessage);
@@ -338,6 +365,9 @@ export class WeChatNotifier {
   }
 
   private resetConnector(options: { keepError?: boolean; soft?: boolean } = {}): void {
+    if (!options.soft) {
+      this.loginGeneration += 1;
+    }
     this.bot = null;
     this.botPromise = null;
     this.loginTask = null;

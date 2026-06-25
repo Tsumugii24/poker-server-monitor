@@ -50,6 +50,7 @@ async function main(): Promise<void> {
     sendTestAlert: (message, roomId) => notifier.send(message, roomId),
     startAlertConnector: () => notifier.ensureStarted(),
     restartAlertConnector: () => notifier.restartLogin(),
+    refreshWeChatConnector: () => notifier.refreshLoginQr(),
     restoreAlertConnector: () => notifier.restoreSession(),
     logoutWeChatConnector: () => notifier.logout(),
     switchWeChatConnector: () => notifier.switchAccount(),

@@ -197,6 +197,54 @@ describe("monitor API", () => {
     expect(sent[0]).toContain("Server Monitor test alert");
   });
 
+  it("sends a global test alert to every enabled recipient", async () => {
+    const sent: Array<{ message: string; roomId: string }> = [];
+
+    const response = await request(createApp({
+      db,
+      refreshService: service,
+      alertSettingsPath,
+      sendTestAlert: async (message, roomId) => {
+        sent.push({ message, roomId });
+      }
+    }))
+      .post("/api/settings/alerts/test")
+      .send({
+        enabled: true,
+        wechatRoomId: "",
+        wechatRecipients: [
+          {
+            id: "recipient-1",
+            contactId: "one@im.wechat",
+            label: "One",
+            enabled: true,
+            addedAt: "2026-05-20T10:00:00.000Z"
+          },
+          {
+            id: "recipient-2",
+            contactId: "two@im.wechat",
+            label: "Two",
+            enabled: true,
+            addedAt: "2026-05-20T10:00:00.000Z"
+          },
+          {
+            id: "recipient-3",
+            contactId: "paused@im.wechat",
+            label: "Paused",
+            enabled: false,
+            addedAt: "2026-05-20T10:00:00.000Z"
+          }
+        ],
+        cooldownMinutes: 15,
+        language: "en"
+      });
+
+    expect(response.status).toBe(202);
+    expect(response.body.recipientCount).toBe(2);
+    expect(sent.map((item) => item.roomId)).toEqual(["one@im.wechat", "two@im.wechat"]);
+    expect(sent[0]?.message).toContain("Server Monitor test alert");
+  });
+
   it("sends a Chinese test alert when alert language is zh", async () => {
     const sent: string[] = [];
 
@@ -291,6 +339,19 @@ describe("monitor API", () => {
 
     expect(response.status).toBe(202);
     expect(startAlertConnector).toHaveBeenCalledTimes(1);
+    expect(response.body.accepted).toBe(true);
+  });
+
+  it("refreshes the WeChat login QR code", async () => {
+    const refreshWeChatConnector = vi.fn();
+    const response = await request(createApp({
+      db,
+      refreshService: service,
+      refreshWeChatConnector
+    })).post("/api/settings/wechat/qr/refresh");
+
+    expect(response.status).toBe(202);
+    expect(refreshWeChatConnector).toHaveBeenCalledTimes(1);
     expect(response.body.accepted).toBe(true);
   });
 
@@ -397,5 +458,71 @@ describe("monitor API", () => {
     expect(response.status).toBe(202);
     expect(switchWeChatConnector).toHaveBeenCalledTimes(1);
     expect(response.body.accepted).toBe(true);
+  });
+
+  it("updates a recipient contact id and display label", async () => {
+    fs.writeFileSync(alertSettingsPath, JSON.stringify({
+      enabled: true,
+      wechatRoomId: "old@im.wechat",
+      wechatRecipients: [
+        {
+          id: "recipient-1",
+          contactId: "old@im.wechat",
+          label: "Old",
+          enabled: true,
+          addedAt: "2026-05-20T10:00:00.000Z"
+        }
+      ],
+      cooldownMinutes: 15,
+      language: "en"
+    }));
+
+    const response = await request(createApp({ db, refreshService: service, alertSettingsPath }))
+      .patch("/api/settings/alerts/recipients/recipient-1")
+      .send({ contactId: "new@im.wechat", label: "New owner" });
+
+    expect(response.status).toBe(200);
+    expect(response.body.recipient).toMatchObject({
+      id: "recipient-1",
+      contactId: "new@im.wechat",
+      label: "New owner",
+      enabled: true
+    });
+    expect(response.body.settings.wechatRoomId).toBe("new@im.wechat");
+  });
+
+  it("requires a logged-in WeChat bot before adding recipients when status is available", async () => {
+    const response = await request(createApp({
+      db,
+      refreshService: service,
+      alertSettingsPath,
+      getWeChatStatus: () => ({
+        started: true,
+        loggedIn: false,
+        polling: false,
+        ready: false,
+        qrUrl: "https://example.com/qr",
+        awaitingQr: true,
+        botUserId: null,
+        storedSession: {
+          available: false,
+          botUserId: null,
+          savedAt: null,
+          contextUserIds: [],
+          verifiedForTarget: false
+        },
+        lastError: null,
+        messageCount: 0,
+        lastMessageAt: null,
+        recentChats: [],
+        target: null,
+        delivery: { phase: "awaiting_qr", severity: "warning" }
+      })
+    }))
+      .post("/api/settings/alerts/recipients")
+      .send({ contactId: "new@im.wechat", label: "New" });
+
+    expect(response.status).toBe(409);
+    expect(response.body.error).toBe("wechat_login_required");
   });
 });

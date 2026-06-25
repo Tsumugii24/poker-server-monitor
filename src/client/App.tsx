@@ -214,6 +214,20 @@ export default function App() {
     }
   }, []);
 
+  const refreshWeChatQr = async () => {
+    setSettingsSaving(true);
+    setError(null);
+    try {
+      await fetchJson<{ accepted: boolean }>("/api/settings/wechat/qr/refresh", { method: "POST" });
+      await refreshWeChatStatus();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+      throw caught;
+    } finally {
+      setSettingsSaving(false);
+    }
+  };
+
   const logoutWeChat = async () => {
     setSettingsSaving(true);
     setError(null);
@@ -273,7 +287,7 @@ export default function App() {
     }
   };
 
-  const updateRecipient = async (id: string, patch: { enabled?: boolean; label?: string }) => {
+  const updateRecipient = async (id: string, patch: { enabled?: boolean; contactId?: string; label?: string }) => {
     setError(null);
     try {
       const response = await fetchJson<{ settings: AlertSettings; status: AlertStatus }>(
@@ -454,6 +468,7 @@ export default function App() {
             wechatStatus={wechatStatus}
             onStartWeChat={startWeChatLogin}
             onRefreshWeChat={refreshWeChatStatus}
+            onRefreshWeChatQr={refreshWeChatQr}
             onRestoreWeChat={restoreWeChatSession}
             onLogoutWeChat={logoutWeChat}
             onSwitchWeChat={switchWeChatAccount}

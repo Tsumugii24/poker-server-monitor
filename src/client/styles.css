@@ -1411,6 +1411,10 @@ td .port-value {
   font-size: 11px;
 }
 
+.sw-btn.loading svg {
+  animation: spin 1s linear infinite;
+}
+
 /* ── Icon buttons ─────────────────────────────────────────── */
 
 .sw-btn-icon {
@@ -1829,6 +1833,24 @@ td .port-value {
   font-weight: 600;
 }
 
+.sw-recipient-edit {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.sw-recipient-edit-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.sw-recipient-edit-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .sw-delete-confirm {
   display: flex;
   gap: 4px;
@@ -2226,12 +2248,23 @@ td .port-value {
   overflow-wrap: anywhere;
 }
 
+.wechat-qr-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
 /* ═══════════════════════════════════════════════════════════════
    Responsive
    ═══════════════════════════════════════════════════════════════ */
 
 @media (max-width: 900px) {
   .sw-add-form-fields {
+    grid-template-columns: 1fr;
+  }
+
+  .sw-recipient-edit-fields {
     grid-template-columns: 1fr;
   }
 

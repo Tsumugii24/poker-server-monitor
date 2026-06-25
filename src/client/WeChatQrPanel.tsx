@@ -1,12 +1,15 @@
 import QRCode from "qrcode";
+import { RefreshCw } from "lucide-react";
 import { useEffect, useState } from "react";
 
 type WeChatQrPanelProps = {
   url: string;
   language: "en" | "zh";
+  refreshing?: boolean;
+  onRefresh?: () => void;
 };
 
-export function WeChatQrPanel({ url, language }: WeChatQrPanelProps) {
+export function WeChatQrPanel({ url, language, refreshing = false, onRefresh }: WeChatQrPanelProps) {
   const [dataUrl, setDataUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -52,9 +55,22 @@ export function WeChatQrPanel({ url, language }: WeChatQrPanelProps) {
             ? "打开微信 → 扫一扫，扫描左侧二维码。扫码后在手机上确认登录。"
             : "Open WeChat → Scan, then scan the QR code on the left and confirm login on your phone."}
         </p>
-        <a href={url} target="_blank" rel="noreferrer">
-          {language === "zh" ? "无法扫码？在新窗口打开登录链接" : "Can't scan here? Open login link"}
-        </a>
+        <div className="wechat-qr-actions">
+          {onRefresh ? (
+            <button
+              type="button"
+              className={`sw-btn ghost compact${refreshing ? " loading" : ""}`}
+              onClick={onRefresh}
+              disabled={refreshing}
+            >
+              <RefreshCw size={14} />
+              {language === "zh" ? "刷新二维码" : "Refresh QR"}
+            </button>
+          ) : null}
+          <a href={url} target="_blank" rel="noreferrer">
+            {language === "zh" ? "无法扫码？在新窗口打开登录链接" : "Can't scan here? Open login link"}
+          </a>
+        </div>
       </div>
     </section>
   );

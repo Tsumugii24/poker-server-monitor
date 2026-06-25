@@ -1,4 +1,4 @@
-import { LogOut, Plus, RefreshCw, Send, Settings, Timer, Trash2, UserRound, X } from "lucide-react";
+import { Check, LogOut, Pencil, Plus, RefreshCw, Send, Settings, Timer, Trash2, UserRound, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import type { AlertSettings, AlertStatus, WeChatConnectorStatus, WeChatRecipient } from "../shared/types";
 import {
@@ -27,11 +27,12 @@ type SettingsWizardProps = {
   onTest: (settings: AlertSettings) => Promise<void>;
   onStartWeChat: () => Promise<void>;
   onRefreshWeChat: () => Promise<void>;
+  onRefreshWeChatQr: () => Promise<void>;
   onRestoreWeChat: () => Promise<void>;
   onLogoutWeChat: () => Promise<void>;
   onSwitchWeChat: () => Promise<void>;
   onAddRecipient: (contactId: string, label: string) => Promise<void>;
-  onUpdateRecipient: (id: string, patch: { enabled?: boolean; label?: string }) => Promise<void>;
+  onUpdateRecipient: (id: string, patch: { enabled?: boolean; contactId?: string; label?: string }) => Promise<void>;
   onRemoveRecipient: (id: string) => Promise<void>;
   onTestRecipient: (id: string) => Promise<void>;
 };
@@ -47,6 +48,7 @@ export function SettingsWizard({
   onTest,
   onStartWeChat,
   onRefreshWeChat,
+  onRefreshWeChatQr,
   onRestoreWeChat,
   onLogoutWeChat,
   onSwitchWeChat,
@@ -73,6 +75,10 @@ export function SettingsWizard({
   /* ── Delete confirmation state ──────────────────────────────── */
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [testingId, setTestingId] = useState<string | null>(null);
+  const [editingRecipientId, setEditingRecipientId] = useState<string | null>(null);
+  const [editContactId, setEditContactId] = useState("");
+  const [editLabel, setEditLabel] = useState("");
+  const [updatingRecipientId, setUpdatingRecipientId] = useState<string | null>(null);
 
   const language = draft.language ?? "en";
   const copy = COPY[language];
@@ -223,11 +229,44 @@ export function SettingsWizard({
     }
   };
 
+  const startEditRecipient = (recipient: WeChatRecipient) => {
+    setConfirmDeleteId(null);
+    setEditingRecipientId(recipient.id);
+    setEditContactId(recipient.contactId);
+    setEditLabel(recipient.label);
+  };
+
+  const cancelEditRecipient = () => {
+    setEditingRecipientId(null);
+    setEditContactId("");
+    setEditLabel("");
+  };
+
+  const handleSaveRecipientEdit = async (recipient: WeChatRecipient) => {
+    if (!editContactId.trim()) return;
+    setUpdatingRecipientId(recipient.id);
+    setActionError(null);
+    try {
+      await onUpdateRecipient(recipient.id, {
+        contactId: editContactId.trim(),
+        label: editLabel.trim() || editContactId.trim()
+      });
+      cancelEditRecipient();
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setUpdatingRecipientId(null);
+    }
+  };
+
   const handleRemoveRecipient = async (id: string) => {
     setActionError(null);
     try {
       await onRemoveRecipient(id);
       setConfirmDeleteId(null);
+      if (editingRecipientId === id) {
+        cancelEditRecipient();
+      }
     } catch (error) {
       setActionError(error instanceof Error ? error.message : String(error));
     }
@@ -260,6 +299,19 @@ export function SettingsWizard({
     setSessionChoice("new");
     try {
       await onStartWeChat();
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setAccountBusy(false);
+    }
+  };
+
+  const handleRefreshQr = async () => {
+    setAccountBusy(true);
+    setActionError(null);
+    setSessionChoice("new");
+    try {
+      await onRefreshWeChatQr();
     } catch (error) {
       setActionError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -316,7 +368,12 @@ export function SettingsWizard({
           ) : null}
 
           {showQr ? (
-            <WeChatQrPanel url={wechatStatus.qrUrl!} language={language} />
+            <WeChatQrPanel
+              url={wechatStatus.qrUrl!}
+              language={language}
+              refreshing={accountBusy || saving}
+              onRefresh={() => void handleRefreshQr()}
+            />
           ) : waitingForQr ? (
             <div className="sw-waiting">{copy.connection.fetchingQr}</div>
           ) : restoringSession ? (
@@ -554,67 +611,117 @@ export function SettingsWizard({
               <div className="sw-recipient-list">
                 {settings.wechatRecipients.map((recipient) => (
                   <div key={recipient.id} className={`sw-recipient-card${recipient.enabled ? " enabled" : " disabled"}`}>
-                    <div className="sw-recipient-main">
-                      <div className="sw-recipient-info">
-                        <strong className="sw-recipient-label">{recipient.label}</strong>
-                        {recipient.label !== recipient.contactId ? (
-                          <span className="sw-recipient-contact">{recipient.contactId}</span>
-                        ) : null}
-                        <span className="sw-recipient-date">
-                          {copy.recipients.added} {formatDate(recipient.addedAt)}
-                        </span>
-                      </div>
-                      <div className="sw-recipient-controls">
-                        {/* Toggle switch */}
-                        <label className="sw-toggle" title={recipient.enabled ? copy.recipients.enabled : copy.recipients.disabled}>
-                          <input
-                            type="checkbox"
-                            checked={recipient.enabled}
-                            onChange={(e) => void handleToggleRecipient(recipient.id, e.target.checked)}
-                            disabled={saving}
-                          />
-                          <span className="sw-toggle-track">
-                            <span className="sw-toggle-thumb" />
-                          </span>
-                        </label>
-                        {/* Test button */}
-                        <button
-                          className="sw-btn-icon"
-                          disabled={saving || testingId === recipient.id || !recipient.enabled}
-                          onClick={() => void handleTestRecipient(recipient.id)}
-                          title={copy.recipients.test}
-                        >
-                          <Send size={13} />
-                        </button>
-                        {/* Delete button */}
-                        {confirmDeleteId === recipient.id ? (
-                          <div className="sw-delete-confirm">
-                            <button
-                              className="sw-btn danger compact"
-                              onClick={() => void handleRemoveRecipient(recipient.id)}
-                              disabled={saving}
-                            >
-                              {copy.account.confirm}
-                            </button>
-                            <button
-                              className="sw-btn ghost compact"
-                              onClick={() => setConfirmDeleteId(null)}
-                            >
-                              {copy.account.cancel}
-                            </button>
+                    {editingRecipientId === recipient.id ? (
+                      <div className="sw-recipient-edit">
+                        <div className="sw-recipient-edit-fields">
+                          <div className="sw-field">
+                            <label>{copy.recipients.contactId}</label>
+                            <input
+                              value={editContactId}
+                              onChange={(e) => setEditContactId(e.target.value)}
+                            />
                           </div>
-                        ) : (
+                          <div className="sw-field">
+                            <label>{copy.recipients.labelField}</label>
+                            <input
+                              value={editLabel}
+                              onChange={(e) => setEditLabel(e.target.value)}
+                              placeholder={copy.recipients.labelPlaceholder}
+                            />
+                          </div>
+                        </div>
+                        <div className="sw-recipient-edit-actions">
                           <button
-                            className="sw-btn-icon danger"
-                            onClick={() => setConfirmDeleteId(recipient.id)}
-                            disabled={saving}
-                            title={copy.recipients.remove}
+                            className="sw-btn primary compact"
+                            disabled={saving || updatingRecipientId === recipient.id || !editContactId.trim()}
+                            onClick={() => void handleSaveRecipientEdit(recipient)}
                           >
-                            <Trash2 size={13} />
+                            <Check size={14} />
+                            {copy.recipients.saveRecipient}
                           </button>
-                        )}
+                          <button
+                            className="sw-btn ghost compact"
+                            disabled={updatingRecipientId === recipient.id}
+                            onClick={cancelEditRecipient}
+                          >
+                            {copy.account.cancel}
+                          </button>
+                        </div>
                       </div>
-                    </div>
+                    ) : (
+                      <div className="sw-recipient-main">
+                        <div className="sw-recipient-info">
+                          <strong className="sw-recipient-label">{recipient.label}</strong>
+                          {recipient.label !== recipient.contactId ? (
+                            <span className="sw-recipient-contact">{recipient.contactId}</span>
+                          ) : null}
+                          <span className="sw-recipient-date">
+                            {copy.recipients.added} {formatDate(recipient.addedAt)}
+                          </span>
+                        </div>
+                        <div className="sw-recipient-controls">
+                          {/* Toggle switch */}
+                          <label className="sw-toggle" title={recipient.enabled ? copy.recipients.enabled : copy.recipients.disabled}>
+                            <input
+                              type="checkbox"
+                              checked={recipient.enabled}
+                              onChange={(e) => void handleToggleRecipient(recipient.id, e.target.checked)}
+                              disabled={saving}
+                            />
+                            <span className="sw-toggle-track">
+                              <span className="sw-toggle-thumb" />
+                            </span>
+                          </label>
+                          <button
+                            className="sw-btn-icon"
+                            disabled={saving}
+                            onClick={() => startEditRecipient(recipient)}
+                            title={copy.recipients.edit}
+                            aria-label={`${copy.recipients.edit}: ${recipient.label}`}
+                          >
+                            <Pencil size={13} />
+                          </button>
+                          {/* Test button */}
+                          <button
+                            className="sw-btn-icon"
+                            disabled={saving || testingId === recipient.id || !recipient.enabled}
+                            onClick={() => void handleTestRecipient(recipient.id)}
+                            title={copy.recipients.test}
+                            aria-label={`${copy.recipients.test}: ${recipient.label}`}
+                          >
+                            <Send size={13} />
+                          </button>
+                          {/* Delete button */}
+                          {confirmDeleteId === recipient.id ? (
+                            <div className="sw-delete-confirm">
+                              <button
+                                className="sw-btn danger compact"
+                                onClick={() => void handleRemoveRecipient(recipient.id)}
+                                disabled={saving}
+                              >
+                                {copy.account.confirm}
+                              </button>
+                              <button
+                                className="sw-btn ghost compact"
+                                onClick={() => setConfirmDeleteId(null)}
+                              >
+                                {copy.account.cancel}
+                              </button>
+                            </div>
+                          ) : (
+                            <button
+                              className="sw-btn-icon danger"
+                              onClick={() => setConfirmDeleteId(recipient.id)}
+                              disabled={saving}
+                              title={copy.recipients.remove}
+                              aria-label={`${copy.recipients.remove}: ${recipient.label}`}
+                            >
+                              <Trash2 size={13} />
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    )}
                     {testingId === recipient.id ? (
                       <div className="sw-recipient-testing">{copy.recipients.testing}</div>
                     ) : null}
@@ -896,6 +1003,8 @@ const COPY = {
       addFirst: "Add first recipient",
       addBtn: "Add recipient",
       adding: "Adding…",
+      edit: "Edit recipient",
+      saveRecipient: "Save recipient",
       contactId: "WeChat Contact ID",
       labelField: "Display Name",
       labelPlaceholder: "e.g. Team Lead, Ops Room",
@@ -996,6 +1105,8 @@ const COPY = {
       addFirst: "添加第一个接收人",
       addBtn: "添加接收人",
       adding: "添加中…",
+      edit: "编辑接收人",
+      saveRecipient: "保存接收人",
       contactId: "微信联系人 ID",
       labelField: "显示名称",
       labelPlaceholder: "例如：运维组、技术负责人",

@@ -104,6 +104,49 @@ describe("AlertService", () => {
     expect(message).toMatch(/\n- .*10\.0\.0\.1:22 Reason: Connection failed/);
   });
 
+  it("sends offline alerts to every enabled recipient", async () => {
+    const send = vi.fn();
+    const service = new AlertService({
+      getSettings: () => enabledRecipientSettings({
+        wechatRoomId: "one@im.wechat",
+        wechatRecipients: [
+          {
+            id: "recipient-1",
+            contactId: "one@im.wechat",
+            label: "One",
+            enabled: true,
+            addedAt: "2026-05-20T10:00:00.000Z"
+          },
+          {
+            id: "recipient-2",
+            contactId: "two@im.wechat",
+            label: "Two",
+            enabled: true,
+            addedAt: "2026-05-20T10:00:00.000Z"
+          },
+          {
+            id: "recipient-3",
+            contactId: "paused@im.wechat",
+            label: "Paused",
+            enabled: false,
+            addedAt: "2026-05-20T10:00:00.000Z"
+          }
+        ]
+      }),
+      send
+    });
+
+    await service.handleRefresh({
+      servers,
+      snapshots: [snapshot("prod-01", "offline")],
+      trigger: "scheduled",
+      startedAt: "2026-05-20T10:00:00.000Z"
+    });
+
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(send.mock.calls.map((call) => call[1])).toEqual(["one@im.wechat", "two@im.wechat"]);
+  });
+
   it("formats offline alerts in Chinese", async () => {
     const send = vi.fn();
     const service = new AlertService({

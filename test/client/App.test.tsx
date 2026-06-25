@@ -226,6 +226,9 @@ describe("App", () => {
             delivery: { phase: "awaiting_qr", severity: "warning" }
           }, 202);
         }
+        if (url === "/api/settings/wechat/qr/refresh" && init?.method === "POST") {
+          return json({ accepted: true }, 202);
+        }
         if (url === "/api/settings/alerts") {
           if (init?.method === "PATCH") {
             return json({
@@ -477,6 +480,66 @@ describe("App", () => {
     await userEvent.click(await screen.findByRole("button", { name: "Open settings" }));
     expect(await screen.findByAltText("微信登录二维码")).toBeInTheDocument();
     expect(screen.getByText("微信扫码登录 Bot")).toBeInTheDocument();
+  });
+
+  it("manually refreshes the WeChat login QR code from settings", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (url === "/api/overview") return json(overview);
+        if (url === "/api/settings/alerts") {
+          return json({
+            settings: enabledRecipientSettings({ language: "zh", wechatRoomId: "123@im.wechat", wechatRecipients: [{
+              id: "recipient-1",
+              contactId: "123@im.wechat",
+              label: "123@im.wechat",
+              enabled: true,
+              addedAt: "2026-05-20T10:00:00.000Z"
+            }] }),
+            status: { enabled: true, configured: true }
+          });
+        }
+        if (url === "/api/settings/wechat/qr/refresh" && init?.method === "POST") {
+          return json({ accepted: true }, 202);
+        }
+        if (url === "/api/settings/wechat") {
+          return json({
+            started: true,
+            loggedIn: false,
+            polling: false,
+            ready: false,
+            qrUrl: "https://liteapp.weixin.qq.com/q/test",
+            awaitingQr: true,
+            botUserId: null,
+            storedSession: {
+              available: false,
+              botUserId: null,
+              savedAt: null,
+              contextUserIds: [],
+              verifiedForTarget: false
+            },
+            lastError: null,
+            messageCount: 0,
+            lastMessageAt: null,
+            recentChats: [],
+            target: null,
+            delivery: { phase: "awaiting_qr", severity: "warning" }
+          });
+        }
+        return json({}, 404);
+      })
+    );
+
+    render(<App />);
+    await userEvent.click(await screen.findByRole("button", { name: "Open settings" }));
+    await userEvent.click(await screen.findByRole("button", { name: "刷新二维码" }));
+
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith(
+        "/api/settings/wechat/qr/refresh",
+        expect.objectContaining({ method: "POST" })
+      );
+    });
   });
 
   it("shows the WeChat login QR code on the recipients tab while adding accounts", async () => {

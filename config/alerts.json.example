@@ -1,6 +1,7 @@
 {
   "enabled": false,
   "wechatRoomId": "",
+  "wechatRecipients": [],
   "cooldownMinutes": 60,
   "language": "en",
   "sshCommandTimeoutSeconds": 15,

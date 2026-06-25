@@ -210,16 +210,25 @@ function normalizeAlertSettings(value: Record<string, unknown>): AlertSettings {
   // Normalize recipients array
   let recipients: WeChatRecipient[] = [];
   if (Array.isArray(value.wechatRecipients)) {
+    const seenContactIds = new Set<string>();
     recipients = value.wechatRecipients
       .filter((r): r is Record<string, unknown> => typeof r === "object" && r !== null)
-      .map((r) => ({
-        id: typeof r.id === "string" ? r.id : randomUUID(),
-        contactId: typeof r.contactId === "string" ? r.contactId.trim() : "",
-        label: typeof r.label === "string" ? r.label.trim() : "",
-        enabled: typeof r.enabled === "boolean" ? r.enabled : true,
-        addedAt: typeof r.addedAt === "string" ? r.addedAt : new Date().toISOString()
-      }))
-      .filter((r) => r.contactId !== "");
+      .map((r) => {
+        const contactId = typeof r.contactId === "string" ? r.contactId.trim() : "";
+        const label = typeof r.label === "string" ? r.label.trim() : "";
+        return {
+          id: typeof r.id === "string" ? r.id : randomUUID(),
+          contactId,
+          label: label || contactId,
+          enabled: typeof r.enabled === "boolean" ? r.enabled : true,
+          addedAt: typeof r.addedAt === "string" ? r.addedAt : new Date().toISOString()
+        };
+      })
+      .filter((r) => {
+        if (r.contactId === "" || seenContactIds.has(r.contactId)) return false;
+        seenContactIds.add(r.contactId);
+        return true;
+      });
   }
 
   // Legacy migration: if no recipients but wechatRoomId is set, create one

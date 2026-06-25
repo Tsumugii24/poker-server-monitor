@@ -42,18 +42,17 @@ Offline WeChat alerts are disabled by default. You can also configure them from 
 
 ## WeChat Alerts
 
-The dashboard can send a WeChat message when an enabled server is detected as `offline`.
+The dashboard can send a WeChat message to every enabled recipient when an enabled server is detected as `offline`.
 
 1. Open the Settings button in the top bar.
-2. Click `Start WeChat login`.
-3. If a QR login URL appears, open it and scan the QR code.
-4. Send a normal message in the target WeChat group.
-5. Click `Refresh status`.
-6. Select the detected `@chatroom` entry from `Recent WeChat chats`; it fills `WeChat group chat ID`.
-7. Enable WeChat offline alerts, choose English or Chinese alert language, set the cooldown minutes, and save.
-8. Use `Send test alert` to verify delivery.
+2. Click `Start WeChat login`, then scan the QR code rendered in the dashboard. The QR status auto-refreshes while login is pending; use `Refresh QR` if the code expires.
+3. Ask each alert recipient, or the target group, to send a normal message to the logged-in bot account.
+4. Open the `Recipients` tab and add the detected contact from `Recent contacts`, or enter the WeChat contact ID manually.
+5. Enable or pause recipients as needed. Edit or remove stale recipients from the same list.
+6. Choose English or Chinese alert language, set the cooldown minutes, and save.
+7. Use the per-recipient test button or the global `Send test alert` action to verify delivery.
 
-The WeChat bot needs message context before it can send to a group. The Settings panel exposes the recent chat IDs that the bot has seen, so you do not need to manually inspect terminal logs for the group ID. The `@wechatbot/wechatbot` SDK stores its login state locally, so do not commit generated WeChat credential files.
+The WeChat bot needs message context before it can proactively send to a contact or group. The Settings panel exposes the recent chat IDs that the bot has seen, so you do not need to manually inspect terminal logs for IDs. The `@wechatbot/wechatbot` SDK stores its login state locally, so do not commit generated WeChat credential files.
 
 Alert behavior:
 
