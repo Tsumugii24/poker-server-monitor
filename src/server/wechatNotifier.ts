@@ -24,8 +24,16 @@ type WeChatBotInstance = {
   on: (event: string, handler: (...args: unknown[]) => void | Promise<void>) => unknown;
 };
 
+type WeChatBotInternalInstance = WeChatBotInstance & {
+  poller?: {
+    removeAllListeners: (event?: string) => unknown;
+    on: (event: string, handler: (...args: unknown[]) => void | Promise<void>) => unknown;
+  };
+};
+
 type WeChatBotConstructor = new (options?: {
   storageDir?: string;
+  logLevel?: "debug" | "info" | "warn" | "error" | "silent";
 }) => WeChatBotInstance;
 
 type WeChatBotModule = {
@@ -60,6 +68,7 @@ export class WeChatNotifier {
   private lastError: string | null = null;
   private messageCount = 0;
   private lastMessageAt: string | null = null;
+  private suppressAutoRelogin = false;
   private readonly recentChats: WeChatChatCandidate[] = [];
   private readonly targetActivity = new Map<string, WeChatTargetActivity>();
 
@@ -81,6 +90,7 @@ export class WeChatNotifier {
   }
 
   async restartLogin(): Promise<void> {
+    this.suppressAutoRelogin = false;
     this.restartPromise ??= this.doRestartLogin().finally(() => {
       this.restartPromise = null;
     });
@@ -91,6 +101,7 @@ export class WeChatNotifier {
     if (this.loggedIn) {
       return;
     }
+    this.suppressAutoRelogin = false;
     this.restartPromise ??= this.doRestartLogin({ force: true }).finally(() => {
       this.restartPromise = null;
     });
@@ -98,6 +109,7 @@ export class WeChatNotifier {
   }
 
   async logout(): Promise<void> {
+    this.suppressAutoRelogin = false;
     await this.stopActiveBot();
     await this.clearPersistedSession();
     this.resetConnector();
@@ -118,6 +130,7 @@ export class WeChatNotifier {
     if (this.loggedIn) {
       return;
     }
+    this.suppressAutoRelogin = false;
     await this.ensureStarted();
   }
 
@@ -260,7 +273,9 @@ export class WeChatNotifier {
     this.lastError = null;
     this.loginAttemptStartedAt = Date.now();
     const generation = ++this.loginGeneration;
-    const bot = new Bot(this.options.storageDir ? { storageDir: this.options.storageDir } : undefined);
+    const bot = new Bot(this.buildBotOptions());
+    this.replaceSdkSessionExpiredHandler(bot);
+    this.preventSdkAutoRelogin(bot);
     bot.on("poll:start", () => {
       this.polling = true;
       this.ready = true;
@@ -271,6 +286,9 @@ export class WeChatNotifier {
     bot.on("message", (message: unknown) => this.recordChat(message as IncomingWeChatMessage));
     bot.on("error", (error: unknown) => {
       this.lastError = error instanceof Error ? error.message : String(error);
+    });
+    bot.on("session:expired", () => {
+      this.markSessionExpired(bot);
     });
 
     this.bot = bot;
@@ -355,7 +373,7 @@ export class WeChatNotifier {
     }
     const Bot = mod.WeChatBot ?? mod.default;
     if (!Bot) return;
-    const ephemeral = new Bot(this.options.storageDir ? { storageDir: this.options.storageDir } : undefined);
+    const ephemeral = new Bot(this.buildBotOptions());
     if (ephemeral.storage) {
       await this.deleteStorageKeys(ephemeral.storage);
     }
@@ -372,6 +390,48 @@ export class WeChatNotifier {
     this.messageCount = 0;
     this.lastMessageAt = null;
     this.lastError = null;
+  }
+
+  private buildBotOptions(): { storageDir?: string; logLevel?: "debug" | "info" | "warn" | "error" | "silent" } {
+    return {
+      ...(this.options.storageDir ? { storageDir: this.options.storageDir } : {}),
+      logLevel: "warn"
+    };
+  }
+
+  private replaceSdkSessionExpiredHandler(bot: WeChatBotInstance): void {
+    const internal = bot as WeChatBotInternalInstance;
+    if (!internal.poller) {
+      return;
+    }
+    internal.poller.removeAllListeners("session:expired");
+    internal.poller.on("session:expired", () => {
+      this.markSessionExpired(bot);
+    });
+  }
+
+  private markSessionExpired(bot: WeChatBotInstance): void {
+    this.suppressAutoRelogin = true;
+    this.loggedIn = false;
+    this.ready = false;
+    this.polling = false;
+    this.qrUrl = null;
+    this.lastError = "WeChat bot session expired. Click refresh QR and scan again.";
+    try {
+      bot.stop?.();
+    } catch {
+      /* ignore stop errors */
+    }
+  }
+
+  private preventSdkAutoRelogin(bot: WeChatBotInstance): void {
+    const originalLogin = bot.login.bind(bot);
+    bot.login = async (options) => {
+      if (this.suppressAutoRelogin && options?.force) {
+        throw new Error("WeChat session expired; manual QR login required.");
+      }
+      return originalLogin(options);
+    };
   }
 
   private resetConnector(options: { keepError?: boolean; soft?: boolean } = {}): void {
