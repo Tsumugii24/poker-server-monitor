@@ -58,7 +58,7 @@ export function SettingsWizard({
   onTestRecipient
 }: SettingsWizardProps) {
   const [draft, setDraft] = useState<AlertSettings>(settings);
-  const [activeTab, setActiveTab] = useState<SettingsTab>(() => deriveInitialTab(wechatStatus));
+  const [activeTab, setActiveTab] = useState<SettingsTab>(deriveInitialTab);
   const [actionError, setActionError] = useState<string | null>(null);
   const [confirmAction, setConfirmAction] = useState<"logout" | "switch" | null>(null);
   const [accountBusy, setAccountBusy] = useState(false);
@@ -126,16 +126,16 @@ export function SettingsWizard({
   /* ── Tab configuration ──────────────────────────────────────── */
   const tabs: Array<{ id: SettingsTab; label: string; badge?: string }> = useMemo(() => [
     {
-      id: "connection",
-      label: copy.tabs.connection,
-      badge: wechatStatus.loggedIn ? "●" : undefined
-    },
-    {
       id: "recipients",
       label: copy.tabs.recipients,
       badge: settings.wechatRecipients.filter((r) => r.enabled).length > 0
         ? String(settings.wechatRecipients.filter((r) => r.enabled).length)
         : undefined
+    },
+    {
+      id: "connection",
+      label: copy.tabs.connection,
+      badge: wechatStatus.loggedIn ? "●" : undefined
     },
     {
       id: "check",
@@ -226,6 +226,20 @@ export function SettingsWizard({
       setActionError(error instanceof Error ? error.message : String(error));
     } finally {
       setAddingRecipient(false);
+    }
+  };
+
+  const handleAddRecipientIntent = async () => {
+    if (wechatStatus.loggedIn) {
+      setShowAddForm(true);
+      return;
+    }
+
+    setShowAddForm(false);
+    setActiveTab("connection");
+    setSessionChoice("new");
+    if (!wechatStatus.awaitingQr && !wechatStatus.qrUrl) {
+      await handleStartLogin();
     }
   };
 
@@ -522,14 +536,6 @@ export function SettingsWizard({
         {/* ── Recipients Tab ─────────────────────────────────── */}
         {activeTab === "recipients" ? (
           <div className="sw-tab-panel">
-            {!wechatStatus.loggedIn ? (
-              <div className="sw-recipients-login">
-                <h4>{copy.recipients.loginRequiredTitle}</h4>
-                <p className="sw-help">{copy.recipients.loginRequired}</p>
-                {weChatLoginFlow}
-              </div>
-            ) : (
-              <>
             <div className="sw-recipients-header">
               <div>
                 <h4>{copy.recipients.title}</h4>
@@ -538,14 +544,22 @@ export function SettingsWizard({
               {!showAddForm ? (
                 <button
                   className="sw-btn primary compact"
-                  onClick={() => setShowAddForm(true)}
-                  disabled={saving}
+                  onClick={() => void handleAddRecipientIntent()}
+                  disabled={saving || accountBusy}
                 >
                   <Plus size={14} />
                   {copy.recipients.add}
                 </button>
               ) : null}
             </div>
+
+            {!wechatStatus.loggedIn ? (
+              <div className="sw-recipients-login">
+                <h4>{copy.recipients.loginRequiredTitle}</h4>
+                <p className="sw-help">{copy.recipients.loginRequired}</p>
+              </div>
+            ) : (
+              <>
 
             {/* Add recipient form */}
             {showAddForm ? (
@@ -731,7 +745,7 @@ export function SettingsWizard({
             ) : !showAddForm ? (
               <div className="sw-empty-state">
                 <p>{copy.recipients.empty}</p>
-                <button className="sw-btn primary" onClick={() => setShowAddForm(true)}>
+                <button className="sw-btn primary" onClick={() => void handleAddRecipientIntent()}>
                   <Plus size={14} />
                   {copy.recipients.addFirst}
                 </button>
@@ -941,8 +955,7 @@ function initialSessionChoice(wechatStatus: WeChatConnectorStatus): SessionChoic
   return "new";
 }
 
-function deriveInitialTab(wechatStatus: WeChatConnectorStatus): SettingsTab {
-  if (!wechatStatus.loggedIn) return "connection";
+function deriveInitialTab(): SettingsTab {
   return "recipients";
 }
 
@@ -956,8 +969,8 @@ const COPY = {
     title: "WeChat Alert Settings",
     tabsLabel: "Settings sections",
     tabs: {
-      connection: "Connection",
       recipients: "Recipients",
+      connection: "Connection",
       check: "Connection Check",
       status: "Status"
     },
@@ -1011,7 +1024,7 @@ const COPY = {
       suggestions: "Recent contacts",
       empty: "No recipients configured yet. Add a WeChat contact to start receiving alerts.",
       loginRequiredTitle: "Log in the bot first",
-      loginRequired: "Scan the QR code below to authorize the WeChat bot before adding notification recipients.",
+      loginRequired: "Adding a recipient opens a new QR login flow in the Connection tab.",
       added: "Added",
       enabled: "Receiving alerts",
       disabled: "Alerts paused",
@@ -1058,8 +1071,8 @@ const COPY = {
     title: "微信告警设置",
     tabsLabel: "设置项",
     tabs: {
-      connection: "连接",
       recipients: "接收人",
+      connection: "连接",
       check: "连接检查",
       status: "状态"
     },
@@ -1113,7 +1126,7 @@ const COPY = {
       suggestions: "最近联系人",
       empty: "尚未配置接收人。添加微信联系人以开始接收告警。",
       loginRequiredTitle: "请先登录 Bot",
-      loginRequired: "添加通知接收人之前，请先扫描下方二维码完成微信 Bot 授权登录。",
+      loginRequired: "点击添加会跳转到连接页，并启动新的微信扫码登录流程。",
       added: "添加于",
       enabled: "接收告警中",
       disabled: "告警已暂停",

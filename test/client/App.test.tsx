@@ -422,6 +422,7 @@ describe("App", () => {
 
     render(<App />);
     await userEvent.click(await screen.findByRole("button", { name: "Open settings" }));
+    await userEvent.click(await screen.findByRole("button", { name: "添加" }));
     expect(await screen.findByText("正在获取登录二维码…")).toBeInTheDocument();
   });
 
@@ -478,6 +479,7 @@ describe("App", () => {
 
     render(<App />);
     await userEvent.click(await screen.findByRole("button", { name: "Open settings" }));
+    await userEvent.click(await screen.findByRole("button", { name: "添加" }));
     expect(await screen.findByAltText("微信登录二维码")).toBeInTheDocument();
     expect(screen.getByText("微信扫码登录 Bot")).toBeInTheDocument();
   });
@@ -532,6 +534,7 @@ describe("App", () => {
 
     render(<App />);
     await userEvent.click(await screen.findByRole("button", { name: "Open settings" }));
+    await userEvent.click(await screen.findByRole("button", { name: "添加" }));
     await userEvent.click(await screen.findByRole("button", { name: "刷新二维码" }));
 
     await waitFor(() => {
@@ -542,7 +545,7 @@ describe("App", () => {
     });
   });
 
-  it("shows the WeChat login QR code on the recipients tab while adding accounts", async () => {
+  it("opens the QR connection tab when adding recipients before bot login", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (url: string) => {
@@ -583,8 +586,69 @@ describe("App", () => {
 
     render(<App />);
     await userEvent.click(await screen.findByRole("button", { name: "Open settings" }));
-    await userEvent.click(await screen.findByRole("button", { name: "Recipients" }));
     expect(await screen.findByText("Log in the bot first")).toBeInTheDocument();
+    expect(screen.queryByAltText("WeChat login QR code")).not.toBeInTheDocument();
+
+    await userEvent.click(await screen.findByRole("button", { name: "Add" }));
+
+    expect(await screen.findByAltText("WeChat login QR code")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Connection" })).toHaveClass("active");
+  });
+
+  it("starts a new QR login when adding recipients from a disconnected state", async () => {
+    let loginStarted = false;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (url === "/api/overview") return json(overview);
+        if (url === "/api/settings/alerts") {
+          return json({
+            settings: defaultAlertSettingsFixture,
+            status: { enabled: false, configured: false }
+          });
+        }
+        if (url === "/api/settings/wechat/start" && init?.method === "POST") {
+          loginStarted = true;
+          return json({ accepted: true }, 202);
+        }
+        if (url === "/api/settings/wechat") {
+          return json({
+            started: loginStarted,
+            loggedIn: false,
+            polling: false,
+            ready: false,
+            qrUrl: loginStarted ? "https://liteapp.weixin.qq.com/q/test" : null,
+            awaitingQr: loginStarted,
+            botUserId: null,
+            storedSession: {
+              available: false,
+              botUserId: null,
+              savedAt: null,
+              contextUserIds: [],
+              verifiedForTarget: false
+            },
+            lastError: null,
+            messageCount: 0,
+            lastMessageAt: null,
+            recentChats: [],
+            target: null,
+            delivery: { phase: loginStarted ? "awaiting_qr" : "bot_offline", severity: "warning" }
+          });
+        }
+        return json({}, 404);
+      })
+    );
+
+    render(<App />);
+    await userEvent.click(await screen.findByRole("button", { name: "Open settings" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Add" }));
+
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith(
+        "/api/settings/wechat/start",
+        expect.objectContaining({ method: "POST" })
+      );
+    });
     expect(await screen.findByAltText("WeChat login QR code")).toBeInTheDocument();
   });
 
