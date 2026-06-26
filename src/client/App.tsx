@@ -1,22 +1,32 @@
 import {
   Activity,
   ArrowLeft,
+  Check,
+  ChevronLeft,
+  ChevronRight,
   Clock,
   Cpu,
   Gauge,
+  Grid3X3,
   HardDrive,
   MemoryStick,
   Moon,
+  Pencil,
+  Plus,
   RefreshCw,
+  Save,
   Server,
   Settings,
   ShieldCheck,
   Signal,
   Sun,
+  Trash2,
   TriangleAlert,
-  Workflow
+  Workflow,
+  X
 } from "lucide-react";
-import { type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
+import { type FormEvent, type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
+import { PreflopRangeView } from "./PreflopRangeView";
 import { SettingsWizard } from "./SettingsWizard";
 import type {
   AlertSettings,
@@ -42,6 +52,8 @@ import "./styles.css";
 
 type Route =
   | { name: "overview" }
+  | { name: "inventory" }
+  | { name: "preflop" }
   | {
       name: "detail";
       id: string;
@@ -49,6 +61,30 @@ type Route =
 
 type Theme = "dark" | "light";
 type SortDirection = "asc" | "desc";
+
+type ServerInventoryCreateInput = {
+  host: string;
+  port: number;
+  group?: string | null;
+  enabled: boolean;
+  note?: string;
+};
+
+type ServerInventoryUpdatePatch = {
+  host?: string;
+  port?: number;
+  group?: string | null;
+  enabled?: boolean;
+  note?: string;
+};
+
+type ServerInventoryDraft = {
+  host: string;
+  port: string;
+  group: string;
+  enabled: boolean;
+  note: string;
+};
 
 type AlertSettingsResponse = {
   settings: AlertSettings;
@@ -551,11 +587,15 @@ export default function App() {
   useEffect(() => {
     setLoading(true);
     setError(null);
-    const endpoint = route.name === "overview" ? "/api/overview" : `/api/servers/${route.id}`;
+    if (route.name === "preflop") {
+      setLoading(false);
+      return;
+    }
+    const endpoint = route.name === "detail" ? `/api/servers/${route.id}` : "/api/overview";
     void fetchJson<OverviewResponse | ServerDetailResponse>(endpoint)
       .then((data) => {
-        if (route.name === "overview") setOverview(data as OverviewResponse);
-        else setDetail(data as ServerDetailResponse);
+        if (route.name === "detail") setDetail(data as ServerDetailResponse);
+        else setOverview(data as OverviewResponse);
       })
       .catch((caught: unknown) => setError(caught instanceof Error ? caught.message : String(caught)))
       .finally(() => setLoading(false));
@@ -569,6 +609,16 @@ export default function App() {
   const openOverview = () => {
     window.history.pushState({}, "", "/");
     setRoute({ name: "overview" });
+  };
+
+  const openInventoryManager = () => {
+    window.history.pushState({}, "", "/inventory");
+    setRoute({ name: "inventory" });
+  };
+
+  const openPreflopRanges = () => {
+    window.history.pushState({}, "", "/preflop-ranges");
+    setRoute({ name: "preflop" });
   };
 
   const refreshAll = async () => {
@@ -588,28 +638,75 @@ export default function App() {
     }
   };
 
-  const updateServerNote = async (serverId: string, note: string) => {
-    const updated = await fetchJson<ServerConfig>(`/api/servers/${encodeURIComponent(serverId)}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ note })
-    });
+  const reloadOverview = async (): Promise<OverviewResponse> => {
+    const data = await fetchJson<OverviewResponse>("/api/overview");
+    setOverview(data);
+    return data;
+  };
 
-    setOverview((current) =>
-      current
-        ? {
-            ...current,
-            servers: current.servers.map((server) =>
-              server.id === serverId ? { ...server, note: updated.note } : server
-            )
-          }
-        : current
-    );
-    setDetail((current) =>
-      current && current.server.id === serverId
-        ? { ...current, server: { ...current.server, note: updated.note } }
-        : current
-    );
+  const createServer = async (input: ServerInventoryCreateInput) => {
+    setError(null);
+    try {
+      await fetchJson<ServerConfig>("/api/servers", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(input)
+      });
+      await reloadOverview();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+      throw caught;
+    }
+  };
+
+  const updateServerInventory = async (serverId: string, patch: ServerInventoryUpdatePatch) => {
+    setError(null);
+    try {
+      const updated = await fetchJson<ServerConfig>(`/api/servers/${encodeURIComponent(serverId)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(patch)
+      });
+
+      setOverview((current) =>
+        current
+          ? {
+              ...current,
+              servers: current.servers.map((server) =>
+                server.id === serverId ? { ...server, ...updated } : server
+              )
+            }
+          : current
+      );
+      setDetail((current) =>
+        current && current.server.id === serverId
+          ? { ...current, server: { ...current.server, ...updated } }
+          : current
+      );
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+      throw caught;
+    }
+  };
+
+  const updateServerNote = async (serverId: string, note: string) => {
+    await updateServerInventory(serverId, { note });
+  };
+
+  const removeServer = async (serverId: string) => {
+    setError(null);
+    try {
+      await fetchJson<{ servers: ServerConfig[] }>(`/api/servers/${encodeURIComponent(serverId)}`, {
+        method: "DELETE"
+      });
+      await reloadOverview();
+      if (route.name === "detail" && route.id === serverId) {
+        openOverview();
+      }
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+      throw caught;
+    }
   };
 
   return (
@@ -625,6 +722,13 @@ export default function App() {
           </div>
         </div>
         <div className="topbar-actions">
+          <button
+            className={`icon-button topbar-link-button ${route.name === "preflop" ? "active" : ""}`}
+            onClick={openPreflopRanges}
+          >
+            <Grid3X3 size={16} />
+            Ranges
+          </button>
           <button
             className="theme-toggle"
             onClick={openSettings}
@@ -675,7 +779,26 @@ export default function App() {
       ) : null}
 
       {!loading && route.name === "overview" && overview ? (
-        <OverviewView overview={overview} onOpenServer={openServer} onUpdateServerNote={updateServerNote} />
+        <OverviewView
+          overview={overview}
+          onOpenServer={openServer}
+          onManageInventory={openInventoryManager}
+          onUpdateServerNote={updateServerNote}
+        />
+      ) : null}
+
+      {!loading && route.name === "inventory" && overview ? (
+        <InventoryManageView
+          servers={overview.servers}
+          onBack={openOverview}
+          onCreateServer={createServer}
+          onUpdateServer={updateServerInventory}
+          onRemoveServer={removeServer}
+        />
+      ) : null}
+
+      {!loading && route.name === "preflop" ? (
+        <PreflopRangeView onBack={openOverview} />
       ) : null}
 
       {!loading && route.name === "detail" && detail ? (
@@ -690,14 +813,18 @@ export default function App() {
 function OverviewView({
   overview,
   onOpenServer,
+  onManageInventory,
   onUpdateServerNote
 }: {
   overview: OverviewResponse;
   onOpenServer: (serverId: string) => void;
+  onManageInventory: () => void;
   onUpdateServerNote: (serverId: string, note: string) => Promise<void>;
 }) {
   const [filter, setFilter] = useState<string>("all");
   const [idSortDirection, setIdSortDirection] = useState<SortDirection>("asc");
+  const [pageSize, setPageSize] = useState(10);
+  const [pageIndex, setPageIndex] = useState(0);
 
   const filteredServers = useMemo(() => {
     const servers = overview.servers.filter((server) => {
@@ -720,9 +847,30 @@ function OverviewView({
     });
   }, [overview.servers, filter, idSortDirection]);
 
+  const pageCount = Math.max(1, Math.ceil(filteredServers.length / pageSize));
+  const currentPageIndex = Math.min(pageIndex, pageCount - 1);
+  const pagedServers = useMemo(() => {
+    const start = currentPageIndex * pageSize;
+    return filteredServers.slice(start, start + pageSize);
+  }, [currentPageIndex, filteredServers, pageSize]);
+
+  useEffect(() => {
+    setPageIndex(0);
+  }, [filter, idSortDirection, pageSize]);
+
+  useEffect(() => {
+    if (pageIndex > pageCount - 1) {
+      setPageIndex(pageCount - 1);
+    }
+  }, [pageCount, pageIndex]);
+
   const toggleIdSort = () => {
+    setPageIndex(0);
     setIdSortDirection((current) => (current === "asc" ? "desc" : "asc"));
   };
+
+  const resultStart = filteredServers.length === 0 ? 0 : currentPageIndex * pageSize + 1;
+  const resultEnd = filteredServers.length === 0 ? 0 : resultStart + pagedServers.length - 1;
 
   const overallTimestamps = overview.overallHistory.map((p) => p.collectedAt);
 
@@ -813,12 +961,60 @@ function OverviewView({
       </section>
 
       <section className="panel">
-        <div className="panel-title">
-          <Server size={16} />
-          <h3>Server Inventory {filter !== "all" && <span className="inventory-filter-badge">({filteredServers.length})</span>}</h3>
+        <div className="panel-title inventory-panel-title">
+          <div className="panel-title-main">
+            <Server size={16} />
+            <h3>Server Inventory {filter !== "all" && <span className="inventory-filter-badge">({filteredServers.length})</span>}</h3>
+          </div>
+          <button className="icon-button ghost compact" onClick={onManageInventory}>
+            <Settings size={15} />
+            Manage Inventory
+          </button>
+        </div>
+        <div className="search-results-toolbar">
+          <div className="search-results-summary">
+            <span>Search Results</span>
+            <strong>{resultStart}-{resultEnd}</strong>
+            <span>of {filteredServers.length} IDs</span>
+          </div>
+          <div className="search-results-controls">
+            <label>
+              IDs per page
+              <select
+                aria-label="IDs per page"
+                value={pageSize}
+                onChange={(event) => setPageSize(Number(event.target.value))}
+              >
+                <option value={5}>5</option>
+                <option value={10}>10</option>
+                <option value={20}>20</option>
+              </select>
+            </label>
+            <button
+              className="inventory-page-button"
+              aria-label="Previous results page"
+              title="Previous results page"
+              disabled={currentPageIndex === 0}
+              onClick={() => setPageIndex((current) => Math.max(0, current - 1))}
+            >
+              <ChevronLeft size={16} />
+            </button>
+            <span className="search-results-page">
+              Page {filteredServers.length === 0 ? 0 : currentPageIndex + 1} / {filteredServers.length === 0 ? 0 : pageCount}
+            </span>
+            <button
+              className="inventory-page-button"
+              aria-label="Next results page"
+              title="Next results page"
+              disabled={currentPageIndex >= pageCount - 1 || filteredServers.length === 0}
+              onClick={() => setPageIndex((current) => Math.min(pageCount - 1, current + 1))}
+            >
+              <ChevronRight size={16} />
+            </button>
+          </div>
         </div>
         <ServerTable
-          servers={filteredServers}
+          servers={pagedServers}
           idSortDirection={idSortDirection}
           onToggleIdSort={toggleIdSort}
           onOpenServer={onOpenServer}
@@ -843,7 +1039,7 @@ function DetailView({ detail, onBack }: { detail: ServerDetailResponse; onBack: 
       </button>
       <section className="section-heading detail-heading">
         <div>
-          <h2>{detail.server.name} Details</h2>
+          <h2>Server Details</h2>
           <p>{detail.server.host}:{detail.server.port}</p>
         </div>
         <div className="detail-badges">
@@ -918,31 +1114,31 @@ function ServerTable({
   onOpenServer: (serverId: string) => void;
   onUpdateServerNote: (serverId: string, note: string) => Promise<void>;
 }) {
-  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingNoteId, setEditingNoteId] = useState<string | null>(null);
   const [draftNote, setDraftNote] = useState("");
   const [savingId, setSavingId] = useState<string | null>(null);
 
-  const startEditing = (server: ServerRow) => {
-    setEditingId(server.id);
+  const startEditingNote = (server: ServerRow) => {
+    setEditingNoteId(server.id);
     setDraftNote(server.note);
   };
 
-  const cancelEditing = () => {
-    setEditingId(null);
+  const cancelEditingNote = () => {
+    setEditingNoteId(null);
     setDraftNote("");
   };
 
   const commitNote = async (server: ServerRow) => {
     const nextNote = draftNote.trim();
     if (nextNote === "" || nextNote === server.note) {
-      cancelEditing();
+      cancelEditingNote();
       return;
     }
 
     setSavingId(server.id);
     try {
       await onUpdateServerNote(server.id, nextNote);
-      cancelEditing();
+      cancelEditingNote();
     } finally {
       setSavingId(null);
     }
@@ -978,6 +1174,11 @@ function ServerTable({
           </tr>
         </thead>
         <tbody>
+          {servers.length === 0 ? (
+            <tr className="empty-row">
+              <td colSpan={12}>No servers configured.</td>
+            </tr>
+          ) : null}
           {servers.map((server) => (
             <tr key={server.id} onClick={() => onOpenServer(server.id)}>
               <td>
@@ -987,8 +1188,8 @@ function ServerTable({
                 <span
                   className={
                     resolveServerDatasetName(server)
-                      ? "server-dataset-name has-dataset"
-                      : "server-dataset-name"
+                      ? "server-dataset-name inventory-display-name has-dataset"
+                      : "server-dataset-name inventory-display-name"
                   }
                 >
                   {formatServerDatasetName(server)}
@@ -1021,7 +1222,7 @@ function ServerTable({
               <td>{server.latest?.load1?.toFixed(2) ?? "-"}</td>
               <td>{formatDuration(server.latest?.uptimeSeconds)}</td>
               <td>
-                {editingId === server.id ? (
+                {editingNoteId === server.id ? (
                   <input
                     className="server-name-input"
                     aria-label={`Server note for ${server.id}`}
@@ -1037,7 +1238,7 @@ function ServerTable({
                       }
                       if (event.key === "Escape") {
                         event.stopPropagation();
-                        cancelEditing();
+                        cancelEditingNote();
                       }
                     }}
                   />
@@ -1047,7 +1248,7 @@ function ServerTable({
                     aria-label={`Edit note for ${server.id}`}
                     onClick={(event) => {
                       event.stopPropagation();
-                      startEditing(server);
+                      startEditingNote(server);
                     }}
                   >
                     {server.note}
@@ -1060,6 +1261,435 @@ function ServerTable({
       </table>
     </div>
   );
+}
+
+function InventoryManageView({
+  servers,
+  onBack,
+  onCreateServer,
+  onUpdateServer,
+  onRemoveServer
+}: {
+  servers: ServerRow[];
+  onBack: () => void;
+  onCreateServer: (input: ServerInventoryCreateInput) => Promise<void>;
+  onUpdateServer: (serverId: string, patch: ServerInventoryUpdatePatch) => Promise<void>;
+  onRemoveServer: (serverId: string) => Promise<void>;
+}) {
+  const [showAddForm, setShowAddForm] = useState(false);
+  const [newDraft, setNewDraft] = useState<ServerInventoryDraft>(emptyServerDraft);
+  const [editingServerId, setEditingServerId] = useState<string | null>(null);
+  const [editDraft, setEditDraft] = useState<ServerInventoryDraft>(emptyServerDraft);
+  const [savingId, setSavingId] = useState<string | null>(null);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [inventoryError, setInventoryError] = useState<string | null>(null);
+
+  const sortedServers = useMemo(
+    () => [...servers].sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true, sensitivity: "base" })),
+    [servers]
+  );
+  const enabledCount = servers.filter((server) => server.enabled).length;
+
+  const startEditingServer = (server: ServerRow) => {
+    setInventoryError(null);
+    setConfirmDeleteId(null);
+    setEditingServerId(server.id);
+    setEditDraft(draftFromServer(server));
+  };
+
+  const cancelEditingServer = () => {
+    setEditingServerId(null);
+    setEditDraft(emptyServerDraft());
+  };
+
+  const submitNewServer = async (event: FormEvent) => {
+    event.preventDefault();
+    setInventoryError(null);
+    setSavingId("new-server");
+    try {
+      await onCreateServer(serverDraftToPayload(newDraft));
+      setNewDraft(emptyServerDraft());
+      setShowAddForm(false);
+    } catch (caught) {
+      setInventoryError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setSavingId(null);
+    }
+  };
+
+  const submitServerUpdate = async (server: ServerRow) => {
+    setInventoryError(null);
+    setSavingId(server.id);
+    try {
+      await onUpdateServer(server.id, serverDraftToPatch(editDraft));
+      cancelEditingServer();
+    } catch (caught) {
+      setInventoryError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setSavingId(null);
+    }
+  };
+
+  const removeInventoryServer = async (server: ServerRow) => {
+    setInventoryError(null);
+    setSavingId(server.id);
+    try {
+      await onRemoveServer(server.id);
+      setConfirmDeleteId(null);
+      if (editingServerId === server.id) {
+        cancelEditingServer();
+      }
+    } catch (caught) {
+      setInventoryError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setSavingId(null);
+    }
+  };
+
+  return (
+    <>
+      <button className="icon-button ghost" onClick={onBack}>
+        <ArrowLeft size={16} />
+        Back to Overview
+      </button>
+
+      <section className="section-heading inventory-manage-heading">
+        <div>
+          <h2>Inventory Management</h2>
+          <p>{servers.length} servers configured · {enabledCount} enabled</p>
+        </div>
+        <button
+          className="icon-button primary"
+          onClick={() => {
+            setInventoryError(null);
+            setShowAddForm((current) => !current);
+          }}
+          aria-label={showAddForm ? "Cancel adding server" : "Add server"}
+        >
+          {showAddForm ? <X size={16} /> : <Plus size={16} />}
+          {showAddForm ? "Cancel" : "Add Server"}
+        </button>
+      </section>
+
+      <section className="panel inventory-manage-panel">
+        <div className="inventory-toolbar">
+          <div className="inventory-toolbar-meta">
+            <strong>Server List</strong>
+            <span className="inventory-generated-pill">ID and name are automatic</span>
+          </div>
+        </div>
+
+        {showAddForm ? (
+          <form className="server-inventory-form" onSubmit={submitNewServer}>
+            <InventoryDraftFields
+              draft={newDraft}
+              disabled={savingId === "new-server"}
+              onChange={(patch) => setNewDraft((current) => ({ ...current, ...patch }))}
+            />
+            <div className="server-form-actions">
+              <button className="icon-button primary compact" type="submit" disabled={savingId === "new-server"}>
+                <Save size={15} />
+                Save
+              </button>
+              <button
+                className="icon-button ghost compact"
+                type="button"
+                disabled={savingId === "new-server"}
+                onClick={() => {
+                  setShowAddForm(false);
+                  setNewDraft(emptyServerDraft());
+                }}
+              >
+                <X size={15} />
+                Cancel
+              </button>
+            </div>
+          </form>
+        ) : null}
+
+        {inventoryError ? <div className="notice error compact-notice">{inventoryError}</div> : null}
+
+        <div className="table-wrap inventory-manage-table">
+          <table>
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Name</th>
+                <th>Host</th>
+                <th>Port</th>
+                <th>Group</th>
+                <th>Enabled</th>
+                <th>Note</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {sortedServers.length === 0 ? (
+                <tr className="empty-row">
+                  <td colSpan={8}>No servers configured.</td>
+                </tr>
+              ) : null}
+              {sortedServers.map((server) => {
+                const isEditingServer = editingServerId === server.id;
+                return (
+                  <tr key={server.id} className={isEditingServer ? "inventory-edit-row" : undefined}>
+                    <td>
+                      <span className="server-id-value">{server.id}</span>
+                    </td>
+                    <td>
+                      <span className="server-dataset-name">{server.name}</span>
+                    </td>
+                    <td>
+                      {isEditingServer ? (
+                        <input
+                          className="server-name-input inventory-cell-input"
+                          aria-label={`Host for ${server.id}`}
+                          value={editDraft.host}
+                          disabled={savingId === server.id}
+                          onChange={(event) => setEditDraft((current) => ({ ...current, host: event.target.value }))}
+                        />
+                      ) : (
+                        <span className="server-host-value">{server.host}</span>
+                      )}
+                    </td>
+                    <td>
+                      {isEditingServer ? (
+                        <input
+                          className="server-name-input inventory-port-input"
+                          aria-label={`Port for ${server.id}`}
+                          type="number"
+                          min="1"
+                          max="65535"
+                          value={editDraft.port}
+                          disabled={savingId === server.id}
+                          onChange={(event) => setEditDraft((current) => ({ ...current, port: event.target.value }))}
+                        />
+                      ) : (
+                        <span className="port-value">{server.port}</span>
+                      )}
+                    </td>
+                    <td>
+                      {isEditingServer ? (
+                        <input
+                          className="server-name-input inventory-group-input"
+                          aria-label={`Group for ${server.id}`}
+                          value={editDraft.group}
+                          disabled={savingId === server.id}
+                          onChange={(event) => setEditDraft((current) => ({ ...current, group: event.target.value }))}
+                        />
+                      ) : (
+                        <span className="server-group-value">{server.group ?? "—"}</span>
+                      )}
+                    </td>
+                    <td>
+                      {isEditingServer ? (
+                        <label className="inventory-switch">
+                          <input
+                            type="checkbox"
+                            aria-label={`Enabled for ${server.id}`}
+                            checked={editDraft.enabled}
+                            disabled={savingId === server.id}
+                            onChange={(event) => setEditDraft((current) => ({ ...current, enabled: event.target.checked }))}
+                          />
+                          <span>{editDraft.enabled ? "enabled" : "disabled"}</span>
+                        </label>
+                      ) : (
+                        <span className={`inventory-enabled-badge ${server.enabled ? "enabled" : "disabled"}`}>
+                          {server.enabled ? "enabled" : "disabled"}
+                        </span>
+                      )}
+                    </td>
+                    <td>
+                      {isEditingServer ? (
+                        <input
+                          className="server-name-input inventory-note-input"
+                          aria-label={`Inventory note for ${server.id}`}
+                          value={editDraft.note}
+                          disabled={savingId === server.id}
+                          onChange={(event) => setEditDraft((current) => ({ ...current, note: event.target.value }))}
+                        />
+                      ) : (
+                        <span>{server.note}</span>
+                      )}
+                    </td>
+                    <td>
+                      <div className="inventory-row-actions">
+                        {isEditingServer ? (
+                          <>
+                            <button
+                              className="inventory-action-button primary"
+                              aria-label={`Save server ${server.id}`}
+                              title={`Save server ${server.id}`}
+                              disabled={savingId === server.id}
+                              onClick={() => void submitServerUpdate(server)}
+                            >
+                              <Check size={15} />
+                            </button>
+                            <button
+                              className="inventory-action-button"
+                              aria-label={`Cancel editing ${server.id}`}
+                              title={`Cancel editing ${server.id}`}
+                              disabled={savingId === server.id}
+                              onClick={cancelEditingServer}
+                            >
+                              <X size={15} />
+                            </button>
+                          </>
+                        ) : confirmDeleteId === server.id ? (
+                          <>
+                            <button
+                              className="inventory-confirm-button danger"
+                              disabled={savingId === server.id}
+                              onClick={() => void removeInventoryServer(server)}
+                            >
+                              Delete
+                            </button>
+                            <button
+                              className="inventory-confirm-button"
+                              disabled={savingId === server.id}
+                              onClick={() => setConfirmDeleteId(null)}
+                            >
+                              Cancel
+                            </button>
+                          </>
+                        ) : (
+                          <>
+                            <button
+                              className="inventory-action-button"
+                              aria-label={`Edit server ${server.id}`}
+                              title={`Edit server ${server.id}`}
+                              onClick={() => startEditingServer(server)}
+                            >
+                              <Pencil size={15} />
+                            </button>
+                            <button
+                              className="inventory-action-button danger"
+                              aria-label={`Delete server ${server.id}`}
+                              title={`Delete server ${server.id}`}
+                              onClick={() => setConfirmDeleteId(server.id)}
+                            >
+                              <Trash2 size={15} />
+                            </button>
+                          </>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </>
+  );
+}
+
+function InventoryDraftFields({
+  draft,
+  disabled,
+  onChange
+}: {
+  draft: ServerInventoryDraft;
+  disabled: boolean;
+  onChange: (patch: Partial<ServerInventoryDraft>) => void;
+}) {
+  return (
+    <>
+      <label className="inventory-field">
+        <span>Host</span>
+        <input
+          required
+          value={draft.host}
+          disabled={disabled}
+          onChange={(event) => onChange({ host: event.target.value })}
+        />
+      </label>
+      <label className="inventory-field small">
+        <span>Port</span>
+        <input
+          required
+          type="number"
+          min="1"
+          max="65535"
+          value={draft.port}
+          disabled={disabled}
+          onChange={(event) => onChange({ port: event.target.value })}
+        />
+      </label>
+      <label className="inventory-field">
+        <span>Group</span>
+        <input
+          value={draft.group}
+          disabled={disabled}
+          onChange={(event) => onChange({ group: event.target.value })}
+        />
+      </label>
+      <label className="inventory-field wide">
+        <span>Note</span>
+        <input
+          value={draft.note}
+          disabled={disabled}
+          onChange={(event) => onChange({ note: event.target.value })}
+        />
+      </label>
+      <label className="inventory-switch form-switch">
+        <input
+          type="checkbox"
+          checked={draft.enabled}
+          disabled={disabled}
+          onChange={(event) => onChange({ enabled: event.target.checked })}
+        />
+        <span>{draft.enabled ? "enabled" : "disabled"}</span>
+      </label>
+    </>
+  );
+}
+
+function emptyServerDraft(): ServerInventoryDraft {
+  return {
+    host: "",
+    port: "22",
+    group: "",
+    enabled: true,
+    note: "TBD"
+  };
+}
+
+function draftFromServer(server: ServerRow): ServerInventoryDraft {
+  return {
+    host: server.host,
+    port: String(server.port),
+    group: server.group ?? "",
+    enabled: server.enabled,
+    note: server.note
+  };
+}
+
+function serverDraftToPayload(draft: ServerInventoryDraft): ServerInventoryCreateInput {
+  const host = draft.host.trim();
+  if (!host) {
+    throw new Error("Host is required");
+  }
+
+  const port = Number(draft.port);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error("Port must be an integer from 1 to 65535");
+  }
+
+  const group = draft.group.trim();
+  const note = draft.note.trim();
+  return {
+    host,
+    port,
+    group: group || null,
+    enabled: draft.enabled,
+    note: note || "TBD"
+  };
+}
+
+function serverDraftToPatch(draft: ServerInventoryDraft): ServerInventoryUpdatePatch {
+  return serverDraftToPayload(draft);
 }
 
 /** Connection status badge — shows online / offline / unknown. */
@@ -1357,7 +1987,10 @@ async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
 
 function routeFromLocation(): Route {
   const match = window.location.pathname.match(/^\/servers\/([^/]+)$/);
-  return match ? { name: "detail", id: decodeURIComponent(match[1]) } : { name: "overview" };
+  if (match) return { name: "detail", id: decodeURIComponent(match[1]) };
+  if (window.location.pathname === "/inventory") return { name: "inventory" };
+  if (window.location.pathname === "/preflop-ranges") return { name: "preflop" };
+  return { name: "overview" };
 }
 
 function formatPercent(value: number | null | undefined): string {
@@ -1409,7 +2042,7 @@ function resolveServerDatasetName(server: ServerRow): string | null {
 }
 
 function formatServerDatasetName(server: ServerRow): string {
-  return resolveServerDatasetName(server) ?? "-";
+  return resolveServerDatasetName(server) ?? server.name;
 }
 
 function formatTaskStatusLabel(status: PipelineDisplayStatus): string {

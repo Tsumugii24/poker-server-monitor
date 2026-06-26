@@ -16,3 +16,6 @@ data/*.db-*
 
 /config/servers.json
 /config/alerts.json
+
+tmp/
+temp/

@@ -25,6 +25,22 @@ export type RuntimeConfig = {
 
 type EnvSource = Record<string, string | undefined>;
 
+export type ServerInventoryCreateInput = {
+  host: string;
+  port?: number;
+  group?: string | null;
+  enabled?: boolean;
+  note?: string;
+};
+
+export type ServerInventoryUpdateInput = {
+  host?: string;
+  port?: number;
+  group?: string | null;
+  enabled?: boolean;
+  note?: string;
+};
+
 export function loadRuntimeConfig(env: EnvSource = process.env): RuntimeConfig {
   dotenv.config();
 
@@ -91,7 +107,7 @@ export function loadServerInventory(filename = "config/servers.json"): ServerCon
       id,
       name: requiredString(item.name, `servers[${index}].name`),
       host: requiredString(item.host, `servers[${index}].host`),
-      port: item.port == null ? 22 : requiredNumber(item.port, `servers[${index}].port`),
+      port: item.port == null ? 22 : requiredPort(item.port, `servers[${index}].port`),
       enabled: item.enabled == null ? true : requiredBoolean(item.enabled, `servers[${index}].enabled`),
       note: item.note == null ? "TBD" : requiredString(item.note, `servers[${index}].note`)
     };
@@ -104,35 +120,95 @@ export function loadServerInventory(filename = "config/servers.json"): ServerCon
   });
 }
 
-export function updateServerInventoryNote(
+export function createServerInventoryEntry(
+  filename: string,
+  input: ServerInventoryCreateInput
+): ServerConfig {
+  const host = requiredTrimmedString(input.host, "host");
+  const port = input.port == null ? 22 : requiredPort(input.port, "port");
+  const note = input.note == null ? "TBD" : requiredInventoryNote(input.note);
+  const group = input.group == null ? null : optionalTrimmedString(input.group, "group");
+  const enabled = input.enabled == null ? true : requiredBoolean(input.enabled, "enabled");
+
+  const { fullPath, raw } = readServerInventoryRaw(filename);
+  const entry: Record<string, unknown> = {
+    id: generateServerId(raw, host, port),
+    name: host,
+    host,
+    port,
+    enabled,
+    note
+  };
+  if (group) {
+    entry.group = group;
+  }
+
+  raw.push(entry);
+  writeServerInventoryRaw(fullPath, raw);
+
+  const created = loadServerInventory(fullPath).find((server) => server.id === entry.id);
+  if (!created) {
+    throw new Error(`Server ${entry.id} not found`);
+  }
+  return created;
+}
+
+export function updateServerInventoryEntry(
   filename: string,
   serverId: string,
-  note: string
+  patch: ServerInventoryUpdateInput
 ): ServerConfig {
-  const trimmedNote = note.trim();
-  if (trimmedNote === "") {
-    throw new Error("note must be a non-empty string");
+  const { fullPath, raw } = readServerInventoryRaw(filename);
+  const entry = findRawServerEntry(raw, serverId);
+
+  if (patch.host !== undefined) {
+    entry.host = requiredTrimmedString(patch.host, "host");
+  }
+  if (patch.port !== undefined) {
+    entry.port = requiredPort(patch.port, "port");
+  }
+  if (patch.group !== undefined) {
+    const group = patch.group == null ? null : optionalTrimmedString(patch.group, "group");
+    if (group) {
+      entry.group = group;
+    } else {
+      delete entry.group;
+    }
+  }
+  if (patch.enabled !== undefined) {
+    entry.enabled = requiredBoolean(patch.enabled, "enabled");
+  }
+  if (patch.note !== undefined) {
+    entry.note = requiredInventoryNote(patch.note);
   }
 
-  const fullPath = path.resolve(filename);
-  const raw = JSON.parse(fs.readFileSync(fullPath, "utf8")) as unknown;
-  if (!Array.isArray(raw)) {
-    throw new Error(`Server inventory must be an array: ${filename}`);
-  }
-
-  const entry = raw.find((item) => isRecord(item) && item.id === serverId);
-  if (!entry || !isRecord(entry)) {
-    throw new Error(`Server ${serverId} not found`);
-  }
-
-  entry.note = trimmedNote;
-  fs.writeFileSync(fullPath, `${JSON.stringify(raw, null, 2)}\n`);
+  writeServerInventoryRaw(fullPath, raw);
 
   const updated = loadServerInventory(fullPath).find((server) => server.id === serverId);
   if (!updated) {
     throw new Error(`Server ${serverId} not found`);
   }
   return updated;
+}
+
+export function deleteServerInventoryEntry(filename: string, serverId: string): ServerConfig[] {
+  const { fullPath, raw } = readServerInventoryRaw(filename);
+  const index = raw.findIndex((item) => isRecord(item) && item.id === serverId);
+  if (index === -1) {
+    throw new Error(`Server ${serverId} not found`);
+  }
+
+  raw.splice(index, 1);
+  writeServerInventoryRaw(fullPath, raw);
+  return loadServerInventory(fullPath);
+}
+
+export function updateServerInventoryNote(
+  filename: string,
+  serverId: string,
+  note: string
+): ServerConfig {
+  return updateServerInventoryEntry(filename, serverId, { note });
 }
 
 export function updateServerInventoryName(
@@ -145,25 +221,71 @@ export function updateServerInventoryName(
     throw new Error("name must be a non-empty string");
   }
 
-  const fullPath = path.resolve(filename);
-  const raw = JSON.parse(fs.readFileSync(fullPath, "utf8")) as unknown;
-  if (!Array.isArray(raw)) {
-    throw new Error(`Server inventory must be an array: ${filename}`);
-  }
+  const { fullPath, raw } = readServerInventoryRaw(filename);
+  const entry = findRawServerEntry(raw, serverId);
 
-  const entry = raw.find((item) => isRecord(item) && item.id === serverId);
-  if (!entry || !isRecord(entry)) {
-    throw new Error(`Server ${serverId} not found`);
+  if (entry.name === trimmedName) {
+    const current = loadServerInventory(fullPath).find((server) => server.id === serverId);
+    if (!current) {
+      throw new Error(`Server ${serverId} not found`);
+    }
+    return current;
   }
-
   entry.name = trimmedName;
-  fs.writeFileSync(fullPath, `${JSON.stringify(raw, null, 2)}\n`);
+  writeServerInventoryRaw(fullPath, raw);
 
   const updated = loadServerInventory(fullPath).find((server) => server.id === serverId);
   if (!updated) {
     throw new Error(`Server ${serverId} not found`);
   }
   return updated;
+}
+
+function readServerInventoryRaw(filename: string): { fullPath: string; raw: unknown[] } {
+  const fullPath = path.resolve(filename);
+  const raw = JSON.parse(fs.readFileSync(fullPath, "utf8")) as unknown;
+  if (!Array.isArray(raw)) {
+    throw new Error(`Server inventory must be an array: ${filename}`);
+  }
+  return { fullPath, raw };
+}
+
+function writeServerInventoryRaw(fullPath: string, raw: unknown[]): void {
+  fs.mkdirSync(path.dirname(fullPath), { recursive: true });
+  fs.writeFileSync(fullPath, `${JSON.stringify(raw, null, 2)}\n`);
+}
+
+function findRawServerEntry(raw: unknown[], serverId: string): Record<string, unknown> {
+  const entry = raw.find((item) => isRecord(item) && item.id === serverId);
+  if (!entry || !isRecord(entry)) {
+    throw new Error(`Server ${serverId} not found`);
+  }
+  return entry;
+}
+
+function generateServerId(raw: unknown[], host: string, port: number): string {
+  const existing = new Set(
+    raw.flatMap((item) => isRecord(item) && typeof item.id === "string" ? [item.id] : [])
+  );
+  const hostId = host.toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  const base = `${hostId || "server"}${port === 22 ? "" : `-${port}`}`;
+  let id = base;
+  let suffix = 2;
+  while (existing.has(id)) {
+    id = `${base}-${suffix}`;
+    suffix += 1;
+  }
+  return id;
+}
+
+function requiredInventoryNote(value: unknown): string {
+  const note = requiredTrimmedString(value, "note");
+  if (note === "") {
+    throw new Error("note must be a non-empty string");
+  }
+  return note;
 }
 
 function required(value: string | undefined, name: string): string {
@@ -311,6 +433,20 @@ function requiredString(value: unknown, name: string): string {
   return value;
 }
 
+function requiredTrimmedString(value: unknown, name: string): string {
+  if (typeof value !== "string" || value.trim() === "") {
+    throw new Error(`${name} must be a non-empty string`);
+  }
+  return value.trim();
+}
+
+function optionalTrimmedString(value: unknown, name: string): string {
+  if (typeof value !== "string") {
+    throw new Error(`${name} must be a string`);
+  }
+  return value.trim();
+}
+
 function optionalString(value: unknown, name: string): string {
   if (typeof value !== "string") {
     throw new Error(`${name} must be a string`);
@@ -323,6 +459,14 @@ function requiredNumber(value: unknown, name: string): number {
     throw new Error(`${name} must be a number`);
   }
   return value;
+}
+
+function requiredPort(value: unknown, name: string): number {
+  const port = requiredNumber(value, name);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error(`${name} must be an integer from 1 to 65535`);
+  }
+  return port;
 }
 
 function requiredPositiveNumber(value: unknown, name: string): number {

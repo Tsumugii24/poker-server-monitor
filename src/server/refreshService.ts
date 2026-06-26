@@ -13,6 +13,7 @@ import type { SshTimeoutOptions } from "./sshCollector";
 import { collectServerMetrics, type SshCredentials, Ssh2Executor } from "./sshCollector";
 import type { AlertService } from "./alertService";
 import { classifyWeChatSendError } from "./wechatNotifier";
+import { loadServerInventory, updateServerInventoryName } from "./config";
 
 export type RefreshServiceOptions = {
   db: MonitorDatabase;
@@ -24,6 +25,7 @@ export type RefreshServiceOptions = {
   collectPipeline?: (server: ServerConfig) => Promise<PipelineStatusSnapshot>;
   getSshTimeouts?: () => SshTimeoutOptions;
   alerts?: AlertService;
+  inventoryPath?: string;
 };
 
 export class RefreshService {
@@ -101,6 +103,7 @@ export class RefreshService {
           this.options.db.updateServerLastDatasetName(item.metrics.serverId, item.pipeline.datasetName);
         }
       }
+      this.syncDiscoveredServerNames(collected);
       this.options.db.pruneSnapshots(24);
 
       const snapshots = collected.map((item) => item.metrics);
@@ -165,6 +168,10 @@ export class RefreshService {
     }
   }
 
+  updateServers(servers: ServerConfig[]): void {
+    this.options.servers = servers;
+  }
+
   stopScheduler(): void {
     if (this.scheduler) {
       clearInterval(this.scheduler);
@@ -179,5 +186,32 @@ export class RefreshService {
   private scheduleNextTime(timestampMs: number): void {
     this.nextRefreshAtMs = timestampMs;
     this.nextRefreshAt = new Date(timestampMs).toISOString();
+  }
+
+  private syncDiscoveredServerNames(collected: Array<{
+    metrics: MetricSnapshot;
+    pipeline: PipelineStatusSnapshot;
+  }>): void {
+    if (!this.options.inventoryPath) return;
+
+    let changed = false;
+    for (const item of collected) {
+      const datasetName = item.pipeline.datasetName?.trim();
+      if (!datasetName) continue;
+      const current = this.options.db.getServer(item.metrics.serverId);
+      if (current?.name === datasetName) continue;
+      try {
+        updateServerInventoryName(this.options.inventoryPath, item.metrics.serverId, datasetName);
+        changed = true;
+      } catch (error) {
+        console.error("Failed to sync discovered server name", error);
+      }
+    }
+
+    if (changed) {
+      const servers = loadServerInventory(this.options.inventoryPath);
+      this.options.db.syncServers(servers);
+      this.updateServers(servers);
+    }
   }
 }

@@ -135,6 +135,92 @@ describe("monitor API", () => {
     expect(JSON.parse(fs.readFileSync(inventoryPath, "utf8"))[0].note).toBe("Primary solver");
   });
 
+  it("creates a server in the inventory file and database", async () => {
+    const response = await request(createApp({ db, refreshService: service, inventoryPath }))
+      .post("/api/servers")
+      .send({ host: "10.0.0.2", port: 2222, group: "prod", enabled: false, note: "Secondary solver" });
+
+    expect(response.status).toBe(201);
+    expect(response.body).toMatchObject({
+      id: "10-0-0-2-2222",
+      name: "10.0.0.2",
+      host: "10.0.0.2",
+      port: 2222,
+      group: "prod",
+      enabled: false,
+      note: "Secondary solver"
+    });
+    expect(db.getServer("10-0-0-2-2222")).toMatchObject({
+      name: "10.0.0.2",
+      host: "10.0.0.2"
+    });
+    expect(JSON.parse(fs.readFileSync(inventoryPath, "utf8"))[1]).toMatchObject({
+      id: "10-0-0-2-2222",
+      name: "10.0.0.2"
+    });
+  });
+
+  it("rejects manual id and name when creating a server", async () => {
+    const response = await request(createApp({ db, refreshService: service, inventoryPath }))
+      .post("/api/servers")
+      .send({ id: "manual-id", name: "Manual Name", host: "10.0.0.2", port: 22, enabled: true });
+
+    expect(response.status).toBe(400);
+    expect(response.body.error).toBe("immutable_server_field");
+    expect(JSON.parse(fs.readFileSync(inventoryPath, "utf8"))).toHaveLength(1);
+  });
+
+  it("updates editable server inventory fields", async () => {
+    const response = await request(createApp({ db, refreshService: service, inventoryPath }))
+      .patch("/api/servers/prod-01")
+      .send({ host: "10.0.0.8", port: 2222, group: "analytics", enabled: false, note: "GPU solver" });
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({
+      id: "prod-01",
+      name: "Production 01",
+      host: "10.0.0.8",
+      port: 2222,
+      group: "analytics",
+      enabled: false,
+      note: "GPU solver"
+    });
+    expect(db.getServer("prod-01")).toMatchObject({
+      name: "Production 01",
+      host: "10.0.0.8",
+      port: 2222,
+      group: "analytics",
+      enabled: false,
+      note: "GPU solver"
+    });
+    expect(JSON.parse(fs.readFileSync(inventoryPath, "utf8"))[0]).toMatchObject({
+      id: "prod-01",
+      name: "Production 01",
+      host: "10.0.0.8"
+    });
+  });
+
+  it("rejects manual id and name changes", async () => {
+    const response = await request(createApp({ db, refreshService: service, inventoryPath }))
+      .patch("/api/servers/prod-01")
+      .send({ id: "manual-id", name: "Manual Name", host: "10.0.0.8" });
+
+    expect(response.status).toBe(400);
+    expect(response.body.error).toBe("immutable_server_field");
+    expect(db.getServer("prod-01")?.name).toBe("Production 01");
+    expect(JSON.parse(fs.readFileSync(inventoryPath, "utf8"))[0].name).toBe("Production 01");
+  });
+
+  it("deletes a server from the inventory file and database", async () => {
+    const response = await request(createApp({ db, refreshService: service, inventoryPath }))
+      .delete("/api/servers/prod-01");
+
+    expect(response.status).toBe(200);
+    expect(db.getServer("prod-01")).toBeNull();
+    expect(JSON.parse(fs.readFileSync(inventoryPath, "utf8"))).toEqual([]);
+    expect(response.body.servers).toEqual([]);
+  });
+
   it("rejects empty server note updates", async () => {
     const response = await request(createApp({ db, refreshService: service, inventoryPath }))
       .patch("/api/servers/prod-01")

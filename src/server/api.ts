@@ -5,12 +5,23 @@ import type {
   OverviewResponse,
   OverviewSummary,
   ServerDetailResponse,
+  ServerConfig,
   WeChatAccountConnectorStatus,
   WeChatAccountsStatus,
   WeChatConnectorStatus,
   WeChatRecipient
 } from "../shared/types";
-import { loadAlertSettings, loadServerInventory, saveAlertSettings, updateServerInventoryNote } from "./config";
+import type { PreflopRangeDocument } from "../shared/preflopRange";
+import {
+  createServerInventoryEntry,
+  deleteServerInventoryEntry,
+  loadAlertSettings,
+  loadServerInventory,
+  saveAlertSettings,
+  updateServerInventoryEntry,
+  type ServerInventoryCreateInput,
+  type ServerInventoryUpdateInput
+} from "./config";
 import {
   enabledAlertTargets,
   findAlertTarget,
@@ -22,12 +33,27 @@ import type { MonitorDatabase } from "./db";
 import type { RefreshService } from "./refreshService";
 import { buildWeChatDelivery } from "../shared/wechatDelivery";
 import { defaultWeChatStoredSession } from "../shared/wechatSession";
+import {
+  buildPreflopRangeDownload,
+  createPreflopRangeFolder,
+  deletePreflopRangePath,
+  listPreflopRanges,
+  movePreflopRangePath,
+  readPreflopRangeFile,
+  renamePreflopRangePath,
+  reorderPreflopRanges,
+  savePreflopRangeFile,
+  saveUploadedPreflopRangeFiles,
+  updatePreflopRangeLearned,
+  type UploadedPreflopRangeFile
+} from "./preflopRangeStore";
 
 export type AppDependencies = {
   db: MonitorDatabase;
   refreshService: RefreshService;
   inventoryPath?: string;
   alertSettingsPath?: string;
+  preflopRangesPath?: string;
   defaultRefreshIntervalMs?: number;
   sendTestAlert?: (message: string, roomId: string) => Promise<void> | void;
   startAlertConnector?: () => Promise<void> | void;
@@ -58,6 +84,7 @@ export function createApp({
   refreshService,
   inventoryPath = "config/servers.json",
   alertSettingsPath = "config/alerts.json",
+  preflopRangesPath = "config/preflop-ranges",
   defaultRefreshIntervalMs = 3_600_000,
   sendTestAlert,
   startAlertConnector,
@@ -77,7 +104,7 @@ export function createApp({
   verifyWeChatAccount
 }: AppDependencies): Express {
   const app = express();
-  app.use(express.json());
+  app.use(express.json({ limit: "25mb" }));
 
   app.get("/api/overview", (_request, response) => {
     const servers = db.getServerRows();
@@ -95,6 +122,31 @@ export function createApp({
 
   app.get("/api/servers", (_request, response) => {
     response.json(db.getServers());
+  });
+
+  app.post("/api/servers", (request, response) => {
+    if (!isRecord(request.body)) {
+      response.status(400).json({ error: "invalid_server_create" });
+      return;
+    }
+    if ("id" in request.body || "name" in request.body) {
+      response.status(400).json({
+        error: "immutable_server_field",
+        message: "id and name are managed automatically"
+      });
+      return;
+    }
+
+    try {
+      const created = createServerInventoryEntry(inventoryPath, serverCreateInputFromBody(request.body));
+      syncServerInventory(db, refreshService, inventoryPath);
+      response.status(201).json(created);
+    } catch (error) {
+      response.status(400).json({
+        error: "invalid_server_create",
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
   });
 
   app.get("/api/servers/:id", (request, response) => {
@@ -115,14 +167,26 @@ export function createApp({
   });
 
   app.patch("/api/servers/:id", (request, response) => {
-    if (!isRecord(request.body) || typeof request.body.note !== "string" || request.body.note.trim() === "") {
-      response.status(400).json({ error: "invalid_server_note" });
+    if (!isRecord(request.body)) {
+      response.status(400).json({ error: "invalid_server_update" });
+      return;
+    }
+    if ("id" in request.body || "name" in request.body) {
+      response.status(400).json({
+        error: "immutable_server_field",
+        message: "id and name are managed automatically"
+      });
       return;
     }
 
     try {
-      const updated = updateServerInventoryNote(inventoryPath, request.params.id, request.body.note);
-      db.syncServers(loadServerInventory(inventoryPath));
+      const patch = serverUpdateInputFromBody(request.body);
+      if (Object.keys(patch).length === 0) {
+        response.status(400).json({ error: "invalid_server_update" });
+        return;
+      }
+      const updated = updateServerInventoryEntry(inventoryPath, request.params.id, patch);
+      syncServerInventory(db, refreshService, inventoryPath);
       response.json(updated);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -134,7 +198,176 @@ export function createApp({
         response.status(400).json({ error: "invalid_server_note" });
         return;
       }
+      if (/must be/i.test(message)) {
+        response.status(400).json({ error: "invalid_server_update", message });
+        return;
+      }
       response.status(500).json({ error: "inventory_update_failed", message });
+    }
+  });
+
+  app.delete("/api/servers/:id", (request, response) => {
+    try {
+      deleteServerInventoryEntry(inventoryPath, request.params.id);
+      const servers = syncServerInventory(db, refreshService, inventoryPath);
+      response.json({ servers });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (/not found/i.test(message)) {
+        response.status(404).json({ error: "server_not_found" });
+        return;
+      }
+      response.status(500).json({ error: "inventory_delete_failed", message });
+    }
+  });
+
+  // ── Preflop range library ─────────────────────────────────────
+
+  app.get("/api/preflop-ranges", (_request, response) => {
+    try {
+      response.json(listPreflopRanges(preflopRangesPath));
+    } catch (error) {
+      respondPreflopRangeError(response, error, "preflop_range_list_failed");
+    }
+  });
+
+  app.get("/api/preflop-ranges/file", (request, response) => {
+    try {
+      response.json(readPreflopRangeFile(preflopRangesPath, String(request.query.path ?? "")));
+    } catch (error) {
+      respondPreflopRangeError(response, error, "preflop_range_read_failed");
+    }
+  });
+
+  app.put("/api/preflop-ranges/file", (request, response) => {
+    if (!isRecord(request.body) || !isRecord(request.body.document)) {
+      response.status(400).json({ error: "invalid_preflop_range", message: "document is required" });
+      return;
+    }
+
+    try {
+      response.json(savePreflopRangeFile(
+        preflopRangesPath,
+        String(request.query.path ?? request.body.path ?? ""),
+        request.body.document as PreflopRangeDocument
+      ));
+    } catch (error) {
+      respondPreflopRangeError(response, error, "preflop_range_save_failed");
+    }
+  });
+
+  app.post("/api/preflop-ranges/upload-many", (request, response) => {
+    if (!isRecord(request.body) || !Array.isArray(request.body.files)) {
+      response.status(400).json({ error: "invalid_preflop_upload", message: "files are required" });
+      return;
+    }
+
+    try {
+      const saved = saveUploadedPreflopRangeFiles(
+        preflopRangesPath,
+        typeof request.body.folder === "string" ? request.body.folder : "",
+        request.body.files as UploadedPreflopRangeFile[]
+      );
+      response.status(201).json({ ok: true, saved, count: saved.length });
+    } catch (error) {
+      respondPreflopRangeError(response, error, "preflop_range_upload_failed");
+    }
+  });
+
+  app.post("/api/preflop-ranges/folder", (request, response) => {
+    if (!isRecord(request.body) || typeof request.body.name !== "string") {
+      response.status(400).json({ error: "invalid_preflop_folder", message: "name is required" });
+      return;
+    }
+
+    try {
+      const path = createPreflopRangeFolder(
+        preflopRangesPath,
+        typeof request.body.parent === "string" ? request.body.parent : "",
+        request.body.name
+      );
+      response.status(201).json({ ok: true, path });
+    } catch (error) {
+      respondPreflopRangeError(response, error, "preflop_range_folder_failed");
+    }
+  });
+
+  app.post("/api/preflop-ranges/rename", (request, response) => {
+    if (!isRecord(request.body) || typeof request.body.path !== "string" || typeof request.body.newName !== "string") {
+      response.status(400).json({ error: "invalid_preflop_rename", message: "path and newName are required" });
+      return;
+    }
+
+    try {
+      const path = renamePreflopRangePath(preflopRangesPath, request.body.path, request.body.newName);
+      response.json({ ok: true, path });
+    } catch (error) {
+      respondPreflopRangeError(response, error, "preflop_range_rename_failed");
+    }
+  });
+
+  app.post("/api/preflop-ranges/move", (request, response) => {
+    if (!isRecord(request.body) || typeof request.body.path !== "string" || typeof request.body.targetFolder !== "string") {
+      response.status(400).json({ error: "invalid_preflop_move", message: "path and targetFolder are required" });
+      return;
+    }
+
+    try {
+      const path = movePreflopRangePath(preflopRangesPath, request.body.path, request.body.targetFolder);
+      response.json({ ok: true, path });
+    } catch (error) {
+      respondPreflopRangeError(response, error, "preflop_range_move_failed");
+    }
+  });
+
+  app.post("/api/preflop-ranges/reorder", (request, response) => {
+    if (!isRecord(request.body)) {
+      response.status(400).json({ error: "invalid_preflop_reorder" });
+      return;
+    }
+
+    try {
+      reorderPreflopRanges(
+        preflopRangesPath,
+        typeof request.body.folder === "string" ? request.body.folder : "",
+        request.body.orderedNames
+      );
+      response.json({ ok: true });
+    } catch (error) {
+      respondPreflopRangeError(response, error, "preflop_range_reorder_failed");
+    }
+  });
+
+  app.post("/api/preflop-ranges/status", (request, response) => {
+    if (!isRecord(request.body) || typeof request.body.path !== "string" || typeof request.body.learned !== "boolean") {
+      response.status(400).json({ error: "invalid_preflop_status", message: "path and learned are required" });
+      return;
+    }
+
+    try {
+      response.json(updatePreflopRangeLearned(preflopRangesPath, request.body.path, request.body.learned));
+    } catch (error) {
+      respondPreflopRangeError(response, error, "preflop_range_status_failed");
+    }
+  });
+
+  app.get("/api/preflop-ranges/download", (request, response) => {
+    try {
+      const download = buildPreflopRangeDownload(preflopRangesPath, String(request.query.path ?? ""));
+      response.setHeader("Content-Type", download.contentType);
+      response.setHeader("Content-Disposition", `attachment; filename="${download.filename.replace(/"/g, "")}"`);
+      response.send(download.buffer);
+    } catch (error) {
+      respondPreflopRangeError(response, error, "preflop_range_download_failed");
+    }
+  });
+
+  app.delete("/api/preflop-ranges/path", (request, response) => {
+    try {
+      deletePreflopRangePath(preflopRangesPath, String(request.query.path ?? ""));
+      response.json({ ok: true });
+    } catch (error) {
+      respondPreflopRangeError(response, error, "preflop_range_delete_failed");
     }
   });
 
@@ -684,6 +917,37 @@ function buildSummary(servers: ReturnType<MonitorDatabase["getServerRows"]>): Ov
   };
 }
 
+function serverCreateInputFromBody(body: Record<string, unknown>): ServerInventoryCreateInput {
+  return {
+    host: body.host as string,
+    port: body.port as number | undefined,
+    group: body.group as string | null | undefined,
+    enabled: body.enabled as boolean | undefined,
+    note: body.note as string | undefined
+  };
+}
+
+function serverUpdateInputFromBody(body: Record<string, unknown>): ServerInventoryUpdateInput {
+  const patch: ServerInventoryUpdateInput = {};
+  if ("host" in body) patch.host = body.host as string;
+  if ("port" in body) patch.port = body.port as number;
+  if ("group" in body) patch.group = body.group as string | null;
+  if ("enabled" in body) patch.enabled = body.enabled as boolean;
+  if ("note" in body) patch.note = body.note as string;
+  return patch;
+}
+
+function syncServerInventory(
+  db: MonitorDatabase,
+  refreshService: RefreshService,
+  inventoryPath: string
+): ServerConfig[] {
+  const servers = loadServerInventory(inventoryPath);
+  db.syncServers(servers);
+  refreshService.updateServers(servers);
+  return servers;
+}
+
 function describeOverview(summary: OverviewSummary): string {
   const connectivity = `${summary.online} of ${summary.total} servers online`;
   const healthIssues: string[] = [];
@@ -838,6 +1102,20 @@ function respondWeChatAccountError(
       ? 409
       : /must be|No inbound|not verified|no cached context/i.test(message)
         ? 400
-        : 500;
+      : 500;
+  response.status(status).json({ error: code, message });
+}
+
+function respondPreflopRangeError(
+  response: express.Response,
+  error: unknown,
+  code: string
+): void {
+  const message = error instanceof Error ? error.message : String(error);
+  const status = /does not exist|not found/i.test(message)
+    ? 404
+    : /must be|required|invalid|outside|only range|cannot be moved|too many/i.test(message)
+      ? 400
+      : 500;
   response.status(status).json({ error: code, message });
 }

@@ -52,7 +52,8 @@ async function main(): Promise<void> {
     credentials: config.ssh,
     pipelineStatusFilePath: config.pipelineStatusFilePath,
     getSshTimeouts: () => resolveSshTimeouts(loadAlertSettings(config.alertSettingsPath)),
-    alerts: alertService
+    alerts: alertService,
+    inventoryPath: config.inventoryPath
   });
   refreshService.startScheduler({ runImmediately: true });
 

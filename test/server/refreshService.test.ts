@@ -1,3 +1,6 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import type { ConnectionStatus, HealthLevel, MetricSnapshot, ServerConfig } from "../../src/shared/types";
 import { MonitorDatabase } from "../../src/server/db";
@@ -93,6 +96,54 @@ describe("RefreshService", () => {
       warningCount: 1,
       failureCount: 0
     });
+  });
+
+  it("syncs discovered dataset names back to the inventory file", async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "server-monitor-refresh-"));
+    const inventoryPath = path.join(tempDir, "servers.json");
+    fs.writeFileSync(inventoryPath, JSON.stringify(servers));
+
+    try {
+      const service = new RefreshService({
+        db,
+        servers,
+        intervalMs: 3_600_000,
+        inventoryPath,
+        collect: async (server) => metric(server.id, "online"),
+        collectPipeline: async (server) => ({
+          id: `${server.id}-pipeline`,
+          serverId: server.id,
+          collectedAt: new Date().toISOString(),
+          available: true,
+          processAlive: true,
+          fileStatus: "running",
+          displayStatus: "solving",
+          phase: "solving",
+          repoId: `Tsumugii/${server.id}-dataset`,
+          datasetName: server.id === "prod-01" ? "3ia-16.5-3od-7.6" : null,
+          scenario: null,
+          currentBatch: null,
+          totalBatches: null,
+          totalTasks: null,
+          batchExpr: null,
+          pid: null,
+          startedAt: null,
+          updatedAt: null,
+          finishedAt: null,
+          command: null,
+          error: null,
+          errorCode: null,
+          errorMessage: null
+        })
+      });
+
+      await service.refreshAll("manual");
+
+      expect(db.getServer("prod-01")?.name).toBe("3ia-16.5-3od-7.6");
+      expect(JSON.parse(fs.readFileSync(inventoryPath, "utf8"))[0].name).toBe("3ia-16.5-3od-7.6");
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
   });
 
   it("stores one shared collection timestamp for all snapshots in a refresh run", async () => {

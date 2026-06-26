@@ -1,0 +1,19 @@
+{
+  "player_names": {
+    "A": "HERO",
+    "B": "VILLIAN"
+  },
+  "player_positions": {
+    "A": "IP",
+    "B": "OOP"
+  },
+  "learned": false,
+  "A": {
+    "raise": "AA,AKs,AQs,AJs,ATs,A9s,A8s,A7s,A6s,A5s,A4s,A3s,A2s,AKo,KK,KQs,KJs,KTs,K9s,K8s,K7s,K6s,K5s,K4s,K3s,K2s,AQo,KQo,QQ,QJs,QTs,Q9s,Q8s,Q7s:0.500,Q6s:0.500,Q5s:0.500,AJo,KJo,QJo,JJ,JTs,J9s,J8s,J7s:0.500,J6s:0.500,ATo,KTo,QTo,JTo,TT,T9s,T8s,T7s:0.500,A9o:0.500,99,98s,97s:0.500,A8o:0.500,88,87s,86s:0.500,77,76s,66,65s,A5o:0.500,55,54s,44,33,22",
+    "call": ""
+  },
+  "B": {
+    "raise": "",
+    "call": "ATs:0.750,A9s:0.750,A8s,A7s,A6s,A4s:0.500,A3s,A2s,KTs:0.750,K9s:0.750,K8s,K7s,K6s,K5s,K4s,K3s,K2s,AQo:0.750,KQo:0.750,QJs:0.500,QTs:0.750,Q9s:0.500,Q8s,Q7s,Q6s,Q5s:0.500,Q4s:0.500,Q3s:0.500,Q2s:0.500,AJo:0.750,KJo,QJo,J9s:0.500,J8s,J7s,J6s,ATo,KTo,QTo:0.500,JTo:0.500,TT:0.250,T8s,T7s,T6s,A9o,K9o:0.500,Q9o:0.500,J9o:0.500,T9o:0.500,99,98s:0.500,97s,96s,A8o:0.500,98o:0.250,88,87s:0.500,86s,A7o:0.500,87o:0.250,77,76s:0.500,75s,A6o:0.500,76o:0.250,66,65s:0.500,64s,A5o:0.500,65o:0.250,55,54s:0.500,53s,54o:0.250,44,43s,42s,33,32s,22"
+  }
+}

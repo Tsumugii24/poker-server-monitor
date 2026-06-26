@@ -302,15 +302,68 @@ describe("App", () => {
         if (url === "/api/settings/alerts/test" && init?.method === "POST") {
           return json({ accepted: true });
         }
+        if (url === "/api/servers" && init?.method === "POST") {
+          const body = JSON.parse(String(init.body)) as {
+            host: string;
+            port: number;
+            group?: string | null;
+            enabled: boolean;
+            note?: string;
+          };
+          const generatedId = `${body.host.replace(/[^a-zA-Z0-9]+/g, "-").replace(/^-+|-+$/g, "")}-${body.port}`.toLowerCase();
+          const created = {
+            id: generatedId,
+            name: body.host,
+            host: body.host,
+            port: body.port,
+            group: body.group || undefined,
+            enabled: body.enabled,
+            note: body.note ?? "TBD",
+            latest: null,
+            pipeline: null,
+            lastDatasetName: null
+          } as typeof currentOverview.servers[number];
+          currentOverview = {
+            ...currentOverview,
+            servers: [...currentOverview.servers, created],
+            summary: { ...currentOverview.summary, total: currentOverview.summary.total + 1 }
+          };
+          return json({
+            id: created.id,
+            name: created.name,
+            host: created.host,
+            port: created.port,
+            group: body.group || undefined,
+            enabled: created.enabled,
+            note: created.note
+          }, 201);
+        }
         if (url === "/api/servers/prod-02" && init?.method === "PATCH") {
-          const body = JSON.parse(String(init.body)) as { note: string };
+          const body = JSON.parse(String(init.body)) as Partial<typeof overview.servers[number]>;
           currentOverview = {
             ...currentOverview,
             servers: currentOverview.servers.map((server) =>
-              server.id === "prod-02" ? { ...server, note: body.note } : server
+              server.id === "prod-02" ? { ...server, ...body } : server
             )
           };
-          return json({ ...currentOverview.servers[1], note: body.note });
+          const updated = currentOverview.servers.find((server) => server.id === "prod-02")!;
+          return json({
+            id: updated.id,
+            name: updated.name,
+            host: updated.host,
+            port: updated.port,
+            group: updated.group,
+            enabled: updated.enabled,
+            note: updated.note
+          });
+        }
+        if (url === "/api/servers/prod-02" && init?.method === "DELETE") {
+          currentOverview = {
+            ...currentOverview,
+            servers: currentOverview.servers.filter((server) => server.id !== "prod-02"),
+            summary: { ...currentOverview.summary, total: currentOverview.summary.total - 1 }
+          };
+          return json({ servers: currentOverview.servers });
         }
         if (url === "/api/servers/prod-02") return json(detail);
         if (url === "/api/refresh" && init?.method === "POST") {
@@ -361,6 +414,16 @@ describe("App", () => {
     expect(portCells.length).toBeGreaterThanOrEqual(2);
   });
 
+  it("keeps management-only fields out of the overview inventory table", async () => {
+    render(<App />);
+
+    expect(await screen.findByText("Server Inventory")).toBeInTheDocument();
+    expect(screen.queryByRole("columnheader", { name: "Host" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("columnheader", { name: "Group" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("columnheader", { name: "Enabled" })).not.toBeInTheDocument();
+    expect(screen.getByText("10.0.0.2")).toBeInTheDocument();
+  });
+
   it("shows server id as the first inventory column", async () => {
     render(<App />);
 
@@ -385,9 +448,76 @@ describe("App", () => {
   it("shows dataset name in the inventory name column", async () => {
     render(<App />);
 
-    expect(await screen.findByText("sia-45-sod-40")).toBeInTheDocument();
+    expect(await screen.findByText("sia-45-sod-40")).toHaveClass("inventory-display-name");
     expect(screen.getByText("3ia-16.5-3od-13")).toBeInTheDocument();
     expect(document.querySelectorAll(".server-dataset-name.has-dataset")).toHaveLength(2);
+  });
+
+  it("paginates search results after filtering and id sorting", async () => {
+    const manyOverview = structuredClone(overview);
+    manyOverview.servers = Array.from({ length: 12 }, (_, index) => {
+      const id = `prod-${String(index + 1).padStart(2, "0")}`;
+      const base = structuredClone(overview.servers[0]);
+      return {
+        ...base,
+        id,
+        name: `Production ${String(index + 1).padStart(2, "0")}`,
+        host: `10.0.0.${index + 1}`,
+        latest: {
+          ...base.latest,
+          id: `snap-${id}`,
+          serverId: id
+        },
+        pipeline: {
+          ...base.pipeline,
+          id: `pipe-${id}`,
+          serverId: id,
+          datasetName: `dataset-${String(index + 1).padStart(2, "0")}`
+        },
+        lastDatasetName: `dataset-${String(index + 1).padStart(2, "0")}`
+      };
+    });
+    manyOverview.summary = {
+      ...manyOverview.summary,
+      total: 12,
+      online: 12
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url === "/api/overview") return json(manyOverview);
+        return json({}, 404);
+      })
+    );
+
+    render(<App />);
+
+    expect(await screen.findByText("Search Results")).toBeInTheDocument();
+    expect(screen.getByText("1-10")).toBeInTheDocument();
+    expect(inventoryIds()).toEqual([
+      "prod-01",
+      "prod-02",
+      "prod-03",
+      "prod-04",
+      "prod-05",
+      "prod-06",
+      "prod-07",
+      "prod-08",
+      "prod-09",
+      "prod-10"
+    ]);
+
+    await userEvent.selectOptions(screen.getByLabelText("IDs per page"), "5");
+    expect(screen.getByText("1-5")).toBeInTheDocument();
+    expect(inventoryIds()).toEqual(["prod-01", "prod-02", "prod-03", "prod-04", "prod-05"]);
+
+    await userEvent.click(screen.getByRole("button", { name: "Next results page" }));
+    expect(screen.getByText("6-10")).toBeInTheDocument();
+    expect(inventoryIds()).toEqual(["prod-06", "prod-07", "prod-08", "prod-09", "prod-10"]);
+
+    await userEvent.click(screen.getByRole("button", { name: "Sort by ID descending" }));
+    expect(screen.getByText("1-5")).toBeInTheDocument();
+    expect(inventoryIds()).toEqual(["prod-12", "prod-11", "prod-10", "prod-09", "prod-08"]);
   });
 
   it("edits a server note inline and persists it", async () => {
@@ -408,6 +538,102 @@ describe("App", () => {
     );
   });
 
+  it("adds a server without manual id or name fields", async () => {
+    render(<App />);
+
+    await userEvent.click(await screen.findByRole("button", { name: "Manage Inventory" }));
+    expect(await screen.findByText("Inventory Management")).toBeInTheDocument();
+    await userEvent.click(await screen.findByRole("button", { name: "Add server" }));
+    await userEvent.type(screen.getByLabelText("Host"), "10.0.0.8");
+    await userEvent.clear(screen.getByLabelText("Port"));
+    await userEvent.type(screen.getByLabelText("Port"), "2222");
+    await userEvent.type(screen.getByLabelText("Group"), "analytics");
+    await userEvent.clear(screen.getByLabelText("Note"));
+    await userEvent.type(screen.getByLabelText("Note"), "GPU solver");
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith(
+        "/api/servers",
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({
+            host: "10.0.0.8",
+            port: 2222,
+            group: "analytics",
+            enabled: true,
+            note: "GPU solver"
+          })
+        })
+      );
+    });
+    expect(fetch).not.toHaveBeenCalledWith(
+      "/api/servers",
+      expect.objectContaining({
+        body: expect.stringContaining('"name"')
+      })
+    );
+    expect(await screen.findByText("10-0-0-8-2222")).toBeInTheDocument();
+  });
+
+  it("updates editable server inventory fields without sending id or name", async () => {
+    render(<App />);
+
+    await userEvent.click(await screen.findByRole("button", { name: "Manage Inventory" }));
+    expect(await screen.findByText("Inventory Management")).toBeInTheDocument();
+    await userEvent.click(await screen.findByRole("button", { name: "Edit server prod-02" }));
+    await userEvent.clear(screen.getByLabelText("Host for prod-02"));
+    await userEvent.type(screen.getByLabelText("Host for prod-02"), "10.0.0.9");
+    await userEvent.clear(screen.getByLabelText("Port for prod-02"));
+    await userEvent.type(screen.getByLabelText("Port for prod-02"), "2222");
+    await userEvent.type(screen.getByLabelText("Group for prod-02"), "analytics");
+    await userEvent.click(screen.getByLabelText("Enabled for prod-02"));
+    await userEvent.clear(screen.getByLabelText("Inventory note for prod-02"));
+    await userEvent.type(screen.getByLabelText("Inventory note for prod-02"), "GPU solver");
+    await userEvent.click(screen.getByRole("button", { name: "Save server prod-02" }));
+
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith(
+        "/api/servers/prod-02",
+        expect.objectContaining({
+          method: "PATCH",
+          body: JSON.stringify({
+            host: "10.0.0.9",
+            port: 2222,
+            group: "analytics",
+            enabled: false,
+            note: "GPU solver"
+          })
+        })
+      );
+    });
+
+    const patchCall = vi.mocked(fetch).mock.calls.find(([url, init]) =>
+      url === "/api/servers/prod-02" && init?.method === "PATCH" && String(init.body).includes("10.0.0.9")
+    );
+    expect(patchCall).toBeDefined();
+    expect(String(patchCall?.[1]?.body)).not.toContain('"id"');
+    expect(String(patchCall?.[1]?.body)).not.toContain('"name"');
+    expect(await screen.findByText("10.0.0.9")).toBeInTheDocument();
+  });
+
+  it("deletes a server from the inventory table", async () => {
+    render(<App />);
+
+    await userEvent.click(await screen.findByRole("button", { name: "Manage Inventory" }));
+    expect(await screen.findByText("Inventory Management")).toBeInTheDocument();
+    await userEvent.click(await screen.findByRole("button", { name: "Delete server prod-02" }));
+    await userEvent.click(screen.getByRole("button", { name: "Delete" }));
+
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith(
+        "/api/servers/prod-02",
+        expect.objectContaining({ method: "DELETE" })
+      );
+    });
+    await waitFor(() => expect(inventoryIds()).toEqual(["prod-01"]));
+  });
+
   it("opens settings and saves WeChat alert settings", async () => {
     render(<App />);
 
@@ -419,7 +645,8 @@ describe("App", () => {
     const [cooldownInput] = screen.getAllByRole("spinbutton");
     await userEvent.clear(cooldownInput);
     await userEvent.type(cooldownInput, "15");
-    await userEvent.selectOptions(screen.getByRole("combobox"), "zh");
+    const [languageSelect] = screen.getAllByRole("combobox");
+    await userEvent.selectOptions(languageSelect, "zh");
     await userEvent.click(await screen.findByRole("button", { name: "保存设置" }));
 
     await waitFor(() =>
@@ -1055,7 +1282,7 @@ describe("App", () => {
 
     await userEvent.click(await screen.findByText("10.0.0.2"));
 
-    expect(await screen.findByText("Production 02 Details")).toBeInTheDocument();
+    expect(await screen.findByText("Server Details")).toBeInTheDocument();
     expect(screen.getByText("CPU 24h")).toBeInTheDocument();
   });
 });

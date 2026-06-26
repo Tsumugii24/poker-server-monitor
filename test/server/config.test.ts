@@ -3,10 +3,13 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  createServerInventoryEntry,
+  deleteServerInventoryEntry,
   loadAlertSettings,
   loadRuntimeConfig,
   loadServerInventory,
   saveAlertSettings,
+  updateServerInventoryEntry,
   updateServerInventoryNote,
   updateServerInventoryName
 } from "../../src/server/config";
@@ -104,6 +107,79 @@ describe("server inventory loading", () => {
     fs.writeFileSync(file, JSON.stringify([{ id: "prod-01", name: "Production 01", host: "10.0.0.1" }]));
 
     expect(() => updateServerInventoryName(file, "prod-01", "   ")).toThrow("name must be a non-empty string");
+  });
+
+  it("creates a server with generated id and generated initial name", () => {
+    const file = path.join(tempDir, "servers.json");
+    fs.writeFileSync(file, JSON.stringify([{ id: "10-0-0-1", name: "Production 01", host: "10.0.0.1" }]));
+
+    const created = createServerInventoryEntry(file, {
+      host: "10.0.0.1",
+      port: 2222,
+      group: "prod",
+      enabled: false,
+      note: "Secondary solver"
+    });
+
+    expect(created).toMatchObject({
+      id: "10-0-0-1-2222",
+      name: "10.0.0.1",
+      host: "10.0.0.1",
+      port: 2222,
+      group: "prod",
+      enabled: false,
+      note: "Secondary solver"
+    });
+    expect(JSON.parse(fs.readFileSync(file, "utf8"))[1]).toMatchObject({
+      id: "10-0-0-1-2222",
+      name: "10.0.0.1"
+    });
+  });
+
+  it("updates editable inventory fields without changing id or name", () => {
+    const file = path.join(tempDir, "servers.json");
+    fs.writeFileSync(
+      file,
+      JSON.stringify([{ id: "prod-01", name: "Production 01", host: "10.0.0.1", port: 22, enabled: true, group: "old" }])
+    );
+
+    const updated = updateServerInventoryEntry(file, "prod-01", {
+      host: "10.0.0.8",
+      port: 2222,
+      group: null,
+      enabled: false,
+      note: "Updated solver"
+    });
+
+    expect(updated).toEqual({
+      id: "prod-01",
+      name: "Production 01",
+      host: "10.0.0.8",
+      port: 2222,
+      enabled: false,
+      note: "Updated solver"
+    });
+    expect(JSON.parse(fs.readFileSync(file, "utf8"))).toEqual([
+      { id: "prod-01", name: "Production 01", host: "10.0.0.8", port: 2222, enabled: false, note: "Updated solver" }
+    ]);
+  });
+
+  it("deletes a server from the inventory file", () => {
+    const file = path.join(tempDir, "servers.json");
+    fs.writeFileSync(
+      file,
+      JSON.stringify([
+        { id: "prod-01", name: "Production 01", host: "10.0.0.1" },
+        { id: "prod-02", name: "Production 02", host: "10.0.0.2" }
+      ])
+    );
+
+    const remaining = deleteServerInventoryEntry(file, "prod-01");
+
+    expect(remaining.map((server) => server.id)).toEqual(["prod-02"]);
+    expect(JSON.parse(fs.readFileSync(file, "utf8"))).toEqual([
+      { id: "prod-02", name: "Production 02", host: "10.0.0.2" }
+    ]);
   });
 });
 
