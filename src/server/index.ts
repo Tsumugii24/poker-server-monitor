@@ -6,6 +6,7 @@ import { resolveSshTimeouts } from "../shared/sshSettings";
 import { loadAlertSettings, loadRuntimeConfig, loadServerInventory } from "./config";
 import { MonitorDatabase } from "./db";
 import { RefreshService } from "./refreshService";
+import { SolverJobService } from "./solverJobService";
 import { WeChatAccountManager } from "./wechatAccountManager";
 import { WeChatNotifier } from "./wechatNotifier";
 
@@ -57,11 +58,26 @@ async function main(): Promise<void> {
   });
   refreshService.startScheduler({ runImmediately: true });
 
+  const solverJobService = new SolverJobService({
+    db,
+    preflopRangesPath: config.preflopRangesPath,
+    credentials: config.ssh,
+    defaultPipelineStatusFilePath: config.pipelineStatusFilePath,
+    repoNamespace: config.solverJobRepoNamespace
+  });
+  windowlessInterval(() => {
+    void solverJobService.reconcileAndStartQueuedJobs().catch((error: unknown) => {
+      console.error("Solver job queue reconciliation failed", error);
+    });
+  }, 30_000);
+
   const app = createApp({
     db,
     refreshService,
     inventoryPath: config.inventoryPath,
     alertSettingsPath: config.alertSettingsPath,
+    preflopRangesPath: config.preflopRangesPath,
+    solverJobService,
     defaultRefreshIntervalMs: config.refreshIntervalMs,
     sendTestAlert: sendWeChatTarget,
     startAlertConnector: () => legacyNotifier.ensureStarted(),
@@ -98,3 +114,9 @@ main().catch((error) => {
   console.error(error);
   process.exit(1);
 });
+
+function windowlessInterval(callback: () => void, intervalMs: number): NodeJS.Timeout {
+  const timer = setInterval(callback, intervalMs);
+  timer.unref?.();
+  return timer;
+}

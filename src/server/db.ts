@@ -10,6 +10,7 @@ import type {
   ServerConfig,
   ServerRow
 } from "../shared/types";
+import type { SolverJob, SolverJobEvent, SolverJobSettings, SolverJobStatus } from "../shared/solverJobs";
 
 let sqlPromise: Promise<SqlJsStatic> | null = null;
 
@@ -50,8 +51,12 @@ export class MonitorDatabase {
     this.removeServersMissingFromInventory(servers.map((server) => server.id));
 
     const stmt = this.database.prepare(`
-      INSERT INTO servers (id, name, host, port, group_name, enabled, note, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM servers WHERE id = ?), ?), ?)
+      INSERT INTO servers (
+        id, name, host, port, group_name, enabled, note,
+        solver_root, tmux_session, pipeline_status_file_path,
+        created_at, updated_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM servers WHERE id = ?), ?), ?)
       ON CONFLICT(id) DO UPDATE SET
         name = excluded.name,
         host = excluded.host,
@@ -59,6 +64,9 @@ export class MonitorDatabase {
         group_name = excluded.group_name,
         enabled = excluded.enabled,
         note = excluded.note,
+        solver_root = excluded.solver_root,
+        tmux_session = excluded.tmux_session,
+        pipeline_status_file_path = excluded.pipeline_status_file_path,
         updated_at = excluded.updated_at
     `);
     const now = new Date().toISOString();
@@ -72,6 +80,9 @@ export class MonitorDatabase {
           server.group ?? null,
           server.enabled ? 1 : 0,
           server.note,
+          server.solverRoot ?? null,
+          server.tmuxSession ?? null,
+          server.pipelineStatusFilePath ?? null,
           server.id,
           now,
           now
@@ -95,34 +106,24 @@ export class MonitorDatabase {
 
   getServers(): ServerConfig[] {
     return this.query<ServerConfig>(
-      "SELECT id, name, host, port, group_name, enabled, note FROM servers ORDER BY name ASC",
+      `SELECT
+        id, name, host, port, group_name, enabled, note,
+        solver_root, tmux_session, pipeline_status_file_path
+      FROM servers ORDER BY name ASC`,
       [],
-      (row) => ({
-        id: String(row.id),
-        name: String(row.name),
-        host: String(row.host),
-        port: Number(row.port),
-        group: row.group_name == null ? undefined : String(row.group_name),
-        enabled: Number(row.enabled) === 1,
-        note: row.note == null ? "TBD" : String(row.note)
-      })
+      mapServerConfig
     );
   }
 
   getServer(id: string): ServerConfig | null {
     return (
       this.query<ServerConfig>(
-        "SELECT id, name, host, port, group_name, enabled, note FROM servers WHERE id = ?",
+        `SELECT
+          id, name, host, port, group_name, enabled, note,
+          solver_root, tmux_session, pipeline_status_file_path
+        FROM servers WHERE id = ?`,
         [id],
-        (row) => ({
-          id: String(row.id),
-          name: String(row.name),
-          host: String(row.host),
-          port: Number(row.port),
-          group: row.group_name == null ? undefined : String(row.group_name),
-          enabled: Number(row.enabled) === 1,
-          note: row.note == null ? "TBD" : String(row.note)
-        })
+        mapServerConfig
       )[0] ?? null
     );
   }
@@ -336,6 +337,156 @@ export class MonitorDatabase {
     );
   }
 
+  insertSolverJob(job: SolverJob): void {
+    this.database.run(
+      `INSERT INTO solver_jobs (
+        id, server_id, range_path, range_name, dataset_name, scenario, repo_id,
+        settings_json, command_text, solver_range_text, status, queue_mode,
+        confirm_unstudied, tmux_session, remote_range_path, created_at, updated_at,
+        started_at, finished_at, last_error
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        job.id,
+        job.serverId,
+        job.rangePath,
+        job.rangeName,
+        job.datasetName,
+        job.scenario,
+        job.repoId,
+        JSON.stringify(job.settings),
+        job.command,
+        job.solverRangeText,
+        job.status,
+        job.queueMode,
+        job.confirmUnstudied ? 1 : 0,
+        job.tmuxSession,
+        job.remoteRangePath,
+        job.createdAt,
+        job.updatedAt,
+        job.startedAt,
+        job.finishedAt,
+        job.lastError
+      ]
+    );
+    this.persist();
+  }
+
+  updateSolverJob(
+    id: string,
+    patch: Partial<Pick<SolverJob, "status" | "startedAt" | "finishedAt" | "lastError" | "updatedAt">>
+  ): SolverJob {
+    const current = this.getSolverJob(id);
+    if (!current) {
+      throw new Error(`Solver job ${id} not found`);
+    }
+
+    const updatedAt = patch.updatedAt ?? new Date().toISOString();
+    this.database.run(
+      `UPDATE solver_jobs
+       SET status = ?, started_at = ?, finished_at = ?, last_error = ?, updated_at = ?
+       WHERE id = ?`,
+      [
+        patch.status ?? current.status,
+        patch.startedAt !== undefined ? patch.startedAt : current.startedAt,
+        patch.finishedAt !== undefined ? patch.finishedAt : current.finishedAt,
+        patch.lastError !== undefined ? patch.lastError : current.lastError,
+        updatedAt,
+        id
+      ]
+    );
+    this.persist();
+    const updated = this.getSolverJob(id);
+    if (!updated) {
+      throw new Error(`Solver job ${id} not found`);
+    }
+    return updated;
+  }
+
+  getSolverJobs(): SolverJob[] {
+    return this.query<SolverJob>(
+      "SELECT * FROM solver_jobs ORDER BY created_at DESC",
+      [],
+      (row) => mapSolverJob(row, this.getLatestPipelineSnapshot(String(row.server_id)))
+    );
+  }
+
+  getSolverJob(id: string): SolverJob | null {
+    return (
+      this.query<SolverJob>(
+        "SELECT * FROM solver_jobs WHERE id = ?",
+        [id],
+        (row) => mapSolverJob(row, this.getLatestPipelineSnapshot(String(row.server_id)))
+      )[0] ?? null
+    );
+  }
+
+  deleteSolverJob(id: string): void {
+    this.database.run("DELETE FROM solver_job_events WHERE job_id = ?", [id]);
+    this.database.run("DELETE FROM solver_jobs WHERE id = ?", [id]);
+    this.persist();
+  }
+
+  getActiveSolverJobForServer(serverId: string, exceptJobId?: string): SolverJob | null {
+    return (
+      this.query<SolverJob>(
+        `SELECT * FROM solver_jobs
+         WHERE server_id = ?
+           AND status IN ('deploying', 'running', 'stopping')
+           AND (? IS NULL OR id != ?)
+         ORDER BY updated_at DESC LIMIT 1`,
+        [serverId, exceptJobId ?? null, exceptJobId ?? null],
+        (row) => mapSolverJob(row, this.getLatestPipelineSnapshot(String(row.server_id)))
+      )[0] ?? null
+    );
+  }
+
+  getQueuedSolverJobForServer(serverId: string): SolverJob | null {
+    return (
+      this.query<SolverJob>(
+        `SELECT * FROM solver_jobs
+         WHERE server_id = ? AND status = 'queued' AND queue_mode = 'queue_next'
+         ORDER BY created_at ASC LIMIT 1`,
+        [serverId],
+        (row) => mapSolverJob(row, this.getLatestPipelineSnapshot(String(row.server_id)))
+      )[0] ?? null
+    );
+  }
+
+  cancelQueuedSolverJobsForServer(serverId: string, exceptJobId?: string): void {
+    const now = new Date().toISOString();
+    this.database.run(
+      `UPDATE solver_jobs
+       SET status = 'canceled', finished_at = ?, updated_at = ?
+       WHERE server_id = ? AND status = 'queued' AND queue_mode = 'queue_next' AND (? IS NULL OR id != ?)`,
+      [now, now, serverId, exceptJobId ?? null, exceptJobId ?? null]
+    );
+    this.persist();
+  }
+
+  insertSolverJobEvent(event: SolverJobEvent): void {
+    this.database.run(
+      `INSERT INTO solver_job_events (id, job_id, event_type, message, command_preview, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [event.id, event.jobId, event.type, event.message, event.commandPreview, event.createdAt]
+    );
+    this.persist();
+  }
+
+  getSolverJobEvents(jobId?: string): SolverJobEvent[] {
+    if (jobId) {
+      return this.query<SolverJobEvent>(
+        "SELECT * FROM solver_job_events WHERE job_id = ? ORDER BY created_at ASC",
+        [jobId],
+        mapSolverJobEvent
+      );
+    }
+    return this.query<SolverJobEvent>(
+      "SELECT * FROM solver_job_events ORDER BY created_at DESC LIMIT 200",
+      [],
+      mapSolverJobEvent
+    );
+  }
+
   private initializeSchema(): void {
     this.database.run(`
       CREATE TABLE IF NOT EXISTS servers (
@@ -346,6 +497,9 @@ export class MonitorDatabase {
         group_name TEXT,
         enabled INTEGER NOT NULL,
         note TEXT NOT NULL DEFAULT 'TBD',
+        solver_root TEXT,
+        tmux_session TEXT,
+        pipeline_status_file_path TEXT,
         last_dataset_name TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
@@ -416,10 +570,67 @@ export class MonitorDatabase {
         warning_count INTEGER NOT NULL,
         failure_count INTEGER NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS solver_jobs (
+        id TEXT PRIMARY KEY,
+        server_id TEXT NOT NULL,
+        range_path TEXT NOT NULL,
+        range_name TEXT NOT NULL,
+        dataset_name TEXT NOT NULL,
+        scenario TEXT NOT NULL,
+        repo_id TEXT NOT NULL,
+        settings_json TEXT NOT NULL,
+        command_text TEXT NOT NULL,
+        solver_range_text TEXT NOT NULL,
+        status TEXT NOT NULL,
+        queue_mode TEXT NOT NULL,
+        confirm_unstudied INTEGER NOT NULL,
+        tmux_session TEXT NOT NULL,
+        remote_range_path TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        started_at TEXT,
+        finished_at TEXT,
+        last_error TEXT
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_solver_jobs_server_status_time
+        ON solver_jobs(server_id, status, created_at);
+
+      CREATE TABLE IF NOT EXISTS solver_job_events (
+        id TEXT PRIMARY KEY,
+        job_id TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        message TEXT NOT NULL,
+        command_preview TEXT,
+        created_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_solver_job_events_job_time
+        ON solver_job_events(job_id, created_at);
     `);
     this.ensureServerNoteColumn();
     this.ensureLastDatasetNameColumn();
+    this.ensureServerSolverColumns();
     this.persist();
+  }
+
+  private ensureServerSolverColumns(): void {
+    const columns = this.query<{ name: string }>(
+      "PRAGMA table_info(servers)",
+      [],
+      (row) => ({ name: String(row.name) })
+    );
+    const names = new Set(columns.map((column) => column.name));
+    if (!names.has("solver_root")) {
+      this.database.run("ALTER TABLE servers ADD COLUMN solver_root TEXT");
+    }
+    if (!names.has("tmux_session")) {
+      this.database.run("ALTER TABLE servers ADD COLUMN tmux_session TEXT");
+    }
+    if (!names.has("pipeline_status_file_path")) {
+      this.database.run("ALTER TABLE servers ADD COLUMN pipeline_status_file_path TEXT");
+    }
   }
 
   private ensureLastDatasetNameColumn(): void {
@@ -467,6 +678,72 @@ export class MonitorDatabase {
     fs.mkdirSync(path.dirname(this.filename), { recursive: true });
     fs.writeFileSync(this.filename, Buffer.from(this.database.export()));
   }
+}
+
+function mapServerConfig(row: Record<string, SqlValue>): ServerConfig {
+  const server: ServerConfig = {
+    id: String(row.id),
+    name: String(row.name),
+    host: String(row.host),
+    port: Number(row.port),
+    group: row.group_name == null ? undefined : String(row.group_name),
+    enabled: Number(row.enabled) === 1,
+    note: row.note == null ? "TBD" : String(row.note)
+  };
+  if (row.solver_root != null) {
+    server.solverRoot = String(row.solver_root);
+  }
+  if (row.tmux_session != null) {
+    server.tmuxSession = String(row.tmux_session);
+  }
+  if (row.pipeline_status_file_path != null) {
+    server.pipelineStatusFilePath = String(row.pipeline_status_file_path);
+  }
+  return server;
+}
+
+function mapSolverJob(row: Record<string, SqlValue>, pipeline: PipelineStatusSnapshot | null): SolverJob {
+  return {
+    id: String(row.id),
+    serverId: String(row.server_id),
+    rangePath: String(row.range_path),
+    rangeName: String(row.range_name),
+    datasetName: String(row.dataset_name),
+    scenario: String(row.scenario) as SolverJob["scenario"],
+    repoId: String(row.repo_id),
+    settings: parseSolverJobSettings(row.settings_json),
+    command: String(row.command_text),
+    solverRangeText: String(row.solver_range_text),
+    status: String(row.status) as SolverJobStatus,
+    queueMode: String(row.queue_mode) as SolverJob["queueMode"],
+    confirmUnstudied: Number(row.confirm_unstudied) === 1,
+    tmuxSession: String(row.tmux_session),
+    remoteRangePath: String(row.remote_range_path),
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+    startedAt: row.started_at == null ? null : String(row.started_at),
+    finishedAt: row.finished_at == null ? null : String(row.finished_at),
+    lastError: row.last_error == null ? null : String(row.last_error),
+    pipeline
+  };
+}
+
+function mapSolverJobEvent(row: Record<string, SqlValue>): SolverJobEvent {
+  return {
+    id: String(row.id),
+    jobId: String(row.job_id),
+    type: String(row.event_type),
+    message: String(row.message),
+    commandPreview: row.command_preview == null ? null : String(row.command_preview),
+    createdAt: String(row.created_at)
+  };
+}
+
+function parseSolverJobSettings(value: SqlValue): SolverJobSettings {
+  if (typeof value !== "string") {
+    throw new Error("solver job settings must be JSON");
+  }
+  return JSON.parse(value) as SolverJobSettings;
 }
 
 function mapSnapshot(row: Record<string, SqlValue>): MetricSnapshot {

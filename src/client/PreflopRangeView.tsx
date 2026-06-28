@@ -1,38 +1,56 @@
 import {
   ArrowLeft,
+  ChevronDown,
+  ChevronRight,
   Check,
+  ClipboardList,
+  Copy,
   Download,
   FileJson,
   Folder,
   FolderPlus,
+  Pencil,
+  Play,
   RefreshCw,
-  Save,
+  RotateCcw,
   Search,
+  Send,
+  Square,
   Trash2,
   Upload,
   X
 } from "lucide-react";
-import { type ChangeEvent, type DragEvent, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type DragEvent, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   PREFLOP_HAND_GRID,
   PREFLOP_RANKS,
   PREFLOP_PLAYERS,
-  setPreflopHandFrequency,
-  setPreflopLearned,
-  setPreflopPlayerName,
-  setPreflopPlayerPosition,
+  PREFLOP_RANGE_STATUSES,
   summarizePreflopRange,
   type PreflopHandCode,
   type PreflopPlayerKey,
-  type PreflopPlayerPosition,
   type PreflopRangeDocument,
   type PreflopRangeFileItem,
   type PreflopRangeFileResponse,
   type PreflopRangeFolderItem,
+  type PreflopRangeStatus,
   type PreflopRangeSummary,
   type PreflopRangeTreeItem,
   type PreflopRangeTreeResponse
 } from "../shared/preflopRange";
+import {
+  DEFAULT_SOLVER_JOB_SETTINGS,
+  SOLVER_EXPORT_FORMATS,
+  SOLVER_UPLOAD_FORMATS,
+  type SolverExportFormat,
+  type SolverJob,
+  type SolverJobEvent,
+  type SolverJobPreview,
+  type SolverJobSettings,
+  type SolverJobsResponse,
+  type SolverUploadFormat
+} from "../shared/solverJobs";
+import type { OverviewResponse, ServerRow } from "../shared/types";
 
 type SelectedRangePath =
   | { type: "folder"; path: string; name: string }
@@ -50,8 +68,23 @@ type DropTarget = {
   mode: "inside" | "before" | "after";
 };
 
+type PendingStatusChange = {
+  path: string;
+  name: string;
+  from: PreflopRangeStatus;
+  to: PreflopRangeStatus;
+};
+
 const EXPANDED_FOLDERS_KEY = "preflop-range-expanded-folders";
 const DEFAULT_SELECTED_HAND = "AA";
+const RANGE_STATUS_LABELS: Record<PreflopRangeStatus, string> = {
+  under_review: "Under review",
+  has_problem: "Has problem",
+  approved: "Approved",
+  queue: "Queue",
+  running: "Running",
+  solved: "Solved"
+};
 
 export function PreflopRangeView({ onBack }: { onBack: () => void }) {
   const [tree, setTree] = useState<PreflopRangeTreeItem[]>([]);
@@ -59,18 +92,35 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
   const [selectedPath, setSelectedPath] = useState<SelectedRangePath | null>(null);
   const [selectedFile, setSelectedFile] = useState<PreflopRangeFileResponse | null>(null);
   const [draft, setDraft] = useState<PreflopRangeDocument | null>(null);
-  const [dirty, setDirty] = useState(false);
   const [query, setQuery] = useState("");
   const [selectedHand, setSelectedHand] = useState<PreflopHandCode>(DEFAULT_SELECTED_HAND);
   const [activePlayer, setActivePlayer] = useState<PreflopPlayerKey>("A");
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(() => readExpandedFolders());
   const [newFolderName, setNewFolderName] = useState("");
   const [showNewFolder, setShowNewFolder] = useState(false);
+  const [renamingPath, setRenamingPath] = useState<string | null>(null);
+  const [renamingName, setRenamingName] = useState("");
+  const [rangeManageMode, setRangeManageMode] = useState(false);
+  const [visibleStatuses, setVisibleStatuses] = useState<Set<PreflopRangeStatus>>(
+    () => new Set(PREFLOP_RANGE_STATUSES)
+  );
+  const [deleteTarget, setDeleteTarget] = useState<SelectedRangePath | null>(null);
+  const [pendingStatusChange, setPendingStatusChange] = useState<PendingStatusChange | null>(null);
+  const [rangeTextCopied, setRangeTextCopied] = useState(false);
   const [dragItem, setDragItem] = useState<DragItem | null>(null);
   const [dropTarget, setDropTarget] = useState<DropTarget | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [servers, setServers] = useState<ServerRow[]>([]);
+  const [jobs, setJobs] = useState<SolverJob[]>([]);
+  const [jobEvents, setJobEvents] = useState<SolverJobEvent[]>([]);
+  const [selectedServerId, setSelectedServerId] = useState("");
+  const [jobSettings, setJobSettings] = useState<SolverJobSettings>(DEFAULT_SOLVER_JOB_SETTINGS);
+  const [jobPreview, setJobPreview] = useState<SolverJobPreview | null>(null);
+  const [confirmUnstudied, setConfirmUnstudied] = useState(false);
+  const [jobBusy, setJobBusy] = useState<string | null>(null);
+  const [jobError, setJobError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const folderInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -93,6 +143,30 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
     void loadTree();
   }, [loadTree]);
 
+  const loadJobContext = useCallback(async () => {
+    setJobError(null);
+    try {
+      const [overviewResponse, jobsResponse] = await Promise.all([
+        fetchPreflopJson<OverviewResponse>("/api/overview"),
+        fetchPreflopJson<SolverJobsResponse>("/api/jobs")
+      ]);
+      setServers(overviewResponse.servers);
+      setJobs(jobsResponse.jobs);
+      setJobEvents(jobsResponse.events);
+      setSelectedServerId((current) =>
+        current && overviewResponse.servers.some((server) => server.id === current)
+          ? current
+          : defaultSolverServerId(overviewResponse.servers)
+      );
+    } catch (caught) {
+      setJobError(caught instanceof Error ? caught.message : String(caught));
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadJobContext();
+  }, [loadJobContext]);
+
   useEffect(() => {
     try {
       localStorage.setItem(EXPANDED_FOLDERS_KEY, JSON.stringify([...expandedFolders]));
@@ -101,18 +175,47 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
     }
   }, [expandedFolders]);
 
+  useEffect(() => {
+    setJobPreview(null);
+    setConfirmUnstudied(false);
+  }, [selectedPath?.path]);
+
   const folder = findFolder(tree, currentFolderPath);
+  const currentFolderItems = folder ? folder.children : tree;
   const currentItems = useMemo(
-    () => filterTreeItems(folder ? folder.children : tree, query),
-    [folder, query, tree]
+    () => filterTreeItems(currentFolderItems, query, visibleStatuses),
+    [currentFolderItems, query, visibleStatuses]
   );
   const summary = useMemo<PreflopRangeSummary | null>(
     () => draft ? summarizePreflopRange(draft, selectedPath?.name ?? "") : selectedFile?.summary ?? null,
     [draft, selectedFile, selectedPath?.name]
   );
-  const selectedCell = summary?.players[activePlayer].matrix[selectedHand] ?? { raise: 0, call: 0 };
   const selectedFolderForWrites = selectedPath?.type === "folder" ? selectedPath.path : currentFolderPath;
-  const folderCount = useMemo(() => countFolders(tree), [tree]);
+  const statusCounts = useMemo(() => countRangeStatuses(tree), [tree]);
+  const allStatusesVisible = visibleStatuses.size === PREFLOP_RANGE_STATUSES.length;
+  const selectedRangePathForJob = selectedPath?.type === "file" ? selectedPath.path : "";
+  const selectedRangeNameForJob = selectedPath?.type === "file" ? displayRangeName(selectedPath.name) : "";
+  const solverRangeText = useMemo(() => summary ? formatSolverRangeText(summary) : "", [summary]);
+
+  const clearSelectedRange = () => {
+    setSelectedPath(null);
+    setSelectedFile(null);
+    setDraft(null);
+    setSelectedHand(DEFAULT_SELECTED_HAND);
+    setActivePlayer("A");
+    setRenamingPath(null);
+    setRenamingName("");
+  };
+
+  const toggleRangeManageMode = () => {
+    if (rangeManageMode) {
+      cancelRenaming();
+      setRangeManageMode(false);
+      return;
+    }
+    clearSelectedRange();
+    setRangeManageMode(true);
+  };
 
   const selectFolder = (path: string) => {
     setCurrentFolderPath(path);
@@ -120,10 +223,13 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
     setSelectedPath({ type: "folder", path, name: folderName(path) });
     setSelectedFile(null);
     setDraft(null);
-    setDirty(false);
   };
 
   const selectFile = async (item: PreflopRangeFileItem) => {
+    if (selectedPath?.type === "file" && selectedPath.path === item.path) {
+      clearSelectedRange();
+      return;
+    }
     setError(null);
     try {
       const response = await fetchPreflopJson<PreflopRangeFileResponse>(
@@ -132,62 +238,64 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
       setSelectedPath({ type: "file", path: item.path, name: item.name });
       setSelectedFile(response);
       setDraft(response.summary.data);
-      setDirty(false);
       setSelectedHand(DEFAULT_SELECTED_HAND);
+      setActivePlayer(preferredActivePlayer(response.summary));
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     }
   };
 
-  const updateDraft = (next: PreflopRangeDocument) => {
-    setDraft(next);
-    setDirty(true);
+  const activateRangeItem = (item: PreflopRangeTreeItem) => {
+    if (item.type === "folder") {
+      selectFolder(item.path);
+      return;
+    }
+    if (!rangeManageMode) {
+      void selectFile(item);
+    }
   };
 
-  const saveDraft = async () => {
-    if (!selectedPath || selectedPath.type !== "file" || !draft) return;
-    setSaving(true);
+  const requestRangeStatusChange = (status: PreflopRangeStatus, item?: PreflopRangeFileItem) => {
+    const targetPath = item?.path ?? (selectedPath?.type === "file" ? selectedPath.path : "");
+    const originalStatus = item?.status ?? draft?.status;
+    const targetName = item?.name ?? selectedPath?.name ?? targetPath;
+    if (!targetPath || !originalStatus || originalStatus === status) return;
+    setPendingStatusChange({
+      path: targetPath,
+      name: targetName,
+      from: originalStatus,
+      to: status
+    });
+  };
+
+  const updateRangeStatus = async (status: PreflopRangeStatus, targetPath: string) => {
+    if (!targetPath) return false;
     setError(null);
+    setSaving(true);
     try {
-      const response = await fetchPreflopJson<PreflopRangeFileResponse>(
-        `/api/preflop-ranges/file?path=${encodeURIComponent(selectedPath.path)}`,
-        {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ document: draft })
-        }
-      );
-      setSelectedFile(response);
-      setDraft(response.summary.data);
-      setDirty(false);
+      const response = await fetchPreflopJson<PreflopRangeFileResponse>("/api/preflop-ranges/status", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: targetPath, status })
+      });
+      if (selectedPath?.type === "file" && selectedPath.path === targetPath) {
+        setSelectedFile(response);
+        setDraft(response.summary.data);
+      }
       await loadTree();
+      return true;
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
+      return false;
     } finally {
       setSaving(false);
     }
   };
 
-  const toggleLearned = async (item?: PreflopRangeFileItem) => {
-    const targetPath = item?.path ?? (selectedPath?.type === "file" ? selectedPath.path : "");
-    const currentLearned = item?.learned ?? draft?.learned ?? false;
-    if (!targetPath) return;
-    setError(null);
-    try {
-      const response = await fetchPreflopJson<PreflopRangeFileResponse>("/api/preflop-ranges/status", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path: targetPath, learned: !currentLearned })
-      });
-      if (selectedPath?.type === "file" && selectedPath.path === targetPath) {
-        setSelectedFile(response);
-        setDraft(response.summary.data);
-        setDirty(false);
-      }
-      await loadTree();
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : String(caught));
-    }
+  const confirmRangeStatusChange = async () => {
+    if (!pendingStatusChange) return;
+    const updated = await updateRangeStatus(pendingStatusChange.to, pendingStatusChange.path);
+    if (updated) setPendingStatusChange(null);
   };
 
   const createFolder = async () => {
@@ -210,52 +318,114 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
     }
   };
 
-  const renameSelected = async () => {
-    if (!selectedPath || selectedPath.path === "") return;
-    const nextName = window.prompt("New name", selectedPath.name);
-    if (!nextName) return;
+  const startRenaming = (item: SelectedRangePath | PreflopRangeFileItem | PreflopRangeFolderItem) => {
+    if (!item.path) return;
+    setRenamingPath(item.path);
+    setRenamingName(item.type === "file" ? displayRangeName(item.name) : item.name);
+  };
+
+  const cancelRenaming = () => {
+    setRenamingPath(null);
+    setRenamingName("");
+  };
+
+  useEffect(() => {
+    if (!rangeManageMode) cancelRenaming();
+  }, [rangeManageMode]);
+
+  const showAllStatuses = () => {
+    setVisibleStatuses(new Set(PREFLOP_RANGE_STATUSES));
+  };
+
+  const toggleStatusFilter = (status: PreflopRangeStatus) => {
+    setVisibleStatuses((current) => {
+      const next = new Set(current);
+      if (next.has(status)) next.delete(status);
+      else next.add(status);
+      return next;
+    });
+  };
+
+  const submitRename = async (pathToRename = renamingPath, nextName = renamingName) => {
+    if (!pathToRename) return;
+    if (!nextName.trim()) {
+      cancelRenaming();
+      return;
+    }
+    const normalizedName = normalizeRenameName(pathToRename, nextName);
+    if (!normalizedName) {
+      cancelRenaming();
+      return;
+    }
+    if (normalizedName === pathBasename(pathToRename)) {
+      cancelRenaming();
+      return;
+    }
     setError(null);
+    setSaving(true);
     try {
       const response = await fetchPreflopJson<{ path: string }>("/api/preflop-ranges/rename", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path: selectedPath.path, newName: nextName })
+        body: JSON.stringify({ path: pathToRename, newName: normalizedName })
       });
-      if (selectedPath.type === "folder") {
+      if (selectedPath?.path === pathToRename && selectedPath.type === "folder") {
         setCurrentFolderPath(response.path);
       }
-      const renamedName = selectedPath.type === "file"
-        ? (nextName.replace(/\.range$/i, ".json").endsWith(".json") ? nextName.replace(/\.range$/i, ".json") : `${nextName}.json`)
-        : nextName;
-      setSelectedPath({ ...selectedPath, path: response.path, name: renamedName });
+      if (selectedPath?.path === pathToRename) {
+        setSelectedPath({ ...selectedPath, path: response.path, name: normalizedName });
+      }
+      cancelRenaming();
       await loadTree();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setSaving(false);
     }
   };
 
-  const deleteSelected = async () => {
+  const requestDeleteSelected = () => {
     if (!selectedPath || selectedPath.path === "") return;
-    if (!window.confirm(`Delete ${selectedPath.name}?`)) return;
+    setDeleteTarget(selectedPath);
+  };
+
+  const confirmDeleteSelected = async () => {
+    if (!deleteTarget || deleteTarget.path === "") return;
     setError(null);
+    setSaving(true);
     try {
-      await fetchPreflopJson<{ ok: boolean }>(`/api/preflop-ranges/path?path=${encodeURIComponent(selectedPath.path)}`, {
+      await fetchPreflopJson<{ ok: boolean }>(`/api/preflop-ranges/path?path=${encodeURIComponent(deleteTarget.path)}`, {
         method: "DELETE"
       });
-      setSelectedPath(null);
-      setSelectedFile(null);
-      setDraft(null);
-      setDirty(false);
+      if (selectedPath?.path === deleteTarget.path) {
+        setSelectedPath(null);
+        setSelectedFile(null);
+        setDraft(null);
+      }
+      setDeleteTarget(null);
       await loadTree();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const copySolverRangeText = async () => {
+    if (!solverRangeText) return;
+    try {
+      await navigator.clipboard.writeText(solverRangeText);
+      setRangeTextCopied(true);
+      window.setTimeout(() => setRangeTextCopied(false), 1400);
+    } catch {
+      setError("Unable to copy range text.");
     }
   };
 
   const uploadFiles = async (input: HTMLInputElement, preserveRelativePath: boolean) => {
     const files = [...(input.files ?? [])].filter((file) => /\.(json|range)$/i.test(file.name));
     if (files.length === 0) {
-      setError("Choose .json or .range files first.");
+      setError("Choose range files first.");
       return;
     }
     setSaving(true);
@@ -309,8 +479,9 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
     if (dragItem.parent !== targetParent) {
       await moveItem(dragItem.path, targetParent);
     }
-    const names = currentItems.map((item) => item.name).filter((name) => name !== dragItem.name);
+    const names = currentFolderItems.map((item) => item.name).filter((name) => name !== dragItem.name);
     const targetIndex = names.indexOf(target.name);
+    if (targetIndex === -1) return;
     names.splice(mode === "before" ? targetIndex : targetIndex + 1, 0, dragItem.name);
     await fetchPreflopJson<{ ok: boolean }>("/api/preflop-ranges/reorder", {
       method: "POST",
@@ -351,6 +522,78 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
     }
   };
 
+  const previewJob = async () => {
+    if (!selectedRangePathForJob || !selectedServerId) return;
+    setJobBusy("preview");
+    setJobError(null);
+    try {
+      const preview = await fetchPreflopJson<SolverJobPreview>("/api/jobs/preview", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          serverId: selectedServerId,
+          rangePath: selectedRangePathForJob,
+          settings: jobSettings,
+          confirmUnstudied
+        })
+      });
+      setJobPreview(preview);
+    } catch (caught) {
+      setJobError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setJobBusy(null);
+    }
+  };
+
+  const createSolverJob = async (queueMode: "manual" | "queue_next", autoStart: boolean) => {
+    if (!selectedRangePathForJob || !selectedServerId) return;
+    setJobBusy(autoStart ? "start-now" : "queue-next");
+    setJobError(null);
+    try {
+      const created = await fetchPreflopJson<{ job: SolverJob; events: SolverJobEvent[] }>("/api/jobs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          serverId: selectedServerId,
+          rangePath: selectedRangePathForJob,
+          settings: jobSettings,
+          confirmUnstudied,
+          queueMode
+        })
+      });
+      if (autoStart) {
+        await fetchPreflopJson<{ job: SolverJob; events: SolverJobEvent[] }>(
+          `/api/jobs/${encodeURIComponent(created.job.id)}/start`,
+          { method: "POST" }
+        );
+      }
+      setJobPreview(null);
+      await loadJobContext();
+    } catch (caught) {
+      setJobError(caught instanceof Error ? caught.message : String(caught));
+      await loadJobContext();
+    } finally {
+      setJobBusy(null);
+    }
+  };
+
+  const runJobAction = async (job: SolverJob, action: SolverJobAction) => {
+    setJobBusy(`${action}:${job.id}`);
+    setJobError(null);
+    try {
+      await fetchPreflopJson<{ job: SolverJob; events: SolverJobEvent[] }>(
+        `/api/jobs/${encodeURIComponent(job.id)}/${action}`,
+        { method: "POST" }
+      );
+      await loadJobContext();
+    } catch (caught) {
+      setJobError(caught instanceof Error ? caught.message : String(caught));
+      await loadJobContext();
+    } finally {
+      setJobBusy(null);
+    }
+  };
+
   return (
     <>
       <button className="icon-button ghost" onClick={onBack}>
@@ -360,41 +603,75 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
 
       <section className="section-heading preflop-heading">
         <div>
-          <h2>Preflop Range Library</h2>
-          <p>{countFiles(tree)} JSON ranges · {folderCount} folders</p>
+          <h2>Range Library</h2>
         </div>
         <div className="preflop-heading-actions">
           <button className="icon-button" onClick={() => void loadTree()} disabled={loading || saving}>
             <RefreshCw size={16} />
             Refresh
           </button>
-          <button className="icon-button primary" onClick={() => void saveDraft()} disabled={!dirty || saving || !draft}>
-            <Save size={16} />
-            {saving ? "Saving..." : "Save Range"}
-          </button>
         </div>
       </section>
 
       {error ? <div className="notice error">{error}</div> : null}
 
-      <section className="preflop-layout">
-        <aside className="panel preflop-library">
+      <section className="preflop-flow">
+        <section className="panel preflop-library">
           <div className="preflop-library-header">
             <div className="panel-title">
               <FileJson size={16} />
               <h3>Range Files</h3>
             </div>
-            <span className="preflop-library-count">{currentItems.length}</span>
+            <div className="preflop-library-tools">
+              <span className="preflop-library-count">{currentItems.length}</span>
+              <button
+                className={`icon-button compact ${rangeManageMode ? "primary" : ""}`}
+                onClick={toggleRangeManageMode}
+              >
+                <Pencil size={15} />
+                {rangeManageMode ? "Done" : "Manage"}
+              </button>
+            </div>
           </div>
 
           <label className="preflop-search">
             <Search size={15} />
             <input
               value={query}
-              placeholder="Search folders, players, spots"
+              placeholder="Search for folder or file"
               onChange={(event) => setQuery(event.target.value)}
             />
           </label>
+
+          <div className="preflop-status-filters" aria-label="Range status filters">
+            <button
+              className={`preflop-status-filter-chip all ${allStatusesVisible ? "active" : "inactive"}`}
+              aria-pressed={allStatusesVisible}
+              onClick={showAllStatuses}
+            >
+              All
+              <span>{countFiles(tree)}</span>
+            </button>
+            {PREFLOP_RANGE_STATUSES.map((status) => {
+              const visible = visibleStatuses.has(status);
+              return (
+                <button
+                  key={status}
+                  className={[
+                    "preflop-status-filter-chip",
+                    `status-${status}`,
+                    visible ? "active" : "inactive"
+                  ].join(" ")}
+                  aria-pressed={visible}
+                  onClick={() => toggleStatusFilter(status)}
+                >
+                  <span className={`preflop-status-initial status-${status}`}>{rangeStatusInitial(status)}</span>
+                  {RANGE_STATUS_LABELS[status]}
+                  <span>{statusCounts[status]}</span>
+                </button>
+              );
+            })}
+          </div>
 
           <div className="preflop-command-grid">
             <button className="icon-button compact" onClick={() => fileInputRef.current?.click()} disabled={saving}>
@@ -505,17 +782,27 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
                   <div className="preflop-empty">{query ? "No matches in this folder." : "No files in this folder."}</div>
                 ) : null}
                 {currentItems.map((item) => (
-                  <button
+                  <div
                     key={item.path}
                     className={[
                       "preflop-file-row",
                       item.type === "folder" ? "folder" : "file",
                       selectedPath?.path === item.path ? "active" : "",
-                      item.type === "file" && item.learned ? "learned" : "",
+                      item.type === "file" ? `status-${item.status}` : "",
                       dropTarget?.path === item.path ? `drop-${dropTarget.mode}` : ""
                     ].filter(Boolean).join(" ")}
+                    role="button"
+                    tabIndex={0}
                     draggable
-                    onClick={() => item.type === "folder" ? selectFolder(item.path) : void selectFile(item)}
+                    onClick={() => activateRangeItem(item)}
+                    onKeyDown={(event) => {
+                      if (event.key !== "Enter") return;
+                      if (item.type === "file" && rangeManageMode) {
+                        startRenaming(item);
+                        return;
+                      }
+                      activateRangeItem(item);
+                    }}
                     onDragStart={(event) => {
                       event.dataTransfer.effectAllowed = "move";
                       setDragItem({ type: item.type, path: item.path, name: item.name, parent: currentFolderPath });
@@ -540,107 +827,156 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
                       {item.type === "folder" ? <Folder size={15} /> : <FileJson size={15} />}
                     </span>
                     <span className="preflop-row-main">
-                      <strong>{item.name}</strong>
-                      <span>{item.type === "file" ? item.label : `${item.children.length} items`}</span>
+                      {item.type === "file" && renamingPath === item.path ? (
+                        <span className="preflop-rename-inline" onClick={(event) => event.stopPropagation()}>
+                          <input
+                            value={renamingName}
+                            autoFocus
+                            disabled={saving}
+                            onChange={(event) => setRenamingName(event.target.value)}
+                            onBlur={() => void submitRename(item.path, renamingName)}
+                            onKeyDown={(event) => {
+                              if (event.key === "Enter") {
+                                event.currentTarget.blur();
+                              }
+                              if (event.key === "Escape") {
+                                event.stopPropagation();
+                                cancelRenaming();
+                              }
+                            }}
+                          />
+                        </span>
+                      ) : (
+                        item.type === "file" ? (
+                          rangeManageMode ? (
+                            <button
+                              className="preflop-file-name-button"
+                              aria-label={`Rename ${displayRangeName(item.name)}`}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                startRenaming(item);
+                              }}
+                            >
+                              {displayRangeName(item.name)}
+                            </button>
+                          ) : (
+                            <strong>{displayRangeName(item.name)}</strong>
+                          )
+                        ) : (
+                          <>
+                            <strong>{item.name}</strong>
+                            <span>{countFolderFiles(item)} items</span>
+                          </>
+                        )
+                      )}
                     </span>
-                    {item.type === "file" ? (
-                      <span className="preflop-row-meta">
-                        <span>A {item.rangePct.A.toFixed(1)}%</span>
-                        <span>B {item.rangePct.B.toFixed(1)}%</span>
-                      </span>
-                    ) : null}
-                    {item.type === "file" ? (
+                    {item.type === "folder" ? null : (
                       <span
-                        className={`preflop-learned-toggle ${item.learned ? "checked" : ""}`}
-                        role="checkbox"
-                        aria-checked={item.learned}
-                        tabIndex={-1}
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          void toggleLearned(item);
-                        }}
+                        className={`preflop-status-badge status-${item.status}`}
+                        title={RANGE_STATUS_LABELS[item.status]}
+                        aria-label={RANGE_STATUS_LABELS[item.status]}
                       >
-                        {item.learned ? <Check size={13} /> : null}
+                        {rangeStatusInitial(item.status)}
                       </span>
-                    ) : null}
-                  </button>
+                    )}
+                  </div>
                 ))}
               </div>
             </section>
           </div>
-        </aside>
+        </section>
 
         <section className="preflop-workspace">
-          <div className="panel preflop-workspace-toolbar">
-            <div>
-              <div className="panel-title">
-                <FileJson size={16} />
-                <h3>{selectedPath?.type === "file" ? selectedPath.name : "No range selected"}</h3>
-              </div>
-              <p>{selectedFile ? formatFileMeta(selectedFile) : "Select a range JSON file to inspect and edit."}</p>
-            </div>
-            <div className="preflop-workspace-actions">
-              <button className="icon-button compact" onClick={() => void renameSelected()} disabled={!selectedPath || selectedPath.path === "" || saving}>
-                Rename
-              </button>
-              <button className="icon-button compact danger" onClick={() => void deleteSelected()} disabled={!selectedPath || selectedPath.path === "" || saving}>
-                <Trash2 size={15} />
-                Delete
-              </button>
-            </div>
-          </div>
-
           {summary && draft ? (
-            <>
-              <section className="panel preflop-editor-panel">
-                <div className="preflop-editor-grid">
-                  {PREFLOP_PLAYERS.map((player) => (
-                    <PlayerEditor
-                      key={player}
-                      player={player}
-                      document={draft}
-                      active={activePlayer === player}
-                      onSelect={() => setActivePlayer(player)}
-                      onChange={updateDraft}
-                    />
-                  ))}
-                  <label className="preflop-learned-switch">
-                    <input
-                      type="checkbox"
-                      checked={draft.learned}
-                      onChange={(event) => updateDraft(setPreflopLearned(draft, event.target.checked))}
-                    />
-                    <span>{draft.learned ? "Studied" : "Not studied"}</span>
-                  </label>
+            <section className="panel preflop-visual-panel">
+              <div className="preflop-visual-head">
+                <div>
+                  <div className="panel-title">
+                    <FileJson size={16} />
+                    {selectedPath?.type === "file" && rangeManageMode && renamingPath === selectedPath.path ? (
+                      <span className="preflop-title-rename" onClick={(event) => event.stopPropagation()}>
+                        <input
+                          value={renamingName}
+                          autoFocus
+                          disabled={saving}
+                          onChange={(event) => setRenamingName(event.target.value)}
+                          onBlur={() => void submitRename(selectedPath.path, renamingName)}
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter") {
+                              event.currentTarget.blur();
+                            }
+                            if (event.key === "Escape") {
+                              event.stopPropagation();
+                              cancelRenaming();
+                            }
+                          }}
+                        />
+                      </span>
+                    ) : selectedPath?.type === "file" && rangeManageMode ? (
+                      <button
+                        className="preflop-title-name-button"
+                        aria-label={`Rename ${displayRangeName(selectedPath.name)}`}
+                        onClick={() => startRenaming(selectedPath)}
+                      >
+                        {displayRangeName(selectedPath.name)}
+                      </button>
+                    ) : (
+                      <h3>{selectedPath?.type === "file" ? displayRangeName(selectedPath.name) : "Selected Range"}</h3>
+                    )}
+                  </div>
+                  <p>{selectedFile ? formatLastUpdatedTime(selectedFile) : ""}</p>
                 </div>
+                <div className="preflop-workspace-actions">
+                  {selectedPath?.type === "file" ? (
+                    <label className={`preflop-detail-status-field status-${draft.status}`}>
+                      <span className={`preflop-status-initial status-${draft.status}`}>
+                        {rangeStatusInitial(draft.status)}
+                      </span>
+                      <span className="preflop-detail-status-label">Status</span>
+                      <select
+                        className={`preflop-detail-status-select status-${draft.status}`}
+                        value={draft.status}
+                        onChange={(event) => requestRangeStatusChange(event.target.value as PreflopRangeStatus)}
+                        disabled={saving}
+                      >
+                        {PREFLOP_RANGE_STATUSES.map((status) => (
+                          <option key={status} value={status}>{RANGE_STATUS_LABELS[status]}</option>
+                        ))}
+                      </select>
+                    </label>
+                  ) : null}
+                  <button className="icon-button compact danger" onClick={requestDeleteSelected} disabled={!selectedPath || selectedPath.path === "" || saving}>
+                    <Trash2 size={15} />
+                    Delete
+                  </button>
+                </div>
+              </div>
 
-                <div className="preflop-hand-editor">
-                  <div>
-                    <span className="settings-status-label">Selected hand</span>
-                    <strong>{selectedHand}</strong>
-                  </div>
-                  <RangeSlider
-                    label={`${activePlayer} Raise`}
-                    value={Math.round(selectedCell.raise * 100)}
-                    onChange={(value) => updateDraft(setPreflopHandFrequency(draft, activePlayer, "raise", selectedHand, value))}
-                  />
-                  <RangeSlider
-                    label={`${activePlayer} Call`}
-                    value={Math.round(selectedCell.call * 100)}
-                    onChange={(value) => updateDraft(setPreflopHandFrequency(draft, activePlayer, "call", selectedHand, value))}
-                  />
-                  <div>
-                    <span className="settings-status-label">Fold</span>
-                    <strong>{Math.round(Math.max(0, 1 - selectedCell.raise - selectedCell.call) * 100)}%</strong>
-                  </div>
+              <div className="preflop-selected-hand-strip">
+                <div className="preflop-selected-hand-main">
+                  <span>Selected Hand</span>
+                  <strong>{selectedHand}</strong>
                 </div>
-              </section>
+                {orderedRangePlayers(summary).map(({ player, role }) => (
+                  <div key={`${player}-selected`} className={`preflop-hand-readout ${activePlayer === player ? "active" : ""}`}>
+                    <span>{role} · {summary.players[player].name}</span>
+                    <strong>
+                      R {Math.round((summary.players[player].matrix[selectedHand]?.raise ?? 0) * 100)}%
+                      {" / "}
+                      C {Math.round((summary.players[player].matrix[selectedHand]?.call ?? 0) * 100)}%
+                      {" / "}
+                      F {Math.round(Math.max(0, 1 - ((summary.players[player].matrix[selectedHand]?.raise ?? 0) + (summary.players[player].matrix[selectedHand]?.call ?? 0))) * 100)}%
+                    </strong>
+                  </div>
+                ))}
+              </div>
 
               <section className="preflop-matrix-grid">
-                {PREFLOP_PLAYERS.map((player) => (
+                {orderedRangePlayers(summary).map(({ player, role }) => (
                   <RangeMatrix
                     key={player}
                     player={player}
+                    role={role}
                     summary={summary}
                     active={activePlayer === player}
                     selectedHand={selectedHand}
@@ -649,7 +985,24 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
                   />
                 ))}
               </section>
-            </>
+
+              <section className="preflop-range-text-panel">
+                <div className="preflop-range-text-head">
+                  <strong>Range Text Display</strong>
+                  <button
+                    className="icon-button compact"
+                    type="button"
+                    onClick={() => void copySolverRangeText()}
+                    disabled={!solverRangeText}
+                    title="Copy range text"
+                  >
+                    <Copy size={14} />
+                    {rangeTextCopied ? "Copied" : "Copy"}
+                  </button>
+                </div>
+                <pre>{solverRangeText}</pre>
+              </section>
+            </section>
           ) : (
             <section className="panel preflop-empty-workspace">
               <FileJson size={24} />
@@ -657,8 +1010,546 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
             </section>
           )}
         </section>
+
+        <SolverJobPanel
+          servers={servers}
+          jobs={jobs}
+          events={jobEvents}
+          selectedServerId={selectedServerId}
+          selectedRangePath={selectedRangePathForJob}
+          selectedRangeName={selectedRangeNameForJob}
+          selectedRangeLearned={Boolean(draft?.learned)}
+          settings={jobSettings}
+          preview={jobPreview}
+          confirmUnstudied={confirmUnstudied}
+          busy={jobBusy}
+          error={jobError}
+          onRefresh={() => void loadJobContext()}
+          onServerChange={(serverId) => {
+            setSelectedServerId(serverId);
+            setJobPreview(null);
+          }}
+          onSettingsChange={(patch) => {
+            setJobSettings((current) => ({ ...current, ...patch }));
+            setJobPreview(null);
+          }}
+          onConfirmUnstudiedChange={(checked) => {
+            setConfirmUnstudied(checked);
+            setJobPreview(null);
+          }}
+          onPreview={() => void previewJob()}
+          onStartNow={() => void createSolverJob("manual", true)}
+          onQueueNext={() => void createSolverJob("queue_next", false)}
+          onJobAction={(job, action) => void runJobAction(job, action)}
+        />
       </section>
+
+      {pendingStatusChange ? (
+        <div className="modal-backdrop preflop-confirm-backdrop" role="presentation" onClick={() => setPendingStatusChange(null)}>
+          <section
+            className="preflop-confirm-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="preflop-status-confirm-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="preflop-confirm-icon">
+              <RefreshCw size={18} />
+            </div>
+            <div>
+              <h3 id="preflop-status-confirm-title">Confirm status change?</h3>
+              <p>{displayRangeName(pendingStatusChange.name)}</p>
+              <div className="preflop-status-change-line">
+                <span className={`preflop-status-change-chip status-${pendingStatusChange.from}`}>
+                  {RANGE_STATUS_LABELS[pendingStatusChange.from]}
+                </span>
+                <ChevronRight size={15} />
+                <span className={`preflop-status-change-chip status-${pendingStatusChange.to}`}>
+                  {RANGE_STATUS_LABELS[pendingStatusChange.to]}
+                </span>
+              </div>
+            </div>
+            <div className="preflop-confirm-actions">
+              <button className="icon-button compact" onClick={() => setPendingStatusChange(null)} disabled={saving}>
+                Cancel
+              </button>
+              <button className="icon-button compact primary" onClick={() => void confirmRangeStatusChange()} disabled={saving}>
+                <Check size={15} />
+                Confirm
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {deleteTarget ? (
+        <div className="modal-backdrop preflop-delete-backdrop" role="presentation" onClick={() => setDeleteTarget(null)}>
+          <section
+            className="preflop-delete-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="preflop-delete-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="preflop-delete-icon">
+              <Trash2 size={18} />
+            </div>
+            <div>
+              <h3 id="preflop-delete-title">Confirm delete?</h3>
+              <p>
+                {deleteTarget.type === "file"
+                  ? displayRangeName(deleteTarget.name)
+                  : deleteTarget.name}
+              </p>
+            </div>
+            <div className="preflop-delete-actions">
+              <button className="icon-button compact" onClick={() => setDeleteTarget(null)} disabled={saving}>
+                Cancel
+              </button>
+              <button className="icon-button compact danger" onClick={() => void confirmDeleteSelected()} disabled={saving}>
+                <Trash2 size={15} />
+                Delete
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
     </>
+  );
+}
+
+type SolverJobAction = "start" | "stop" | "force-stop" | "resume" | "switch" | "cancel" | "delete";
+
+function SolverJobPanel({
+  servers,
+  jobs,
+  events,
+  selectedServerId,
+  selectedRangePath,
+  selectedRangeName,
+  selectedRangeLearned,
+  settings,
+  preview,
+  confirmUnstudied,
+  busy,
+  error,
+  onRefresh,
+  onServerChange,
+  onSettingsChange,
+  onConfirmUnstudiedChange,
+  onPreview,
+  onStartNow,
+  onQueueNext,
+  onJobAction
+}: {
+  servers: ServerRow[];
+  jobs: SolverJob[];
+  events: SolverJobEvent[];
+  selectedServerId: string;
+  selectedRangePath: string;
+  selectedRangeName: string;
+  selectedRangeLearned: boolean;
+  settings: SolverJobSettings;
+  preview: SolverJobPreview | null;
+  confirmUnstudied: boolean;
+  busy: string | null;
+  error: string | null;
+  onRefresh: () => void;
+  onServerChange: (serverId: string) => void;
+  onSettingsChange: (patch: Partial<SolverJobSettings>) => void;
+  onConfirmUnstudiedChange: (checked: boolean) => void;
+  onPreview: () => void;
+  onStartNow: () => void;
+  onQueueNext: () => void;
+  onJobAction: (job: SolverJob, action: SolverJobAction) => void;
+}) {
+  const selectedServer = servers.find((server) => server.id === selectedServerId) ?? null;
+  const filteredJobs = selectedServerId ? jobs.filter((job) => job.serverId === selectedServerId) : jobs;
+  const activeJobs = filteredJobs.filter((job) => ["deploying", "running", "stopping"].includes(job.status));
+  const queuedJobs = filteredJobs.filter((job) => job.status === "queued");
+  const recentJobs = filteredJobs
+    .filter((job) => !["deploying", "running", "stopping", "queued"].includes(job.status))
+    .slice(0, 5);
+  const latestEventByJobId = useMemo(() => latestJobEvents(events), [events]);
+  const requiresUnstudiedConfirmation = Boolean(selectedRangePath && !selectedRangeLearned) || Boolean(preview?.requiresConfirmation);
+  const canSubmit = Boolean(selectedRangePath && selectedServerId && selectedServer);
+  const submitDisabled = !canSubmit || (requiresUnstudiedConfirmation && !confirmUnstudied) || busy != null;
+  const warnings = [
+    ...(!selectedRangePath ? ["Select a range file before creating a job."] : []),
+    ...(preview?.warnings ?? [])
+  ];
+
+  return (
+    <section className="panel solver-job-panel">
+      <div className="solver-job-head">
+        <div className="panel-title">
+          <ClipboardList size={16} />
+          <h3>Solver Jobs</h3>
+        </div>
+        <button className="icon-button compact" onClick={onRefresh} disabled={busy != null}>
+          <RefreshCw size={15} />
+          Refresh Jobs
+        </button>
+      </div>
+
+      {error ? <div className="notice error compact-notice">{error}</div> : null}
+
+      <div className="solver-job-grid">
+        <div className="solver-job-submit">
+          <div className="solver-job-selected-range">
+            <span>Selected Range</span>
+            <strong>{selectedRangeName || "None"}</strong>
+            <em className={selectedRangeLearned ? "studied" : "unstudied"}>
+              {selectedRangePath ? (selectedRangeLearned ? "Studied" : "Needs confirmation") : "No file selected"}
+            </em>
+          </div>
+
+          <div className="solver-job-form-grid">
+            <label className="solver-job-field wide">
+              <span>Server</span>
+              <select value={selectedServerId} onChange={(event) => onServerChange(event.target.value)}>
+                <option value="">Select server</option>
+                {servers.map((server) => (
+                  <option key={server.id} value={server.id}>
+                    {server.id}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="solver-job-field">
+              <span>Range Expr</span>
+              <input
+                value={settings.rangeExpr}
+                onChange={(event) => onSettingsChange({ rangeExpr: event.target.value })}
+              />
+            </label>
+            <label className="solver-job-field">
+              <span>Batch Size</span>
+              <input
+                type="number"
+                min="1"
+                value={settings.batchSize}
+                onChange={(event) => onSettingsChange({
+                  batchSize: positiveNumberFromInput(event.target.value, settings.batchSize)
+                })}
+              />
+            </label>
+            <label className="solver-job-field">
+              <span>Threads</span>
+              <input
+                type="number"
+                value={settings.threadNum}
+                onChange={(event) => onSettingsChange({
+                  threadNum: integerFromInput(event.target.value, settings.threadNum)
+                })}
+              />
+            </label>
+            <label className="solver-job-field">
+              <span>Max Iteration</span>
+              <input
+                type="number"
+                min="1"
+                value={settings.maxIteration}
+                onChange={(event) => onSettingsChange({
+                  maxIteration: positiveNumberFromInput(event.target.value, settings.maxIteration)
+                })}
+              />
+            </label>
+            <label className="solver-job-field">
+              <span>Export</span>
+              <select
+                value={settings.exportFormat}
+                onChange={(event) => onSettingsChange({ exportFormat: event.target.value as SolverExportFormat })}
+              >
+                {SOLVER_EXPORT_FORMATS.map((format) => <option key={format} value={format}>{format}</option>)}
+              </select>
+            </label>
+            <label className="solver-job-field">
+              <span>Upload Format</span>
+              <select
+                value={settings.uploadFormat}
+                onChange={(event) => onSettingsChange({ uploadFormat: event.target.value as SolverUploadFormat })}
+                disabled={!settings.uploadEnabled}
+              >
+                {SOLVER_UPLOAD_FORMATS.map((format) => <option key={format} value={format}>{format}</option>)}
+              </select>
+            </label>
+            <label className="solver-job-field">
+              <span>Upload Timeout</span>
+              <input
+                type="number"
+                min="1"
+                value={settings.uploadAttemptTimeoutSeconds}
+                disabled={!settings.uploadEnabled}
+                onChange={(event) => onSettingsChange({
+                  uploadAttemptTimeoutSeconds: positiveNumberFromInput(
+                    event.target.value,
+                    settings.uploadAttemptTimeoutSeconds
+                  )
+                })}
+              />
+            </label>
+          </div>
+
+          <div className="solver-job-toggle-grid">
+            <label>
+              <input
+                type="checkbox"
+                checked={settings.uploadEnabled}
+                onChange={(event) => onSettingsChange({ uploadEnabled: event.target.checked })}
+              />
+              <span>Upload</span>
+            </label>
+            <label>
+              <input
+                type="checkbox"
+                checked={settings.useIsomorphism === 1}
+                onChange={(event) => onSettingsChange({ useIsomorphism: event.target.checked ? 1 : 0 })}
+              />
+              <span>Use isomorphism</span>
+            </label>
+            {requiresUnstudiedConfirmation ? (
+              <label className="warning">
+                <input
+                  type="checkbox"
+                  checked={confirmUnstudied}
+                  onChange={(event) => onConfirmUnstudiedChange(event.target.checked)}
+                />
+                <span>Submit unstudied range</span>
+              </label>
+            ) : null}
+          </div>
+
+          <div className="solver-job-advanced-grid">
+            <label className="solver-job-field">
+              <span>Stall Timeout</span>
+              <input
+                type="number"
+                min="1"
+                placeholder="default"
+                value={settings.stallTimeoutSeconds ?? ""}
+                onChange={(event) => onSettingsChange({
+                  stallTimeoutSeconds: nullablePositiveNumberFromInput(event.target.value)
+                })}
+              />
+            </label>
+            <label className="solver-job-field">
+              <span>No Output Timeout</span>
+              <input
+                type="number"
+                min="1"
+                placeholder="default"
+                value={settings.noOutputTimeoutSeconds ?? ""}
+                onChange={(event) => onSettingsChange({
+                  noOutputTimeoutSeconds: nullablePositiveNumberFromInput(event.target.value)
+                })}
+              />
+            </label>
+          </div>
+
+          {warnings.length > 0 ? (
+            <div className="solver-job-warnings">
+              {warnings.map((warning) => <span key={warning}>{warning}</span>)}
+            </div>
+          ) : null}
+
+          <div className="solver-job-actions">
+            <button className="icon-button compact" onClick={onPreview} disabled={!selectedRangePath || !selectedServerId || busy != null}>
+              <Search size={15} />
+              Preview
+            </button>
+            <button className="icon-button compact primary" onClick={onStartNow} disabled={submitDisabled}>
+              <Play size={15} />
+              Start Now
+            </button>
+            <button className="icon-button compact" onClick={onQueueNext} disabled={submitDisabled}>
+              <Send size={15} />
+              Queue Next
+            </button>
+          </div>
+
+          {preview ? (
+            <div className="solver-job-preview">
+              <dl>
+                <div>
+                  <dt>Repo</dt>
+                  <dd>{preview.repoId}</dd>
+                </div>
+                <div>
+                  <dt>Scenario</dt>
+                  <dd>{preview.scenario}</dd>
+                </div>
+                <div>
+                  <dt>Dataset</dt>
+                  <dd>{preview.datasetName}</dd>
+                </div>
+                <div>
+                  <dt>Remote Range</dt>
+                  <dd>{preview.remoteRangePath}</dd>
+                </div>
+              </dl>
+              <pre>{preview.commandPreview}</pre>
+            </div>
+          ) : null}
+        </div>
+
+        <div className="solver-job-list-panel">
+          <div className="solver-job-list-head">
+            <strong>{selectedServer ? `${selectedServer.id} Jobs` : "Jobs"}</strong>
+            <span>{filteredJobs.length}</span>
+          </div>
+          <SolverJobGroup
+            title="Active"
+            jobs={activeJobs}
+            latestEventByJobId={latestEventByJobId}
+            busy={busy}
+            emptyText="No active solver job."
+            onJobAction={onJobAction}
+          />
+          <SolverJobGroup
+            title="Queued"
+            jobs={queuedJobs}
+            latestEventByJobId={latestEventByJobId}
+            busy={busy}
+            emptyText="No queued job."
+            onJobAction={onJobAction}
+          />
+          <SolverJobGroup
+            title="Recent"
+            jobs={recentJobs}
+            latestEventByJobId={latestEventByJobId}
+            busy={busy}
+            emptyText="No job history yet."
+            showRecentLabels
+            allowDelete
+            onJobAction={onJobAction}
+          />
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function SolverJobGroup({
+  title,
+  jobs,
+  latestEventByJobId,
+  busy,
+  emptyText,
+  showRecentLabels = false,
+  allowDelete = false,
+  onJobAction
+}: {
+  title: string;
+  jobs: SolverJob[];
+  latestEventByJobId: Map<string, SolverJobEvent>;
+  busy: string | null;
+  emptyText: string;
+  showRecentLabels?: boolean;
+  allowDelete?: boolean;
+  onJobAction: (job: SolverJob, action: SolverJobAction) => void;
+}) {
+  return (
+    <div className="solver-job-group">
+      <h4>{title}</h4>
+      {jobs.length === 0 ? <p className="solver-job-empty">{emptyText}</p> : null}
+      {jobs.map((job) => (
+        <SolverJobCard
+          key={job.id}
+          job={job}
+          latestEvent={latestEventByJobId.get(job.id) ?? null}
+          busy={busy}
+          showRecentLabels={showRecentLabels}
+          allowDelete={allowDelete}
+          onJobAction={onJobAction}
+        />
+      ))}
+    </div>
+  );
+}
+
+function SolverJobCard({
+  job,
+  latestEvent,
+  busy,
+  showRecentLabels,
+  allowDelete,
+  onJobAction
+}: {
+  job: SolverJob;
+  latestEvent: SolverJobEvent | null;
+  busy: string | null;
+  showRecentLabels: boolean;
+  allowDelete: boolean;
+  onJobAction: (job: SolverJob, action: SolverJobAction) => void;
+}) {
+  const jobBusy = Boolean(busy?.endsWith(job.id));
+  const canRetry = job.status === "interrupted" || job.status === "failed";
+  return (
+    <article className={`solver-job-card ${job.status}`}>
+      <div className="solver-job-card-head">
+        <div>
+          <strong>{job.datasetName}</strong>
+          <span>{job.scenario} · {displayRangeName(job.rangeName)}</span>
+        </div>
+        <em className={`solver-job-status ${job.status}`}>{formatJobStatus(job.status)}</em>
+      </div>
+      <dl>
+        <div>
+          <dt>{showRecentLabels ? "Dataset Repo" : "Repo"}</dt>
+          <dd>{job.repoId}</dd>
+        </div>
+        <div>
+          <dt>{showRecentLabels ? "Created Time" : "Created"}</dt>
+          <dd>{formatShortDateTime(job.createdAt)}</dd>
+        </div>
+      </dl>
+      {latestEvent ? <p className="solver-job-event">{latestEvent.message}</p> : null}
+      {job.lastError ? <p className="solver-job-error">{job.lastError}</p> : null}
+      <div className="solver-job-card-actions">
+        {job.status === "queued" ? (
+          <>
+            <button className="inventory-action-button primary" title="Start" disabled={jobBusy} onClick={() => onJobAction(job, "start")}>
+              <Play size={14} />
+            </button>
+            <button className="inventory-action-button" title="Switch now" disabled={jobBusy} onClick={() => onJobAction(job, "switch")}>
+              <Send size={14} />
+            </button>
+            <button className="inventory-action-button danger" title="Cancel" disabled={jobBusy} onClick={() => onJobAction(job, "cancel")}>
+              <X size={14} />
+            </button>
+          </>
+        ) : null}
+        {["deploying", "running", "stopping"].includes(job.status) ? (
+          <>
+            <button className="inventory-action-button danger" title="Stop" disabled={jobBusy || job.status === "stopping"} onClick={() => onJobAction(job, "stop")}>
+              <Square size={14} />
+            </button>
+            <button className="inventory-action-button danger" title="Force Kill" disabled={jobBusy} onClick={() => onJobAction(job, "force-stop")}>
+              <Trash2 size={14} />
+            </button>
+          </>
+        ) : null}
+        {canRetry ? (
+          allowDelete ? (
+            <button className="inventory-confirm-button" title="Retry" disabled={jobBusy} onClick={() => onJobAction(job, "resume")}>
+              <RotateCcw size={14} />
+              Retry
+            </button>
+          ) : (
+            <button className="inventory-action-button" title="Retry" disabled={jobBusy} onClick={() => onJobAction(job, "resume")}>
+              <RotateCcw size={14} />
+            </button>
+          )
+        ) : null}
+        {allowDelete ? (
+          <button className="inventory-confirm-button danger" title="Delete" disabled={jobBusy} onClick={() => onJobAction(job, "delete")}>
+            <Trash2 size={14} />
+            Delete
+          </button>
+        ) : null}
+      </div>
+    </article>
   );
 }
 
@@ -714,7 +1605,7 @@ function PreflopFolderRow({
   onDragOverFolder: (path: string) => void;
   onDropFolder: (path: string) => void;
 }) {
-  const hasChildFolders = item.children.some((child) => child.type === "folder");
+  const hasChildFolders = item.path !== "" && item.children.some((child) => child.type === "folder");
   const expanded = query.trim() !== "" || expandedFolders.has(item.path);
   return (
     <button
@@ -723,9 +1614,12 @@ function PreflopFolderRow({
         activePath === item.path ? "active" : "",
         dropTarget?.path === item.path && dropTarget.mode === "inside" ? "drop-inside" : ""
       ].filter(Boolean).join(" ")}
-      style={{ paddingLeft: 8 + depth * 14 }}
+      style={{ paddingLeft: 4 + depth * 12 }}
       draggable={item.path !== ""}
-      onClick={() => onSelect(item.path)}
+      onClick={() => {
+        onSelect(item.path);
+        if (hasChildFolders && query.trim() === "") onToggle(item.path);
+      }}
       onDragStart={(event) => {
         event.dataTransfer.effectAllowed = "move";
         onDragStartItem(item);
@@ -746,86 +1640,18 @@ function PreflopFolderRow({
           if (hasChildFolders) onToggle(item.path);
         }}
       >
-        {hasChildFolders ? (expanded ? "v" : ">") : ""}
+        {hasChildFolders ? (expanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />) : null}
       </span>
       <Folder size={14} />
       <span>{item.name}</span>
-      <strong>{item.children.length}</strong>
+      <strong className="preflop-folder-count">{countFolderFiles(item)}</strong>
     </button>
-  );
-}
-
-function PlayerEditor({
-  player,
-  document,
-  active,
-  onSelect,
-  onChange
-}: {
-  player: PreflopPlayerKey;
-  document: PreflopRangeDocument;
-  active: boolean;
-  onSelect: () => void;
-  onChange: (document: PreflopRangeDocument) => void;
-}) {
-  return (
-    <div className={`preflop-player-editor ${active ? "active" : ""}`} onClick={onSelect}>
-      <label>
-        <span>{player} name</span>
-        <input
-          value={document.player_names[player]}
-          onChange={(event) => onChange(setPreflopPlayerName(document, player, event.target.value))}
-        />
-      </label>
-      <label>
-        <span>Position</span>
-        <select
-          value={document.player_positions[player]}
-          onChange={(event) => onChange(setPreflopPlayerPosition(document, player, event.target.value as PreflopPlayerPosition))}
-        >
-          <option value="Unknown">Unknown</option>
-          <option value="IP">IP</option>
-          <option value="OOP">OOP</option>
-        </select>
-      </label>
-    </div>
-  );
-}
-
-function RangeSlider({
-  label,
-  value,
-  onChange
-}: {
-  label: string;
-  value: number;
-  onChange: (value: number) => void;
-}) {
-  return (
-    <label className="preflop-range-slider">
-      <span>{label}</span>
-      <input
-        type="range"
-        min="0"
-        max="100"
-        step="1"
-        value={value}
-        onChange={(event) => onChange(Number(event.target.value))}
-      />
-      <input
-        type="number"
-        min="0"
-        max="100"
-        value={value}
-        onChange={(event) => onChange(Number(event.target.value))}
-      />
-      <strong>%</strong>
-    </label>
   );
 }
 
 function RangeMatrix({
   player,
+  role,
   summary,
   active,
   selectedHand,
@@ -833,6 +1659,7 @@ function RangeMatrix({
   onHandSelect
 }: {
   player: PreflopPlayerKey;
+  role: string;
   summary: PreflopRangeSummary;
   active: boolean;
   selectedHand: string;
@@ -841,11 +1668,11 @@ function RangeMatrix({
 }) {
   const data = summary.players[player];
   return (
-    <article className={`panel preflop-matrix-card ${active ? "active" : ""}`} onClick={onPlayerSelect}>
+    <article className={`preflop-matrix-card ${active ? "active" : ""}`} onClick={onPlayerSelect}>
       <div className="preflop-matrix-head">
         <div>
           <h3>{data.position && data.position !== "Unknown" ? `${data.name} · ${data.position}` : data.name}</h3>
-          <p>{player} player</p>
+          <p>{role} range · player {player}</p>
         </div>
         <div className="preflop-matrix-stats">
           <span className="raise">Raise {data.stats.raise.toFixed(1)}%</span>
@@ -891,6 +1718,77 @@ function RangeMatrix({
   );
 }
 
+function orderedRangePlayers(summary: PreflopRangeSummary): Array<{ player: PreflopPlayerKey; role: string }> {
+  const byPosition = (position: "IP" | "OOP") =>
+    PREFLOP_PLAYERS.find((player) => summary.players[player].position === position);
+  const ip = byPosition("IP");
+  const oop = byPosition("OOP");
+  if (ip && oop && ip !== oop) {
+    return [
+      { player: ip, role: "IP" },
+      { player: oop, role: "OOP" }
+    ];
+  }
+  return PREFLOP_PLAYERS.map((player) => ({
+    player,
+    role: summary.players[player].position !== "Unknown" ? summary.players[player].position : player
+  }));
+}
+
+function preferredActivePlayer(summary: PreflopRangeSummary): PreflopPlayerKey {
+  return orderedRangePlayers(summary)[0]?.player ?? "A";
+}
+
+function defaultSolverServerId(servers: ServerRow[]): string {
+  return (
+    servers.find((server) => server.enabled)?.id ??
+    servers[0]?.id ??
+    ""
+  );
+}
+
+function positiveNumberFromInput(value: string, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function integerFromInput(value: string, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) ? parsed : fallback;
+}
+
+function nullablePositiveNumberFromInput(value: string): number | null {
+  if (value.trim() === "") return null;
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+function latestJobEvents(events: SolverJobEvent[]): Map<string, SolverJobEvent> {
+  const latest = new Map<string, SolverJobEvent>();
+  for (const event of events) {
+    const current = latest.get(event.jobId);
+    if (!current || event.createdAt > current.createdAt) {
+      latest.set(event.jobId, event);
+    }
+  }
+  return latest;
+}
+
+function formatJobStatus(status: SolverJob["status"]): string {
+  return status.replace(/_/g, " ");
+}
+
+function formatShortDateTime(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString([], {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit"
+  });
+}
+
 async function fetchPreflopJson<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, init);
   if (!response.ok) {
@@ -917,10 +1815,19 @@ function findFolder(items: PreflopRangeTreeItem[], path: string): PreflopRangeFo
   return null;
 }
 
-function filterTreeItems(items: PreflopRangeTreeItem[], query: string): PreflopRangeTreeItem[] {
+function filterTreeItems(
+  items: PreflopRangeTreeItem[],
+  query: string,
+  visibleStatuses: Set<PreflopRangeStatus>
+): PreflopRangeTreeItem[] {
   const normalized = query.trim().toLowerCase();
-  if (!normalized) return items;
-  return items.filter((item) => `${item.name} ${item.type === "file" ? item.label : ""}`.toLowerCase().includes(normalized));
+  return items.filter((item) => {
+    if (item.type === "file") {
+      return visibleStatuses.has(item.status) && (!normalized || fileMatchesQuery(item, normalized));
+    }
+    if (!folderHasVisibleStatus(item, visibleStatuses)) return false;
+    return !normalized || folderHasMatch(item, query);
+  });
 }
 
 function folderHasMatch(item: PreflopRangeFolderItem, query: string): boolean {
@@ -934,12 +1841,62 @@ function folderHasMatch(item: PreflopRangeFolderItem, query: string): boolean {
   );
 }
 
-function countFolders(items: PreflopRangeTreeItem[]): number {
-  return items.reduce((count, item) => item.type === "folder" ? count + 1 + countFolders(item.children) : count, 0);
-}
-
 function countFiles(items: PreflopRangeTreeItem[]): number {
   return items.reduce((count, item) => item.type === "folder" ? count + countFiles(item.children) : count + 1, 0);
+}
+
+function countFolderFiles(item: PreflopRangeFolderItem): number {
+  return countFiles(item.children);
+}
+
+function countRangeStatuses(items: PreflopRangeTreeItem[]): Record<PreflopRangeStatus, number> {
+  const counts = Object.fromEntries(PREFLOP_RANGE_STATUSES.map((status) => [status, 0])) as Record<PreflopRangeStatus, number>;
+  const visit = (nodes: PreflopRangeTreeItem[]) => {
+    for (const item of nodes) {
+      if (item.type === "folder") {
+        visit(item.children);
+      } else {
+        counts[item.status] += 1;
+      }
+    }
+  };
+  visit(items);
+  return counts;
+}
+
+function folderHasVisibleStatus(item: PreflopRangeFolderItem, visibleStatuses: Set<PreflopRangeStatus>): boolean {
+  return item.children.some((child) =>
+    child.type === "folder"
+      ? folderHasVisibleStatus(child, visibleStatuses)
+      : visibleStatuses.has(child.status)
+  );
+}
+
+function fileMatchesQuery(item: PreflopRangeFileItem, normalizedQuery: string): boolean {
+  return `${item.name} ${item.label}`.toLowerCase().includes(normalizedQuery);
+}
+
+function displayRangeName(name: string): string {
+  return name.replace(/\.(json|range)$/i, "");
+}
+
+function normalizeRenameName(pathToRename: string, nextName: string): string {
+  const trimmed = nextName.trim();
+  if (!isRangeFilePath(pathToRename)) return trimmed;
+  const basename = displayRangeName(trimmed).trim();
+  return basename ? `${basename}.json` : "";
+}
+
+function isRangeFilePath(pathValue: string): boolean {
+  return /\.(json|range)$/i.test(pathValue);
+}
+
+function pathBasename(pathValue: string): string {
+  return pathValue.split("/").filter(Boolean).at(-1) ?? pathValue;
+}
+
+function rangeStatusInitial(status: PreflopRangeStatus): string {
+  return RANGE_STATUS_LABELS[status][0] ?? "?";
 }
 
 function folderName(path: string): string {
@@ -1005,7 +1962,38 @@ function triggerDownload(blob: Blob, filename: string): void {
   URL.revokeObjectURL(url);
 }
 
-function formatFileMeta(file: PreflopRangeFileResponse): string {
-  const modified = new Date(file.summary.data.updatedAt ?? Date.now()).toLocaleString();
-  return `${file.summary.players.A.name} vs ${file.summary.players.B.name} · Updated ${modified}`;
+function formatLastUpdatedTime(file: PreflopRangeFileResponse): string {
+  const updatedAt = file.summary.data.updatedAt ?? file.modified;
+  if (!updatedAt) return "Last Updated Time: Not recorded";
+  const date = new Date(updatedAt);
+  if (Number.isNaN(date.getTime())) return "Last Updated Time: Not recorded";
+  return `Last Updated Time: ${date.toLocaleString()}`;
+}
+
+function formatSolverRangeText(summary: PreflopRangeSummary): string {
+  const orderedPlayers = orderedRangePlayers(summary);
+  const oop = orderedPlayers.find((item) => item.role === "OOP") ?? orderedPlayers[1] ?? orderedPlayers[0];
+  const ip = orderedPlayers.find((item) => item.role === "IP") ?? orderedPlayers.find((item) => item.player !== oop?.player) ?? orderedPlayers[0];
+  return [
+    `OOP_RANGE = "${oop ? formatPlayerSolverRange(summary, oop.player) : ""}"`,
+    `IP_RANGE = "${ip ? formatPlayerSolverRange(summary, ip.player) : ""}"`
+  ].join("\n");
+}
+
+function formatPlayerSolverRange(summary: PreflopRangeSummary, player: PreflopPlayerKey): string {
+  const matrix = summary.players[player].matrix;
+  return PREFLOP_HAND_GRID
+    .flat()
+    .flatMap((hand) => {
+      const value = matrix[hand] ?? { raise: 0, call: 0 };
+      const frequency = Math.max(0, Math.min(1, value.raise + value.call));
+      if (frequency <= 0) return [];
+      return [formatSolverHandFrequency(hand, frequency)];
+    })
+    .join(",");
+}
+
+function formatSolverHandFrequency(hand: PreflopHandCode, frequency: number): string {
+  if (Math.abs(frequency - 1) < 0.0005) return hand;
+  return `${hand}:${frequency.toFixed(3)}`;
 }

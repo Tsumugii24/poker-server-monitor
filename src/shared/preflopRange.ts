@@ -10,6 +10,16 @@ export type PreflopPlayerPosition = (typeof PREFLOP_PLAYER_POSITIONS)[number];
 export const PREFLOP_RANGE_ACTIONS = ["raise", "call"] as const;
 export type PreflopRangeAction = (typeof PREFLOP_RANGE_ACTIONS)[number];
 
+export const PREFLOP_RANGE_STATUSES = [
+  "under_review",
+  "has_problem",
+  "approved",
+  "queue",
+  "running",
+  "solved"
+] as const;
+export type PreflopRangeStatus = (typeof PREFLOP_RANGE_STATUSES)[number];
+
 export type PreflopHandCode = string;
 
 export type PreflopPlayerRange = Record<PreflopRangeAction, string>;
@@ -18,6 +28,7 @@ export type PreflopRangeDocument = {
   player_names: Record<PreflopPlayerKey, string>;
   player_positions: Record<PreflopPlayerKey, PreflopPlayerPosition>;
   learned: boolean;
+  status: PreflopRangeStatus;
   A: PreflopPlayerRange;
   B: PreflopPlayerRange;
   notes?: string;
@@ -55,6 +66,7 @@ export type PreflopRangeFileItem = {
   size: number;
   label: string;
   learned: boolean;
+  status: PreflopRangeStatus;
   rangePct: Record<PreflopPlayerKey, number>;
 };
 
@@ -74,6 +86,7 @@ export type PreflopRangeTreeResponse = {
 
 export type PreflopRangeFileResponse = {
   path: string;
+  modified?: string;
   summary: PreflopRangeSummary;
 };
 
@@ -104,6 +117,7 @@ export function createEmptyPreflopRangeDocument(): PreflopRangeDocument {
     player_names: { ...DEFAULT_PLAYER_NAMES },
     player_positions: { ...DEFAULT_PLAYER_POSITIONS },
     learned: false,
+    status: "under_review",
     A: { raise: "", call: "" },
     B: { raise: "", call: "" }
   };
@@ -127,7 +141,8 @@ export function normalizePreflopRangeDocument(
     result.player_positions[player] = position;
   }
 
-  result.learned = Boolean(value.learned);
+  result.status = normalizeRangeStatus(value.status, Boolean(value.learned));
+  result.learned = learnedFromStatus(result.status);
 
   for (const player of PREFLOP_PLAYERS) {
     const rawPlayer = isRecord(value[player]) ? value[player] : {};
@@ -309,6 +324,20 @@ export function setPreflopLearned(
   return {
     ...normalizePreflopRangeDocument(document),
     learned,
+    status: learned ? "approved" : "under_review",
+    updatedAt: new Date().toISOString()
+  };
+}
+
+export function setPreflopStatus(
+  document: PreflopRangeDocument,
+  status: PreflopRangeStatus
+): PreflopRangeDocument {
+  const normalizedStatus = normalizeRangeStatus(status, document.learned);
+  return {
+    ...normalizePreflopRangeDocument(document),
+    status: normalizedStatus,
+    learned: learnedFromStatus(normalizedStatus),
     updatedAt: new Date().toISOString()
   };
 }
@@ -450,6 +479,18 @@ function normalizePosition(value: unknown): PreflopPlayerPosition {
   const normalized = String(value ?? "").trim().toUpperCase();
   if (normalized === "IP" || normalized === "OOP") return normalized;
   return "Unknown";
+}
+
+function normalizeRangeStatus(value: unknown, learnedFallback = false): PreflopRangeStatus {
+  const normalized = String(value ?? "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+  if ((PREFLOP_RANGE_STATUSES as readonly string[]).includes(normalized)) {
+    return normalized as PreflopRangeStatus;
+  }
+  return learnedFallback ? "approved" : "under_review";
+}
+
+function learnedFromStatus(status: PreflopRangeStatus): boolean {
+  return status === "approved" || status === "queue" || status === "running" || status === "solved";
 }
 
 function mergeModernHandsIntoPlayer(

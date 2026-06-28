@@ -550,6 +550,9 @@ describe("App", () => {
     await userEvent.type(screen.getByLabelText("Group"), "analytics");
     await userEvent.clear(screen.getByLabelText("Note"));
     await userEvent.type(screen.getByLabelText("Note"), "GPU solver");
+    await userEvent.type(screen.getByLabelText("Solver Root"), "/srv/solver");
+    await userEvent.type(screen.getByLabelText("Tmux Session"), "solver-prod");
+    await userEvent.type(screen.getByLabelText("Status File"), "~/run/status-prod.json");
     await userEvent.click(screen.getByRole("button", { name: "Save" }));
 
     await waitFor(() => {
@@ -562,7 +565,10 @@ describe("App", () => {
             port: 2222,
             group: "analytics",
             enabled: true,
-            note: "GPU solver"
+            note: "GPU solver",
+            solverRoot: "/srv/solver",
+            tmuxSession: "solver-prod",
+            pipelineStatusFilePath: "~/run/status-prod.json"
           })
         })
       );
@@ -590,6 +596,9 @@ describe("App", () => {
     await userEvent.click(screen.getByLabelText("Enabled for prod-02"));
     await userEvent.clear(screen.getByLabelText("Inventory note for prod-02"));
     await userEvent.type(screen.getByLabelText("Inventory note for prod-02"), "GPU solver");
+    await userEvent.type(screen.getByLabelText("Solver root for prod-02"), "/srv/solver");
+    await userEvent.type(screen.getByLabelText("Tmux session for prod-02"), "solver-prod");
+    await userEvent.type(screen.getByLabelText("Pipeline status file for prod-02"), "~/run/status-prod.json");
     await userEvent.click(screen.getByRole("button", { name: "Save server prod-02" }));
 
     await waitFor(() => {
@@ -602,7 +611,10 @@ describe("App", () => {
             port: 2222,
             group: "analytics",
             enabled: false,
-            note: "GPU solver"
+            note: "GPU solver",
+            solverRoot: "/srv/solver",
+            tmuxSession: "solver-prod",
+            pipelineStatusFilePath: "~/run/status-prod.json"
           })
         })
       );

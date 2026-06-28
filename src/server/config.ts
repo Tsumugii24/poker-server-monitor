@@ -16,7 +16,9 @@ export type RuntimeConfig = {
   refreshIntervalMs: number;
   inventoryPath: string;
   alertSettingsPath: string;
+  preflopRangesPath: string;
   pipelineStatusFilePath: string;
+  solverJobRepoNamespace: string;
   ssh: {
     username: string;
     password: string;
@@ -31,6 +33,9 @@ export type ServerInventoryCreateInput = {
   group?: string | null;
   enabled?: boolean;
   note?: string;
+  solverRoot?: string | null;
+  tmuxSession?: string | null;
+  pipelineStatusFilePath?: string | null;
 };
 
 export type ServerInventoryUpdateInput = {
@@ -39,6 +44,9 @@ export type ServerInventoryUpdateInput = {
   group?: string | null;
   enabled?: boolean;
   note?: string;
+  solverRoot?: string | null;
+  tmuxSession?: string | null;
+  pipelineStatusFilePath?: string | null;
 };
 
 export function loadRuntimeConfig(env: EnvSource = process.env): RuntimeConfig {
@@ -54,7 +62,9 @@ export function loadRuntimeConfig(env: EnvSource = process.env): RuntimeConfig {
     refreshIntervalMs: numberFromEnv(env.SERVER_MONITOR_REFRESH_INTERVAL_MS, 3_600_000),
     inventoryPath: env.SERVER_MONITOR_INVENTORY_PATH ?? "config/servers.json",
     alertSettingsPath: env.SERVER_MONITOR_ALERT_SETTINGS_PATH ?? "config/alerts.json",
+    preflopRangesPath: env.SERVER_MONITOR_PREFLOP_RANGES_PATH ?? "config/preflop-ranges",
     pipelineStatusFilePath: env.PIPELINE_STATUS_FILE ?? "~/run/solver_running_status.json",
+    solverJobRepoNamespace: env.HF_DEFAULT_NAMESPACE ?? "Tsumugii",
     ssh: {
       username,
       password
@@ -115,6 +125,18 @@ export function loadServerInventory(filename = "config/servers.json"): ServerCon
     if (item.group != null) {
       server.group = requiredString(item.group, `servers[${index}].group`);
     }
+    if (item.solverRoot != null) {
+      server.solverRoot = requiredTrimmedString(item.solverRoot, `servers[${index}].solverRoot`);
+    }
+    if (item.tmuxSession != null) {
+      server.tmuxSession = requiredTrimmedString(item.tmuxSession, `servers[${index}].tmuxSession`);
+    }
+    if (item.pipelineStatusFilePath != null) {
+      server.pipelineStatusFilePath = requiredTrimmedString(
+        item.pipelineStatusFilePath,
+        `servers[${index}].pipelineStatusFilePath`
+      );
+    }
 
     return server;
   });
@@ -129,6 +151,11 @@ export function createServerInventoryEntry(
   const note = input.note == null ? "TBD" : requiredInventoryNote(input.note);
   const group = input.group == null ? null : optionalTrimmedString(input.group, "group");
   const enabled = input.enabled == null ? true : requiredBoolean(input.enabled, "enabled");
+  const solverRoot = input.solverRoot == null ? null : optionalTrimmedString(input.solverRoot, "solverRoot");
+  const tmuxSession = input.tmuxSession == null ? null : optionalTrimmedString(input.tmuxSession, "tmuxSession");
+  const pipelineStatusFilePath = input.pipelineStatusFilePath == null
+    ? null
+    : optionalTrimmedString(input.pipelineStatusFilePath, "pipelineStatusFilePath");
 
   const { fullPath, raw } = readServerInventoryRaw(filename);
   const entry: Record<string, unknown> = {
@@ -141,6 +168,15 @@ export function createServerInventoryEntry(
   };
   if (group) {
     entry.group = group;
+  }
+  if (solverRoot) {
+    entry.solverRoot = solverRoot;
+  }
+  if (tmuxSession) {
+    entry.tmuxSession = tmuxSession;
+  }
+  if (pipelineStatusFilePath) {
+    entry.pipelineStatusFilePath = pipelineStatusFilePath;
   }
 
   raw.push(entry);
@@ -180,6 +216,32 @@ export function updateServerInventoryEntry(
   }
   if (patch.note !== undefined) {
     entry.note = requiredInventoryNote(patch.note);
+  }
+  if (patch.solverRoot !== undefined) {
+    const solverRoot = patch.solverRoot == null ? null : optionalTrimmedString(patch.solverRoot, "solverRoot");
+    if (solverRoot) {
+      entry.solverRoot = solverRoot;
+    } else {
+      delete entry.solverRoot;
+    }
+  }
+  if (patch.tmuxSession !== undefined) {
+    const tmuxSession = patch.tmuxSession == null ? null : optionalTrimmedString(patch.tmuxSession, "tmuxSession");
+    if (tmuxSession) {
+      entry.tmuxSession = tmuxSession;
+    } else {
+      delete entry.tmuxSession;
+    }
+  }
+  if (patch.pipelineStatusFilePath !== undefined) {
+    const pipelineStatusFilePath = patch.pipelineStatusFilePath == null
+      ? null
+      : optionalTrimmedString(patch.pipelineStatusFilePath, "pipelineStatusFilePath");
+    if (pipelineStatusFilePath) {
+      entry.pipelineStatusFilePath = pipelineStatusFilePath;
+    } else {
+      delete entry.pipelineStatusFilePath;
+    }
   }
 
   writeServerInventoryRaw(fullPath, raw);

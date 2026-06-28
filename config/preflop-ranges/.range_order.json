@@ -62,13 +62,16 @@
     "SOD-37.0 vs SIA-56.json"
   ],
   "SOD/2.5BB": [
-    "SOD-16.4 vs SIA-9 2.json",
+    "SOD-16.4 vs SIA-9.2.json",
     "SOD-27 vs SIA-10.json",
     "SOD-21.5 vs SIA-16.json",
     "SOD-23.5 vs SIA-22.json",
     "SOD-23.0 vs SIA-30.json",
-    "SOD-24 vs SIA-37 2.json",
+    "SOD-24 vs SIA-37.2.json",
     "SOD-32.0 vs SIA-45.json",
     "SOD-31.0 vs SIA-56.json"
+  ],
+  "SOD": [
+    "2.5BB"
   ]
 }

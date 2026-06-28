@@ -72,8 +72,25 @@ describe("preflop range API", () => {
 
     expect(response.status).toBe(200);
     expect(response.body.summary.data.learned).toBe(true);
+    expect(response.body.summary.data.status).toBe("approved");
     const saved = JSON.parse(fs.readFileSync(path.join(preflopRangesPath, "3OD-EP", "3OD-4.3 vs 3IA-4.2.json"), "utf8"));
     expect(saved.learned).toBe(true);
+    expect(saved.status).toBe("approved");
+  });
+
+  it("updates review status and writes it to disk", async () => {
+    const app = createApp({ db, refreshService: service, preflopRangesPath });
+
+    const response = await request(app)
+      .post("/api/preflop-ranges/status")
+      .send({ path: "3OD-EP/3OD-4.3 vs 3IA-4.2.json", status: "has_problem" });
+
+    expect(response.status).toBe(200);
+    expect(response.body.summary.data.status).toBe("has_problem");
+    expect(response.body.summary.data.learned).toBe(false);
+    const saved = JSON.parse(fs.readFileSync(path.join(preflopRangesPath, "3OD-EP", "3OD-4.3 vs 3IA-4.2.json"), "utf8"));
+    expect(saved.status).toBe("has_problem");
+    expect(saved.learned).toBe(false);
   });
 
   it("uploads legacy .range files as .json", async () => {

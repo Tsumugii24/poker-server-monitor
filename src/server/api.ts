@@ -12,6 +12,7 @@ import type {
   WeChatRecipient
 } from "../shared/types";
 import type { PreflopRangeDocument } from "../shared/preflopRange";
+import { PREFLOP_RANGE_STATUSES } from "../shared/preflopRange";
 import {
   createServerInventoryEntry,
   deleteServerInventoryEntry,
@@ -45,8 +46,11 @@ import {
   savePreflopRangeFile,
   saveUploadedPreflopRangeFiles,
   updatePreflopRangeLearned,
+  updatePreflopRangeStatus,
   type UploadedPreflopRangeFile
 } from "./preflopRangeStore";
+import { SolverJobService } from "./solverJobService";
+import { SOLVER_JOB_QUEUE_MODES, type SolverJobCreateRequest, type SolverJobPreviewRequest } from "../shared/solverJobs";
 
 export type AppDependencies = {
   db: MonitorDatabase;
@@ -54,6 +58,7 @@ export type AppDependencies = {
   inventoryPath?: string;
   alertSettingsPath?: string;
   preflopRangesPath?: string;
+  solverJobService?: SolverJobService;
   defaultRefreshIntervalMs?: number;
   sendTestAlert?: (message: string, roomId: string) => Promise<void> | void;
   startAlertConnector?: () => Promise<void> | void;
@@ -85,6 +90,7 @@ export function createApp({
   inventoryPath = "config/servers.json",
   alertSettingsPath = "config/alerts.json",
   preflopRangesPath = "config/preflop-ranges",
+  solverJobService = new SolverJobService({ db, preflopRangesPath }),
   defaultRefreshIntervalMs = 3_600_000,
   sendTestAlert,
   startAlertConnector,
@@ -221,7 +227,7 @@ export function createApp({
     }
   });
 
-  // ── Preflop range library ─────────────────────────────────────
+  // ── Range Library ─────────────────────────────────────
 
   app.get("/api/preflop-ranges", (_request, response) => {
     try {
@@ -339,13 +345,29 @@ export function createApp({
   });
 
   app.post("/api/preflop-ranges/status", (request, response) => {
-    if (!isRecord(request.body) || typeof request.body.path !== "string" || typeof request.body.learned !== "boolean") {
-      response.status(400).json({ error: "invalid_preflop_status", message: "path and learned are required" });
+    if (!isRecord(request.body) || typeof request.body.path !== "string") {
+      response.status(400).json({ error: "invalid_preflop_status", message: "path is required" });
       return;
     }
 
     try {
-      response.json(updatePreflopRangeLearned(preflopRangesPath, request.body.path, request.body.learned));
+      if (typeof request.body.status === "string") {
+        if (!(PREFLOP_RANGE_STATUSES as readonly string[]).includes(request.body.status)) {
+          response.status(400).json({ error: "invalid_preflop_status", message: "status is invalid" });
+          return;
+        }
+        response.json(updatePreflopRangeStatus(
+          preflopRangesPath,
+          request.body.path,
+          request.body.status as (typeof PREFLOP_RANGE_STATUSES)[number]
+        ));
+        return;
+      }
+      if (typeof request.body.learned === "boolean") {
+        response.json(updatePreflopRangeLearned(preflopRangesPath, request.body.path, request.body.learned));
+        return;
+      }
+      response.status(400).json({ error: "invalid_preflop_status", message: "status or learned is required" });
     } catch (error) {
       respondPreflopRangeError(response, error, "preflop_range_status_failed");
     }
@@ -368,6 +390,116 @@ export function createApp({
       response.json({ ok: true });
     } catch (error) {
       respondPreflopRangeError(response, error, "preflop_range_delete_failed");
+    }
+  });
+
+  // ── Solver job system ─────────────────────────────────────────
+
+  app.get("/api/jobs", (_request, response) => {
+    try {
+      response.json(solverJobService.listJobs());
+    } catch (error) {
+      respondSolverJobError(response, error, "solver_jobs_list_failed");
+    }
+  });
+
+  app.post("/api/jobs/preview", (request, response) => {
+    if (!isSolverJobPreviewRequest(request.body)) {
+      response.status(400).json({ error: "invalid_solver_job_preview" });
+      return;
+    }
+
+    try {
+      response.json(solverJobService.preview(request.body));
+    } catch (error) {
+      respondSolverJobError(response, error, "solver_job_preview_failed");
+    }
+  });
+
+  app.post("/api/jobs", (request, response) => {
+    if (!isSolverJobCreateRequest(request.body)) {
+      response.status(400).json({ error: "invalid_solver_job" });
+      return;
+    }
+
+    try {
+      const job = solverJobService.create(request.body);
+      response.status(201).json({
+        job,
+        events: solverJobService.getJob(job.id).events
+      });
+    } catch (error) {
+      respondSolverJobError(response, error, "solver_job_create_failed");
+    }
+  });
+
+  app.get("/api/jobs/:id", (request, response) => {
+    try {
+      response.json(solverJobService.getJob(request.params.id));
+    } catch (error) {
+      respondSolverJobError(response, error, "solver_job_read_failed");
+    }
+  });
+
+  app.post("/api/jobs/:id/start", async (request, response) => {
+    try {
+      const job = await solverJobService.start(request.params.id);
+      response.json({ job, events: solverJobService.getJob(job.id).events });
+    } catch (error) {
+      respondSolverJobError(response, error, "solver_job_start_failed");
+    }
+  });
+
+  app.post("/api/jobs/:id/stop", async (request, response) => {
+    try {
+      const job = await solverJobService.stop(request.params.id);
+      response.json({ job, events: solverJobService.getJob(job.id).events });
+    } catch (error) {
+      respondSolverJobError(response, error, "solver_job_stop_failed");
+    }
+  });
+
+  app.post("/api/jobs/:id/force-stop", async (request, response) => {
+    try {
+      const job = await solverJobService.forceStop(request.params.id);
+      response.json({ job, events: solverJobService.getJob(job.id).events });
+    } catch (error) {
+      respondSolverJobError(response, error, "solver_job_force_stop_failed");
+    }
+  });
+
+  app.post("/api/jobs/:id/resume", async (request, response) => {
+    try {
+      const job = await solverJobService.resume(request.params.id);
+      response.json({ job, events: solverJobService.getJob(job.id).events });
+    } catch (error) {
+      respondSolverJobError(response, error, "solver_job_resume_failed");
+    }
+  });
+
+  app.post("/api/jobs/:id/switch", async (request, response) => {
+    try {
+      const job = await solverJobService.switchTo(request.params.id);
+      response.json({ job, events: solverJobService.getJob(job.id).events });
+    } catch (error) {
+      respondSolverJobError(response, error, "solver_job_switch_failed");
+    }
+  });
+
+  app.post("/api/jobs/:id/cancel", (request, response) => {
+    try {
+      const job = solverJobService.cancel(request.params.id);
+      response.json({ job, events: solverJobService.getJob(job.id).events });
+    } catch (error) {
+      respondSolverJobError(response, error, "solver_job_cancel_failed");
+    }
+  });
+
+  app.post("/api/jobs/:id/delete", (request, response) => {
+    try {
+      response.json(solverJobService.deleteJob(request.params.id));
+    } catch (error) {
+      respondSolverJobError(response, error, "solver_job_delete_failed");
     }
   });
 
@@ -923,7 +1055,10 @@ function serverCreateInputFromBody(body: Record<string, unknown>): ServerInvento
     port: body.port as number | undefined,
     group: body.group as string | null | undefined,
     enabled: body.enabled as boolean | undefined,
-    note: body.note as string | undefined
+    note: body.note as string | undefined,
+    solverRoot: body.solverRoot as string | null | undefined,
+    tmuxSession: body.tmuxSession as string | null | undefined,
+    pipelineStatusFilePath: body.pipelineStatusFilePath as string | null | undefined
   };
 }
 
@@ -934,6 +1069,9 @@ function serverUpdateInputFromBody(body: Record<string, unknown>): ServerInvento
   if ("group" in body) patch.group = body.group as string | null;
   if ("enabled" in body) patch.enabled = body.enabled as boolean;
   if ("note" in body) patch.note = body.note as string;
+  if ("solverRoot" in body) patch.solverRoot = body.solverRoot as string | null;
+  if ("tmuxSession" in body) patch.tmuxSession = body.tmuxSession as string | null;
+  if ("pipelineStatusFilePath" in body) patch.pipelineStatusFilePath = body.pipelineStatusFilePath as string | null;
   return patch;
 }
 
@@ -995,6 +1133,30 @@ function isAlertSettingsInput(value: unknown): value is AlertSettings {
   if (value.wechatRecipients != null && !Array.isArray(value.wechatRecipients)) return false;
   // wechatAccounts is optional in input (config normalizer handles it)
   if (value.wechatAccounts != null && !Array.isArray(value.wechatAccounts)) return false;
+  return true;
+}
+
+function isSolverJobPreviewRequest(value: unknown): value is SolverJobPreviewRequest {
+  if (!isRecord(value)) return false;
+  if (typeof value.serverId !== "string" || value.serverId.trim() === "") return false;
+  if (typeof value.rangePath !== "string" || value.rangePath.trim() === "") return false;
+  if (value.settings != null && !isRecord(value.settings)) return false;
+  if (value.confirmUnstudied != null && typeof value.confirmUnstudied !== "boolean") return false;
+  return true;
+}
+
+function isSolverJobCreateRequest(value: unknown): value is SolverJobCreateRequest {
+  if (!isSolverJobPreviewRequest(value)) return false;
+  const candidate = value as Record<string, unknown>;
+  if (
+    candidate.queueMode != null &&
+    (
+      typeof candidate.queueMode !== "string" ||
+      !(SOLVER_JOB_QUEUE_MODES as readonly string[]).includes(candidate.queueMode)
+    )
+  ) {
+    return false;
+  }
   return true;
 }
 
@@ -1117,5 +1279,21 @@ function respondPreflopRangeError(
     : /must be|required|invalid|outside|only range|cannot be moved|too many/i.test(message)
       ? 400
       : 500;
+  response.status(status).json({ error: code, message });
+}
+
+function respondSolverJobError(
+  response: express.Response,
+  error: unknown,
+  code: string
+): void {
+  const message = error instanceof Error ? error.message : String(error);
+  const status = /not found|does not exist/i.test(message)
+    ? 404
+    : /already has active|must be stopped|must be canceled|confirmation is required/i.test(message)
+      ? 409
+      : /missing|must have|required|invalid|outside|not marked studied/i.test(message)
+        ? 400
+        : 500;
   response.status(status).json({ error: code, message });
 }

@@ -58,7 +58,7 @@ export class RefreshService {
         return collectServerPipelineStatus(
           server,
           options.credentials,
-          options.pipelineStatusFilePath ?? "~/run/solver_running_status.json",
+          server.pipelineStatusFilePath ?? options.pipelineStatusFilePath ?? "~/run/solver_running_status.json",
           this.createExecutor()
         );
       });

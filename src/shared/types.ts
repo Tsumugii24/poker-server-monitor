@@ -27,6 +27,9 @@ export type ServerConfig = {
   group?: string;
   enabled: boolean;
   note: string;
+  solverRoot?: string;
+  tmuxSession?: string;
+  pipelineStatusFilePath?: string;
 };
 
 /** A single WeChat notification recipient. */

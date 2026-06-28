@@ -138,7 +138,16 @@ describe("monitor API", () => {
   it("creates a server in the inventory file and database", async () => {
     const response = await request(createApp({ db, refreshService: service, inventoryPath }))
       .post("/api/servers")
-      .send({ host: "10.0.0.2", port: 2222, group: "prod", enabled: false, note: "Secondary solver" });
+      .send({
+        host: "10.0.0.2",
+        port: 2222,
+        group: "prod",
+        enabled: false,
+        note: "Secondary solver",
+        solverRoot: "/srv/solver",
+        tmuxSession: "solver-b",
+        pipelineStatusFilePath: "~/run/status-b.json"
+      });
 
     expect(response.status).toBe(201);
     expect(response.body).toMatchObject({
@@ -148,15 +157,20 @@ describe("monitor API", () => {
       port: 2222,
       group: "prod",
       enabled: false,
-      note: "Secondary solver"
+      note: "Secondary solver",
+      solverRoot: "/srv/solver",
+      tmuxSession: "solver-b",
+      pipelineStatusFilePath: "~/run/status-b.json"
     });
     expect(db.getServer("10-0-0-2-2222")).toMatchObject({
       name: "10.0.0.2",
-      host: "10.0.0.2"
+      host: "10.0.0.2",
+      solverRoot: "/srv/solver"
     });
     expect(JSON.parse(fs.readFileSync(inventoryPath, "utf8"))[1]).toMatchObject({
       id: "10-0-0-2-2222",
-      name: "10.0.0.2"
+      name: "10.0.0.2",
+      solverRoot: "/srv/solver"
     });
   });
 
@@ -173,7 +187,16 @@ describe("monitor API", () => {
   it("updates editable server inventory fields", async () => {
     const response = await request(createApp({ db, refreshService: service, inventoryPath }))
       .patch("/api/servers/prod-01")
-      .send({ host: "10.0.0.8", port: 2222, group: "analytics", enabled: false, note: "GPU solver" });
+      .send({
+        host: "10.0.0.8",
+        port: 2222,
+        group: "analytics",
+        enabled: false,
+        note: "GPU solver",
+        solverRoot: "/srv/solver",
+        tmuxSession: "solver-prod",
+        pipelineStatusFilePath: "~/run/prod-status.json"
+      });
 
     expect(response.status).toBe(200);
     expect(response.body).toMatchObject({
@@ -183,7 +206,10 @@ describe("monitor API", () => {
       port: 2222,
       group: "analytics",
       enabled: false,
-      note: "GPU solver"
+      note: "GPU solver",
+      solverRoot: "/srv/solver",
+      tmuxSession: "solver-prod",
+      pipelineStatusFilePath: "~/run/prod-status.json"
     });
     expect(db.getServer("prod-01")).toMatchObject({
       name: "Production 01",
@@ -191,12 +217,16 @@ describe("monitor API", () => {
       port: 2222,
       group: "analytics",
       enabled: false,
-      note: "GPU solver"
+      note: "GPU solver",
+      solverRoot: "/srv/solver",
+      tmuxSession: "solver-prod",
+      pipelineStatusFilePath: "~/run/prod-status.json"
     });
     expect(JSON.parse(fs.readFileSync(inventoryPath, "utf8"))[0]).toMatchObject({
       id: "prod-01",
       name: "Production 01",
-      host: "10.0.0.8"
+      host: "10.0.0.8",
+      solverRoot: "/srv/solver"
     });
   });
 

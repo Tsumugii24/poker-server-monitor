@@ -68,6 +68,9 @@ type ServerInventoryCreateInput = {
   group?: string | null;
   enabled: boolean;
   note?: string;
+  solverRoot?: string | null;
+  tmuxSession?: string | null;
+  pipelineStatusFilePath?: string | null;
 };
 
 type ServerInventoryUpdatePatch = {
@@ -76,6 +79,9 @@ type ServerInventoryUpdatePatch = {
   group?: string | null;
   enabled?: boolean;
   note?: string;
+  solverRoot?: string | null;
+  tmuxSession?: string | null;
+  pipelineStatusFilePath?: string | null;
 };
 
 type ServerInventoryDraft = {
@@ -84,6 +90,9 @@ type ServerInventoryDraft = {
   group: string;
   enabled: boolean;
   note: string;
+  solverRoot: string;
+  tmuxSession: string;
+  pipelineStatusFilePath: string;
 };
 
 type AlertSettingsResponse = {
@@ -717,7 +726,7 @@ export default function App() {
             <ShieldCheck size={22} color="#fff" />
           </div>
           <div className="topbar-text">
-            <p className="eyebrow">SSH Infrastructure</p>
+            <p className="eyebrow">Poker Infrastructure</p>
             <h1>Server Monitor</h1>
           </div>
         </div>
@@ -1420,13 +1429,14 @@ function InventoryManageView({
                 <th>Group</th>
                 <th>Enabled</th>
                 <th>Note</th>
+                <th>Solver</th>
                 <th>Actions</th>
               </tr>
             </thead>
             <tbody>
               {sortedServers.length === 0 ? (
                 <tr className="empty-row">
-                  <td colSpan={8}>No servers configured.</td>
+                  <td colSpan={9}>No servers configured.</td>
                 </tr>
               ) : null}
               {sortedServers.map((server) => {
@@ -1510,6 +1520,40 @@ function InventoryManageView({
                         />
                       ) : (
                         <span>{server.note}</span>
+                      )}
+                    </td>
+                    <td>
+                      {isEditingServer ? (
+                        <div className="inventory-solver-fields">
+                          <input
+                            className="server-name-input inventory-solver-input"
+                            aria-label={`Solver root for ${server.id}`}
+                            placeholder="/home/user/solver"
+                            value={editDraft.solverRoot}
+                            disabled={savingId === server.id}
+                            onChange={(event) => setEditDraft((current) => ({ ...current, solverRoot: event.target.value }))}
+                          />
+                          <input
+                            className="server-name-input inventory-solver-input"
+                            aria-label={`Tmux session for ${server.id}`}
+                            placeholder="solver"
+                            value={editDraft.tmuxSession}
+                            disabled={savingId === server.id}
+                            onChange={(event) => setEditDraft((current) => ({ ...current, tmuxSession: event.target.value }))}
+                          />
+                          <input
+                            className="server-name-input inventory-solver-input"
+                            aria-label={`Pipeline status file for ${server.id}`}
+                            placeholder="~/run/solver_running_status.json"
+                            value={editDraft.pipelineStatusFilePath}
+                            disabled={savingId === server.id}
+                            onChange={(event) => setEditDraft((current) => ({ ...current, pipelineStatusFilePath: event.target.value }))}
+                          />
+                        </div>
+                      ) : (
+                        <span className={`inventory-solver-badge ${server.solverRoot ? "configured" : "missing"}`}>
+                          {server.solverRoot ? "configured" : "missing"}
+                        </span>
                       )}
                     </td>
                     <td>
@@ -1633,6 +1677,33 @@ function InventoryDraftFields({
           onChange={(event) => onChange({ note: event.target.value })}
         />
       </label>
+      <label className="inventory-field wide">
+        <span>Solver Root</span>
+        <input
+          value={draft.solverRoot}
+          disabled={disabled}
+          placeholder="/home/user/solver"
+          onChange={(event) => onChange({ solverRoot: event.target.value })}
+        />
+      </label>
+      <label className="inventory-field">
+        <span>Tmux Session</span>
+        <input
+          value={draft.tmuxSession}
+          disabled={disabled}
+          placeholder="solver"
+          onChange={(event) => onChange({ tmuxSession: event.target.value })}
+        />
+      </label>
+      <label className="inventory-field wide">
+        <span>Status File</span>
+        <input
+          value={draft.pipelineStatusFilePath}
+          disabled={disabled}
+          placeholder="~/run/solver_running_status.json"
+          onChange={(event) => onChange({ pipelineStatusFilePath: event.target.value })}
+        />
+      </label>
       <label className="inventory-switch form-switch">
         <input
           type="checkbox"
@@ -1652,7 +1723,10 @@ function emptyServerDraft(): ServerInventoryDraft {
     port: "22",
     group: "",
     enabled: true,
-    note: "TBD"
+    note: "TBD",
+    solverRoot: "",
+    tmuxSession: "",
+    pipelineStatusFilePath: ""
   };
 }
 
@@ -1662,7 +1736,10 @@ function draftFromServer(server: ServerRow): ServerInventoryDraft {
     port: String(server.port),
     group: server.group ?? "",
     enabled: server.enabled,
-    note: server.note
+    note: server.note,
+    solverRoot: server.solverRoot ?? "",
+    tmuxSession: server.tmuxSession ?? "",
+    pipelineStatusFilePath: server.pipelineStatusFilePath ?? ""
   };
 }
 
@@ -1679,12 +1756,18 @@ function serverDraftToPayload(draft: ServerInventoryDraft): ServerInventoryCreat
 
   const group = draft.group.trim();
   const note = draft.note.trim();
+  const solverRoot = draft.solverRoot.trim();
+  const tmuxSession = draft.tmuxSession.trim();
+  const pipelineStatusFilePath = draft.pipelineStatusFilePath.trim();
   return {
     host,
     port,
     group: group || null,
     enabled: draft.enabled,
-    note: note || "TBD"
+    note: note || "TBD",
+    solverRoot: solverRoot || null,
+    tmuxSession: tmuxSession || null,
+    pipelineStatusFilePath: pipelineStatusFilePath || null
   };
 }
 

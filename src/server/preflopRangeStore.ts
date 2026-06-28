@@ -4,11 +4,14 @@ import AdmZip from "adm-zip";
 import {
   normalizePreflopRangeDocument,
   serializePreflopRangeDocument,
+  setPreflopLearned,
+  setPreflopStatus,
   summarizePreflopRange,
   type PreflopRangeDocument,
   type PreflopRangeFileItem,
   type PreflopRangeFileResponse,
   type PreflopRangeFolderItem,
+  type PreflopRangeStatus,
   type PreflopRangeTreeItem,
   type PreflopRangeTreeResponse
 } from "../shared/preflopRange";
@@ -40,8 +43,10 @@ export function readPreflopRangeFile(rootPath: string, relativePath: string): Pr
   const target = safePath(root, relativePath);
   assertRangeFile(target);
   const data = normalizePreflopRangeDocument(readJson(target), path.basename(target));
+  const stat = fs.statSync(target);
   return {
     path: relativeString(root, target),
+    modified: stat.mtime.toISOString(),
     summary: summarizePreflopRange(data, path.basename(target))
   };
 }
@@ -166,7 +171,20 @@ export function updatePreflopRangeLearned(rootPath: string, relativePath: string
   const target = safePath(root, relativePath);
   assertRangeFile(target);
   const data = normalizePreflopRangeDocument(readJson(target), path.basename(target));
-  writeRangeDocument(target, { ...data, learned });
+  writeRangeDocument(target, setPreflopLearned(data, learned));
+  return readPreflopRangeFile(root, relativeString(root, target));
+}
+
+export function updatePreflopRangeStatus(
+  rootPath: string,
+  relativePath: string,
+  status: PreflopRangeStatus
+): PreflopRangeFileResponse {
+  const root = ensureRoot(rootPath);
+  const target = safePath(root, relativePath);
+  assertRangeFile(target);
+  const data = normalizePreflopRangeDocument(readJson(target), path.basename(target));
+  writeRangeDocument(target, setPreflopStatus(data, status));
   return readPreflopRangeFile(root, relativeString(root, target));
 }
 
@@ -251,12 +269,14 @@ function buildTree(root: string, folder: string): PreflopRangeTreeItem[] {
 function fileSummary(root: string, file: string): PreflopRangeFileItem {
   let label = "Invalid JSON";
   let learned = false;
+  let status: PreflopRangeStatus = "under_review";
   let rangePct: PreflopRangeFileItem["rangePct"] = { A: 0, B: 0 };
   try {
     const data = normalizePreflopRangeDocument(readJson(file), path.basename(file));
     const summary = summarizePreflopRange(data, path.basename(file));
     label = `${summary.players.A.name} vs ${summary.players.B.name}`;
     learned = summary.data.learned;
+    status = summary.data.status;
     rangePct = {
       A: Math.round((summary.players.A.stats.raise + summary.players.A.stats.call) * 10) / 10,
       B: Math.round((summary.players.B.stats.raise + summary.players.B.stats.call) * 10) / 10
@@ -274,6 +294,7 @@ function fileSummary(root: string, file: string): PreflopRangeFileItem {
     size: stat.size,
     label,
     learned,
+    status,
     rangePct
   };
 }
