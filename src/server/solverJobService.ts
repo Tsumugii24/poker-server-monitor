@@ -32,23 +32,29 @@ type SolverJobServiceOptions = {
   executor?: SshExecutor;
   defaultPipelineStatusFilePath?: string;
   repoNamespace?: string;
+  hfToken?: string | null;
 };
 
 const ACTIVE_JOB_STATUSES = new Set<SolverJobStatus>(["deploying", "running", "stopping"]);
 const DEFAULT_SOLVER_ROOT = "~/solver";
+const HF_UPLOAD_PROXY = "http://127.0.0.1:7890";
+const ACTIVE_JOB_RECONCILE_GRACE_MS = 15_000;
 
 export class SolverJobService {
   private readonly executor: SshExecutor;
   private readonly repoNamespace: string;
   private readonly defaultPipelineStatusFilePath: string;
+  private readonly hfToken: string | null;
 
   constructor(private readonly options: SolverJobServiceOptions) {
     this.executor = options.executor ?? new Ssh2Executor();
     this.repoNamespace = (options.repoNamespace ?? "Tsumugii").trim() || "Tsumugii";
     this.defaultPipelineStatusFilePath = options.defaultPipelineStatusFilePath ?? "~/run/solver_running_status.json";
+    this.hfToken = options.hfToken?.trim() || null;
   }
 
   listJobs() {
+    this.reconcileCompletedJobs();
     return {
       jobs: this.options.db.getSolverJobs(),
       events: this.options.db.getSolverJobEvents()
@@ -56,6 +62,7 @@ export class SolverJobService {
   }
 
   getJob(id: string) {
+    this.reconcileCompletedJobs();
     const job = this.requireJob(id);
     return {
       job,
@@ -69,7 +76,8 @@ export class SolverJobService {
       server: this.requireServer(input.serverId),
       preflopRangesPath: this.options.preflopRangesPath,
       defaultPipelineStatusFilePath: this.defaultPipelineStatusFilePath,
-      repoNamespace: this.repoNamespace
+      repoNamespace: this.repoNamespace,
+      hfToken: this.hfToken
     });
   }
 
@@ -117,13 +125,14 @@ export class SolverJobService {
     const server = this.requireServer(job.serverId);
     this.ensureNoActiveJob(server.id, job.id);
     this.ensureCredentials();
+    const executionCommand = this.buildExecutionCommand(job);
 
     this.options.db.updateSolverJob(job.id, { status: "deploying", lastError: null });
     this.recordEvent(job.id, "deploying", `Deploying range file to ${job.remoteRangePath}.`, null);
     try {
       await this.executor.run(server, this.options.credentials!, buildDeployRangeCommand(job));
       this.recordEvent(job.id, "deployed", "Range file deployed.", null);
-      await this.executor.run(server, this.options.credentials!, buildTmuxStartCommand(job, effectiveSolverRoot()));
+      await this.executor.run(server, this.options.credentials!, buildTmuxStartCommand(job, effectiveSolverRoot(), executionCommand));
       const now = new Date().toISOString();
       this.recordEvent(job.id, "started", `Started tmux session ${job.tmuxSession}.`, job.command);
       return this.options.db.updateSolverJob(job.id, {
@@ -261,15 +270,17 @@ export class SolverJobService {
   private reconcileCompletedJobs(): void {
     for (const job of this.options.db.getSolverJobs()) {
       if (!ACTIVE_JOB_STATUSES.has(job.status)) continue;
-      if (!job.pipeline || !pipelineBelongsToJob(job.pipeline, job)) continue;
-      if (isPipelineActive(job.pipeline)) continue;
+      if (!job.pipeline || !pipelineIsNewEnoughForJob(job.pipeline, job)) continue;
+      if (isPipelineActive(job.pipeline) && pipelineBelongsToJob(job.pipeline, job)) continue;
+      if (!pipelineCanSettleActiveJob(job.pipeline, job)) continue;
       const nextStatus = completedStatusFromPipeline(job.pipeline);
+      const lastError = nextStatus === "failed" ? pipelineReconciliationError(job.pipeline, job) : null;
       this.options.db.updateSolverJob(job.id, {
         status: nextStatus,
         finishedAt: job.pipeline?.finishedAt ?? new Date().toISOString(),
-        lastError: nextStatus === "failed" ? job.pipeline?.errorMessage ?? job.pipeline?.error ?? "Pipeline stopped" : null
+        lastError
       });
-      this.recordEvent(job.id, nextStatus, `Pipeline reconciled as ${nextStatus}.`, null);
+      this.recordEvent(job.id, nextStatus, `Server task reconciled job as ${nextStatus}.`, null);
     }
   }
 
@@ -302,6 +313,18 @@ export class SolverJobService {
     }
   }
 
+  private buildExecutionCommand(job: SolverJob): string {
+    return buildRunPipelineCommand({
+      solverRoot: effectiveSolverRoot(),
+      repoId: job.repoId,
+      scenario: job.scenario,
+      rangeFileName: `${job.datasetName}.txt`,
+      settings: job.settings,
+      statusFilePath: statusFileFromJob(job),
+      hfToken: this.hfToken
+    });
+  }
+
   private recordEvent(jobId: string, type: string, message: string, commandPreview: string | null): void {
     this.options.db.insertSolverJobEvent({
       id: randomUUID(),
@@ -319,13 +342,15 @@ export function buildSolverJobPreview({
   server,
   preflopRangesPath,
   defaultPipelineStatusFilePath,
-  repoNamespace
+  repoNamespace,
+  hfToken
 }: {
   input: SolverJobPreviewRequest;
   server: ServerRow;
   preflopRangesPath: string;
   defaultPipelineStatusFilePath: string;
   repoNamespace: string;
+  hfToken?: string | null;
 }): SolverJobPreview {
   const solverRoot = effectiveSolverRoot();
 
@@ -344,7 +369,9 @@ export function buildSolverJobPreview({
     scenario,
     rangeFileName: `${datasetName}.txt`,
     settings,
-    statusFilePath: pipelineStatusFilePath
+    statusFilePath: pipelineStatusFilePath,
+    hfToken,
+    redactSecrets: true
   });
   const warnings: string[] = [];
   const learned = file.summary.data.learned;
@@ -468,7 +495,9 @@ export function buildRunPipelineCommand({
   scenario,
   rangeFileName,
   settings,
-  statusFilePath
+  statusFilePath,
+  hfToken,
+  redactSecrets = false
 }: {
   solverRoot: string;
   repoId: string;
@@ -476,6 +505,8 @@ export function buildRunPipelineCommand({
   rangeFileName: string;
   settings: SolverJobSettings;
   statusFilePath: string;
+  hfToken?: string | null;
+  redactSecrets?: boolean;
 }): string {
   const args = [
     "python",
@@ -494,7 +525,17 @@ export function buildRunPipelineCommand({
     "--status-file",
     statusFilePath
   ];
+  const environmentExports: string[] = [];
   if (settings.uploadEnabled) {
+    const normalizedHfToken = hfToken?.trim();
+    if (!normalizedHfToken) {
+      throw new Error("HF_TOKEN is required when Upload is enabled.");
+    }
+    environmentExports.push(
+      `export http_proxy=${shellQuote(HF_UPLOAD_PROXY)}`,
+      `export https_proxy=${shellQuote(HF_UPLOAD_PROXY)}`,
+      redactSecrets ? "export HF_TOKEN=$HF_TOKEN" : `export HF_TOKEN=${shellQuote(normalizedHfToken)}`
+    );
     args.push(
       "--repo-id",
       repoId,
@@ -514,7 +555,11 @@ export function buildRunPipelineCommand({
   }
   if (settings.stallTimeoutSeconds != null) args.push("--stall-timeout", String(settings.stallTimeoutSeconds));
   if (settings.noOutputTimeoutSeconds != null) args.push("--no-output-timeout", String(settings.noOutputTimeoutSeconds));
-  return `cd ${shellQuoteRemotePath(solverRoot)} && PIPELINE_STATUS_FILE=${shellQuote(statusFilePath)} ${args.map(shellQuote).join(" ")}`;
+  return [
+    `cd ${shellQuoteRemotePath(solverRoot)}`,
+    ...environmentExports,
+    `PIPELINE_STATUS_FILE=${shellQuote(statusFilePath)} ${args.map(shellQuote).join(" ")}`
+  ].join(" && ");
 }
 
 export function buildDeployRangeCommand(job: SolverJob): string {
@@ -532,11 +577,11 @@ export function buildDeployRangeCommand(job: SolverJob): string {
   ].join("\n");
 }
 
-export function buildTmuxStartCommand(job: SolverJob, solverRoot: string): string {
+export function buildTmuxStartCommand(job: SolverJob, solverRoot: string, command = job.command): string {
   return [
     "set -e",
     `tmux has-session -t ${shellQuote(job.tmuxSession)} 2>/dev/null || tmux new-session -d -s ${shellQuote(job.tmuxSession)} -c ${shellQuoteRemotePath(solverRoot)}`,
-    `tmux send-keys -t ${shellQuote(job.tmuxSession)} ${shellQuote(job.command)} C-m`
+    `tmux send-keys -t ${shellQuote(job.tmuxSession)} ${shellQuote(command)} C-m`
   ].join("\n");
 }
 
@@ -637,7 +682,13 @@ function completedStatusFromPipeline(pipeline: PipelineStatusSnapshot | null): S
   if (pipeline.displayStatus === "completed" || pipeline.displayStatus === "completed_with_upload_failures") {
     return "completed";
   }
-  if (pipeline.displayStatus === "failed" || pipeline.displayStatus === "unavailable") {
+  if (
+    pipeline.displayStatus === "failed" ||
+    pipeline.displayStatus === "exited" ||
+    pipeline.displayStatus === "stale" ||
+    pipeline.displayStatus === "idle" ||
+    pipeline.displayStatus === "unavailable"
+  ) {
     return "failed";
   }
   return "interrupted";
@@ -645,6 +696,44 @@ function completedStatusFromPipeline(pipeline: PipelineStatusSnapshot | null): S
 
 function pipelineBelongsToJob(pipeline: PipelineStatusSnapshot, job: SolverJob): boolean {
   return pipeline.repoId === job.repoId || pipeline.datasetName === job.datasetName;
+}
+
+function pipelineIsNewEnoughForJob(pipeline: PipelineStatusSnapshot, job: SolverJob): boolean {
+  const reference = Date.parse(job.startedAt ?? job.updatedAt ?? job.createdAt);
+  const collected = Date.parse(pipeline.collectedAt);
+  if (!Number.isFinite(reference) || !Number.isFinite(collected)) return false;
+  return collected - reference >= ACTIVE_JOB_RECONCILE_GRACE_MS;
+}
+
+function pipelineCanSettleActiveJob(pipeline: PipelineStatusSnapshot, job: SolverJob): boolean {
+  if (pipelineBelongsToJob(pipeline, job)) return !isPipelineActive(pipeline);
+  if (isPipelineActive(pipeline)) return true;
+  return (
+    pipeline.displayStatus === "idle" ||
+    pipeline.displayStatus === "stale" ||
+    pipeline.displayStatus === "failed" ||
+    pipeline.displayStatus === "exited" ||
+    pipeline.displayStatus === "completed" ||
+    pipeline.displayStatus === "completed_with_upload_failures"
+  );
+}
+
+function pipelineReconciliationError(pipeline: PipelineStatusSnapshot, job: SolverJob): string {
+  if (pipeline.errorMessage) return pipeline.errorMessage;
+  if (pipeline.error) return pipeline.error;
+  if (!pipelineBelongsToJob(pipeline, job) && isPipelineActive(pipeline)) {
+    return `Server is running a different task (${pipeline.datasetName ?? pipeline.repoId ?? pipeline.displayStatus}).`;
+  }
+  if (pipeline.displayStatus === "idle") {
+    return "Server reports task IDLE after job start; the pipeline command may have exited before solver status was written.";
+  }
+  if (pipeline.displayStatus === "stale") {
+    return "Server reports a stale solver task; the recorded process is no longer running.";
+  }
+  if (pipeline.displayStatus === "exited") {
+    return "Solver task exited before completing.";
+  }
+  return `Server task status is ${pipeline.displayStatus}.`;
 }
 
 function isPipelineActive(pipeline: PipelineStatusSnapshot | null): boolean {

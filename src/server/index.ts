@@ -63,7 +63,8 @@ async function main(): Promise<void> {
     preflopRangesPath: config.preflopRangesPath,
     credentials: config.ssh,
     defaultPipelineStatusFilePath: config.pipelineStatusFilePath,
-    repoNamespace: config.solverJobRepoNamespace
+    repoNamespace: config.solverJobRepoNamespace,
+    hfToken: config.hfToken
   });
   windowlessInterval(() => {
     void solverJobService.reconcileAndStartQueuedJobs().catch((error: unknown) => {

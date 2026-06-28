@@ -197,6 +197,7 @@ describe("runtime config loading", () => {
     expect(config.refreshIntervalMs).toBe(3_600_000);
     expect(config.alertSettingsPath).toBe("config/alerts.json");
     expect(config.pipelineStatusFilePath).toBe("~/run/solver_running_status.json");
+    expect(config.hfToken).toBeNull();
   });
 
   it("allows overriding the HTTP bind host for deployment", () => {
@@ -207,6 +208,16 @@ describe("runtime config loading", () => {
     });
 
     expect(config.host).toBe("0.0.0.0");
+  });
+
+  it("loads the Hugging Face token for upload jobs", () => {
+    const config = loadRuntimeConfig({
+      SSH_USERNAME: "root",
+      SSH_PASSWORD: "secret",
+      HF_TOKEN: "hf_test_token"
+    });
+
+    expect(config.hfToken).toBe("hf_test_token");
   });
 
   it("fails clearly when SSH credentials are missing", () => {

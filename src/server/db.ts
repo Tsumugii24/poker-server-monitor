@@ -712,7 +712,7 @@ function mapSolverJob(row: Record<string, SqlValue>, pipeline: PipelineStatusSna
     scenario: String(row.scenario) as SolverJob["scenario"],
     repoId: String(row.repo_id),
     settings: parseSolverJobSettings(row.settings_json),
-    command: String(row.command_text),
+    command: redactSensitiveCommand(String(row.command_text)),
     solverRangeText: String(row.solver_range_text),
     status: String(row.status) as SolverJobStatus,
     queueMode: String(row.queue_mode) as SolverJob["queueMode"],
@@ -734,7 +734,7 @@ function mapSolverJobEvent(row: Record<string, SqlValue>): SolverJobEvent {
     jobId: String(row.job_id),
     type: String(row.event_type),
     message: String(row.message),
-    commandPreview: row.command_preview == null ? null : String(row.command_preview),
+    commandPreview: row.command_preview == null ? null : redactSensitiveCommand(String(row.command_preview)),
     createdAt: String(row.created_at)
   };
 }
@@ -744,6 +744,10 @@ function parseSolverJobSettings(value: SqlValue): SolverJobSettings {
     throw new Error("solver job settings must be JSON");
   }
   return JSON.parse(value) as SolverJobSettings;
+}
+
+function redactSensitiveCommand(value: string): string {
+  return value.replace(/export HF_TOKEN=(?:'[^']*'|"[^"]*"|[^&\s]+)/g, "export HF_TOKEN=$HF_TOKEN");
 }
 
 function mapSnapshot(row: Record<string, SqlValue>): MetricSnapshot {
@@ -792,7 +796,7 @@ function mapPipelineSnapshot(row: Record<string, SqlValue>): PipelineStatusSnaps
     startedAt: row.started_at == null ? null : String(row.started_at),
     updatedAt: row.updated_at == null ? null : String(row.updated_at),
     finishedAt: row.finished_at == null ? null : String(row.finished_at),
-    command: row.command_text == null ? null : String(row.command_text),
+    command: row.command_text == null ? null : redactSensitiveCommand(String(row.command_text)),
     error: row.error_text == null ? null : String(row.error_text),
     errorCode: row.error_code == null ? null : String(row.error_code),
     errorMessage: row.error_message == null ? null : String(row.error_message)

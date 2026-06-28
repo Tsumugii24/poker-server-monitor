@@ -19,6 +19,7 @@ export type RuntimeConfig = {
   preflopRangesPath: string;
   pipelineStatusFilePath: string;
   solverJobRepoNamespace: string;
+  hfToken: string | null;
   ssh: {
     username: string;
     password: string;
@@ -65,6 +66,7 @@ export function loadRuntimeConfig(env: EnvSource = process.env): RuntimeConfig {
     preflopRangesPath: env.SERVER_MONITOR_PREFLOP_RANGES_PATH ?? "config/preflop-ranges",
     pipelineStatusFilePath: env.PIPELINE_STATUS_FILE ?? "~/run/solver_running_status.json",
     solverJobRepoNamespace: env.HF_DEFAULT_NAMESPACE ?? "Tsumugii",
+    hfToken: env.HF_TOKEN?.trim() || null,
     ssh: {
       username,
       password

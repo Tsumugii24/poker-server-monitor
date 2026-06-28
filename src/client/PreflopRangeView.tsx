@@ -50,7 +50,13 @@ import {
   type SolverJobsResponse,
   type SolverUploadFormat
 } from "../shared/solverJobs";
-import type { OverviewResponse, ServerRow } from "../shared/types";
+import type {
+  ConnectionStatus,
+  OverviewResponse,
+  PipelineDisplayStatus,
+  PipelineStatusSnapshot,
+  ServerRow
+} from "../shared/types";
 
 type SelectedRangePath =
   | { type: "folder"; path: string; name: string }
@@ -162,6 +168,20 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
       setJobError(caught instanceof Error ? caught.message : String(caught));
     }
   }, []);
+
+  const refreshJobContext = useCallback(async () => {
+    setJobBusy("refresh");
+    setJobError(null);
+    try {
+      await fetchPreflopJson<unknown>("/api/refresh", { method: "POST" });
+      await loadJobContext();
+    } catch (caught) {
+      setJobError(caught instanceof Error ? caught.message : String(caught));
+      await loadJobContext();
+    } finally {
+      setJobBusy(null);
+    }
+  }, [loadJobContext]);
 
   useEffect(() => {
     void loadJobContext();
@@ -1024,7 +1044,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
           confirmUnstudied={confirmUnstudied}
           busy={jobBusy}
           error={jobError}
-          onRefresh={() => void loadJobContext()}
+          onRefresh={() => void refreshJobContext()}
           onServerChange={(serverId) => {
             setSelectedServerId(serverId);
             setJobPreview(null);
@@ -1188,7 +1208,7 @@ function SolverJobPanel({
         </div>
         <button className="icon-button compact" onClick={onRefresh} disabled={busy != null}>
           <RefreshCw size={15} />
-          Refresh Jobs
+          {busy === "refresh" ? "Refreshing..." : "Refresh Status"}
         </button>
       </div>
 
@@ -1398,6 +1418,7 @@ function SolverJobPanel({
             <strong>{selectedServer ? `${selectedServer.id} Jobs` : "Jobs"}</strong>
             <span>{filteredJobs.length}</span>
           </div>
+          <SolverServerSnapshot server={selectedServer} />
           <SolverJobGroup
             title="Active"
             jobs={activeJobs}
@@ -1428,6 +1449,66 @@ function SolverJobPanel({
       </div>
     </section>
   );
+}
+
+function SolverServerSnapshot({ server }: { server: ServerRow | null }) {
+  if (!server) {
+    return (
+      <div className="solver-server-snapshot empty">
+        <div className="solver-server-snapshot-head">
+          <strong>No server selected</strong>
+          <span className="text-muted">Select a server to inspect task status.</span>
+        </div>
+      </div>
+    );
+  }
+
+  const task = server.pipeline;
+  return (
+    <div className="solver-server-snapshot">
+      <div className="solver-server-snapshot-head">
+        <div>
+          <strong>{server.id}</strong>
+          <span>{server.host}:{server.port}</span>
+        </div>
+        <div className="solver-server-badges">
+          <ConnectionBadge status={server.latest?.connectionStatus ?? "unknown"} />
+          {task ? <SolverTaskBadge status={task.displayStatus} /> : <span className="badge task-badge unavailable">no task</span>}
+        </div>
+      </div>
+
+      <div className="solver-server-metrics">
+        <SolverServerMetric label="Process" value={task ? formatProcessAlive(task.processAlive) : "-"} />
+        <SolverServerMetric label="Dataset" value={task?.datasetName ?? task?.repoId ?? server.lastDatasetName ?? "-"} />
+        <SolverServerMetric label="Batch" value={task ? formatTaskBatch(task) : "-"} />
+        <SolverServerMetric label="CPU" value={formatMetricPercent(server.latest?.cpuUsedPercent)} />
+        <SolverServerMetric label="Memory" value={formatMetricPercent(server.latest?.memoryUsedPercent)} />
+        <SolverServerMetric label="Disk" value={formatMetricPercent(server.latest?.diskUsedPercent)} />
+        <SolverServerMetric label="Updated" value={formatTaskUpdated(task)} />
+      </div>
+
+      {task?.error || task?.errorMessage ? (
+        <p className="solver-server-error">{task.errorMessage ?? task.error}</p>
+      ) : null}
+    </div>
+  );
+}
+
+function SolverServerMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
+  );
+}
+
+function ConnectionBadge({ status }: { status: ConnectionStatus }) {
+  return <span className={`badge conn-badge ${status}`}>{status}</span>;
+}
+
+function SolverTaskBadge({ status }: { status: PipelineDisplayStatus }) {
+  return <span className={`badge task-badge ${status}`}>{formatTaskStatusLabel(status)}</span>;
 }
 
 function SolverJobGroup({
@@ -1787,6 +1868,34 @@ function formatShortDateTime(value: string): string {
     hour: "2-digit",
     minute: "2-digit"
   });
+}
+
+function formatTaskStatusLabel(status: PipelineDisplayStatus): string {
+  return status.replace(/_/g, " ");
+}
+
+function formatProcessAlive(processAlive: boolean | null): string {
+  if (processAlive === true) return "Alive";
+  if (processAlive === false) return "Not running";
+  return "-";
+}
+
+function formatTaskBatch(task: PipelineStatusSnapshot): string {
+  if (task.currentBatch != null && task.totalBatches != null) {
+    const expr = task.batchExpr ? ` (${task.batchExpr})` : "";
+    return `${task.currentBatch}/${task.totalBatches}${expr}`;
+  }
+  if (task.totalTasks != null) return `${task.totalTasks} tasks`;
+  return "-";
+}
+
+function formatTaskUpdated(task: PipelineStatusSnapshot | null): string {
+  if (!task) return "-";
+  return formatShortDateTime(task.updatedAt ?? task.collectedAt);
+}
+
+function formatMetricPercent(value: number | null | undefined): string {
+  return value == null ? "-" : `${value.toFixed(1)}%`;
 }
 
 async function fetchPreflopJson<T>(url: string, init?: RequestInit): Promise<T> {
