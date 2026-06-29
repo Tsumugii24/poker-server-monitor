@@ -1290,7 +1290,7 @@ function respondSolverJobError(
   const message = error instanceof Error ? error.message : String(error);
   const status = /not found|does not exist/i.test(message)
     ? 404
-    : /already has active|must be stopped|must be canceled|confirmation is required/i.test(message)
+    : /already has active|must be stopped|must be canceled|confirmation is required|online server|is offline|is unknown/i.test(message)
       ? 409
       : /missing|must have|required|invalid|outside|not marked studied/i.test(message)
         ? 400

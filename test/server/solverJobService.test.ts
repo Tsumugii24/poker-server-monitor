@@ -4,7 +4,7 @@ import path from "node:path";
 import request from "supertest";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_SOLVER_JOB_SETTINGS } from "../../src/shared/solverJobs";
-import type { PipelineStatusSnapshot, ServerConfig } from "../../src/shared/types";
+import type { ConnectionStatus, MetricSnapshot, PipelineStatusSnapshot, ServerConfig } from "../../src/shared/types";
 import { createApp } from "../../src/server/api";
 import { MonitorDatabase } from "../../src/server/db";
 import { RefreshService } from "../../src/server/refreshService";
@@ -174,6 +174,7 @@ describe("solver job API", () => {
 
     db = await MonitorDatabase.createInMemory();
     db.syncServers(servers);
+    db.insertSnapshot(metricSnapshot("solver-01", "online"));
     refreshService = new RefreshService({
       db,
       servers,
@@ -365,7 +366,72 @@ describe("solver job API", () => {
       event.message === "Server task reconciled job as failed."
     )).toBe(true);
   });
+
+  it("rejects job operations while the server is offline", async () => {
+    const executor: SshExecutor = {
+      run: vi.fn(async (_server, _credentials, command) => {
+        commands.push(command);
+        return "ok";
+      })
+    };
+    const solverJobService = new SolverJobService({
+      db,
+      preflopRangesPath,
+      credentials: { username: "root", password: "secret" },
+      executor,
+      defaultPipelineStatusFilePath: "~/run/solver_running_status.json",
+      repoNamespace: "Tsumugii",
+      hfToken: "hf_test_token"
+    });
+    const app = createApp({ db, refreshService, preflopRangesPath, solverJobService });
+    const created = await request(app)
+      .post("/api/jobs")
+      .send({ serverId: "solver-01", rangePath: "3OD-EP/3OD-4.3 vs 3IA-4.2.json", confirmUnstudied: true });
+    const started = await request(app).post(`/api/jobs/${created.body.job.id}/start`);
+    db.insertSnapshot(metricSnapshot("solver-01", "offline", new Date(Date.now() + 1000).toISOString()));
+
+    const stopped = await request(app).post(`/api/jobs/${created.body.job.id}/stop`);
+
+    expect(stopped.status).toBe(409);
+    expect(stopped.body.message).toContain("offline");
+    expect(commands).toHaveLength(2);
+
+    const list = await request(app).get("/api/jobs");
+    expect(list.body.jobs[0]).toMatchObject({
+      id: started.body.job.id,
+      status: "running"
+    });
+  });
 });
+
+function metricSnapshot(
+  serverId: string,
+  connectionStatus: ConnectionStatus,
+  collectedAt = new Date().toISOString()
+): MetricSnapshot {
+  return {
+    id: `${serverId}-${connectionStatus}-${collectedAt}`,
+    serverId,
+    collectedAt,
+    connectionStatus,
+    healthLevel: connectionStatus === "online" ? "healthy" : null,
+    cpuUsedPercent: connectionStatus === "online" ? 20 : null,
+    memoryUsedPercent: connectionStatus === "online" ? 30 : null,
+    diskUsedPercent: connectionStatus === "online" ? 40 : null,
+    load1: connectionStatus === "online" ? 0.1 : null,
+    load5: connectionStatus === "online" ? 0.2 : null,
+    load15: connectionStatus === "online" ? 0.3 : null,
+    uptimeSeconds: connectionStatus === "online" ? 3600 : null,
+    errorCode: connectionStatus === "online" ? null : "offline",
+    errorMessage: connectionStatus === "online" ? null : "offline",
+    cpuModel: null,
+    cpuVcores: null,
+    memoryTotalBytes: null,
+    memoryUsedBytes: null,
+    diskTotalBytes: null,
+    diskUsedBytes: null
+  };
+}
 
 function idlePipelineSnapshot(serverId: string, collectedAt: string): PipelineStatusSnapshot {
   return {

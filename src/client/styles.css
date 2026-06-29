@@ -4347,12 +4347,14 @@ td .port-value {
 }
 
 .preflop-confirm-backdrop,
-.preflop-delete-backdrop {
+.preflop-delete-backdrop,
+.job-offline-backdrop {
   align-items: center;
 }
 
 .preflop-confirm-dialog,
-.preflop-delete-dialog {
+.preflop-delete-dialog,
+.job-offline-dialog {
   width: min(420px, 100%);
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
@@ -4365,7 +4367,8 @@ td .port-value {
 }
 
 .preflop-confirm-icon,
-.preflop-delete-icon {
+.preflop-delete-icon,
+.job-offline-icon {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -4386,7 +4389,8 @@ td .port-value {
 }
 
 .preflop-confirm-dialog h3,
-.preflop-delete-dialog h3 {
+.preflop-delete-dialog h3,
+.job-offline-dialog h3 {
   margin: 0;
   color: var(--text-primary);
   font-size: 16px;
@@ -4394,7 +4398,8 @@ td .port-value {
 }
 
 .preflop-confirm-dialog p,
-.preflop-delete-dialog p {
+.preflop-delete-dialog p,
+.job-offline-dialog p {
   margin: 5px 0 0;
   overflow: hidden;
   color: var(--text-secondary);
@@ -4403,8 +4408,13 @@ td .port-value {
   white-space: nowrap;
 }
 
+.job-offline-dialog p {
+  white-space: normal;
+}
+
 .preflop-confirm-actions,
-.preflop-delete-actions {
+.preflop-delete-actions,
+.job-offline-actions {
   grid-column: 1 / -1;
   display: flex;
   justify-content: flex-end;

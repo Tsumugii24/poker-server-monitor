@@ -81,6 +81,13 @@ type PendingStatusChange = {
   to: PreflopRangeStatus;
 };
 
+type OfflineServerNotice = {
+  serverId: string;
+  host: string | null;
+  status: ConnectionStatus | "unknown";
+  action: string;
+};
+
 const EXPANDED_FOLDERS_KEY = "preflop-range-expanded-folders";
 const DEFAULT_SELECTED_HAND = "AA";
 const RANGE_STATUS_LABELS: Record<PreflopRangeStatus, string> = {
@@ -127,6 +134,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
   const [confirmUnstudied, setConfirmUnstudied] = useState(false);
   const [jobBusy, setJobBusy] = useState<string | null>(null);
   const [jobError, setJobError] = useState<string | null>(null);
+  const [offlineServerNotice, setOfflineServerNotice] = useState<OfflineServerNotice | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const folderInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -567,6 +575,11 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
 
   const createSolverJob = async (queueMode: "manual" | "queue_next", autoStart: boolean) => {
     if (!selectedRangePathForJob || !selectedServerId) return;
+    const server = servers.find((candidate) => candidate.id === selectedServerId) ?? null;
+    if (!serverIsOnlineForJob(server)) {
+      showOfflineServerNotice(server, selectedServerId, autoStart ? "start job" : "queue job");
+      return;
+    }
     setJobBusy(autoStart ? "start-now" : "queue-next");
     setJobError(null);
     try {
@@ -598,6 +611,11 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
   };
 
   const runJobAction = async (job: SolverJob, action: SolverJobAction) => {
+    const server = servers.find((candidate) => candidate.id === job.serverId) ?? null;
+    if (!serverIsOnlineForJob(server)) {
+      showOfflineServerNotice(server, job.serverId, JOB_ACTION_LABELS[action]);
+      return;
+    }
     setJobBusy(`${action}:${job.id}`);
     setJobError(null);
     try {
@@ -612,6 +630,15 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
     } finally {
       setJobBusy(null);
     }
+  };
+
+  const showOfflineServerNotice = (server: ServerRow | null, serverId: string, action: string) => {
+    setOfflineServerNotice({
+      serverId: server?.id ?? serverId,
+      host: server?.host ?? null,
+      status: server?.latest?.connectionStatus ?? "unknown",
+      action
+    });
   };
 
   return (
@@ -1064,6 +1091,35 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
         />
       </section>
 
+      {offlineServerNotice ? (
+        <div className="modal-backdrop job-offline-backdrop" role="presentation" onClick={() => setOfflineServerNotice(null)}>
+          <section
+            className="job-offline-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="job-offline-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="job-offline-icon">
+              <X size={18} />
+            </div>
+            <div>
+              <h3 id="job-offline-title">Server is offline</h3>
+              <p>
+                Server <strong>{offlineServerNotice.serverId}</strong>
+                {offlineServerNotice.host ? ` (${offlineServerNotice.host})` : ""} is currently
+                {" "}<strong>{offlineServerNotice.status}</strong>. Cannot {offlineServerNotice.action} until the server is online.
+              </p>
+            </div>
+            <div className="job-offline-actions">
+              <button className="icon-button compact primary" onClick={() => setOfflineServerNotice(null)}>
+                OK
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
       {pendingStatusChange ? (
         <div className="modal-backdrop preflop-confirm-backdrop" role="presentation" onClick={() => setPendingStatusChange(null)}>
           <section
@@ -1139,6 +1195,20 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
 }
 
 type SolverJobAction = "start" | "stop" | "force-stop" | "resume" | "switch" | "cancel" | "delete";
+
+const JOB_ACTION_LABELS: Record<SolverJobAction, string> = {
+  start: "start this job",
+  stop: "stop this job",
+  "force-stop": "force stop this job",
+  resume: "retry this job",
+  switch: "switch to this job",
+  cancel: "cancel this job",
+  delete: "delete this job"
+};
+
+function serverIsOnlineForJob(server: ServerRow | null | undefined): boolean {
+  return server?.latest?.connectionStatus === "online";
+}
 
 function SolverJobPanel({
   servers,

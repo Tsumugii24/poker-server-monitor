@@ -83,6 +83,7 @@ export class SolverJobService {
 
   create(input: SolverJobCreateRequest): SolverJob {
     const preview = this.preview(input);
+    this.ensureServerOnline(preview.server);
     if (preview.requiresConfirmation && !input.confirmUnstudied) {
       throw new Error("Range is not marked studied; confirmation is required before submitting.");
     }
@@ -123,6 +124,7 @@ export class SolverJobService {
   async start(id: string): Promise<SolverJob> {
     const job = this.requireJob(id);
     const server = this.requireServer(job.serverId);
+    this.ensureServerOnline(server);
     this.ensureNoActiveJob(server.id, job.id);
     this.ensureCredentials();
     const executionCommand = this.buildExecutionCommand(job);
@@ -156,6 +158,7 @@ export class SolverJobService {
   async stop(id: string): Promise<SolverJob> {
     const job = this.requireJob(id);
     const server = this.requireServer(job.serverId);
+    this.ensureServerOnline(server);
     this.ensureCredentials();
     this.options.db.updateSolverJob(job.id, { status: "stopping" });
     this.recordEvent(job.id, "stopping", "Sending Ctrl-C to solver tmux session.", null);
@@ -189,6 +192,7 @@ export class SolverJobService {
   async forceStop(id: string): Promise<SolverJob> {
     const job = this.requireJob(id);
     const server = this.requireServer(job.serverId);
+    this.ensureServerOnline(server);
     this.ensureCredentials();
     this.options.db.updateSolverJob(job.id, { status: "stopping" });
     this.recordEvent(job.id, "force_stopping", "Force killing solver process and tmux session.", null);
@@ -214,12 +218,14 @@ export class SolverJobService {
 
   async resume(id: string): Promise<SolverJob> {
     const job = this.requireJob(id);
+    this.ensureJobServerOnline(job);
     this.recordEvent(job.id, "resume_requested", "Resume requested for existing job command.", job.command);
     return this.start(job.id);
   }
 
   async switchTo(id: string): Promise<SolverJob> {
     const job = this.requireJob(id);
+    this.ensureJobServerOnline(job);
     const active = this.options.db.getActiveSolverJobForServer(job.serverId, job.id);
     if (active) {
       this.recordEvent(job.id, "switch_waiting", `Stopping active job ${active.datasetName}.`, null);
@@ -231,6 +237,7 @@ export class SolverJobService {
 
   cancel(id: string): SolverJob {
     const job = this.requireJob(id);
+    this.ensureJobServerOnline(job);
     if (ACTIVE_JOB_STATUSES.has(job.status)) {
       throw new Error("Active jobs must be stopped before cancellation.");
     }
@@ -243,6 +250,7 @@ export class SolverJobService {
 
   deleteJob(id: string): { job: SolverJob; events: SolverJobEvent[] } {
     const job = this.requireJob(id);
+    this.ensureJobServerOnline(job);
     if (ACTIVE_JOB_STATUSES.has(job.status)) {
       throw new Error("Active jobs must be stopped before deletion.");
     }
@@ -261,6 +269,7 @@ export class SolverJobService {
     for (const server of servers) {
       const queued = this.options.db.getQueuedSolverJobForServer(server.id);
       if (!queued) continue;
+      if (!serverIsOnline(server)) continue;
       if (this.options.db.getActiveSolverJobForServer(server.id)) continue;
       if (isPipelineActive(server.pipeline)) continue;
       await this.start(queued.id);
@@ -304,6 +313,17 @@ export class SolverJobService {
     const active = this.options.db.getActiveSolverJobForServer(serverId, exceptJobId);
     if (active) {
       throw new Error(`Server already has active job ${active.datasetName}`);
+    }
+  }
+
+  private ensureJobServerOnline(job: SolverJob): void {
+    this.ensureServerOnline(this.requireServer(job.serverId));
+  }
+
+  private ensureServerOnline(server: ServerRow): void {
+    if (!serverIsOnline(server)) {
+      const status = server.latest?.connectionStatus ?? "unknown";
+      throw new Error(`Server ${server.id} is ${status}; job operations require an online server.`);
     }
   }
 
@@ -696,6 +716,10 @@ function completedStatusFromPipeline(pipeline: PipelineStatusSnapshot | null): S
 
 function pipelineBelongsToJob(pipeline: PipelineStatusSnapshot, job: SolverJob): boolean {
   return pipeline.repoId === job.repoId || pipeline.datasetName === job.datasetName;
+}
+
+function serverIsOnline(server: ServerRow): boolean {
+  return server.latest?.connectionStatus === "online";
 }
 
 function pipelineIsNewEnoughForJob(pipeline: PipelineStatusSnapshot, job: SolverJob): boolean {
