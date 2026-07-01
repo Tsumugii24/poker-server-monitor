@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import {
   DEFAULT_SOLVER_JOB_SETTINGS,
   SOLVER_EXPORT_FORMATS,
+  SOLVER_SCENARIOS,
   SOLVER_UPLOAD_FORMATS,
   type SolverJob,
   type SolverJobCreateRequest,
@@ -89,8 +90,20 @@ export class SolverJobService {
     }
 
     const now = new Date().toISOString();
+    const jobId = randomUUID();
+    const remoteRangePath = jobScopedRemoteRangePath(jobId, preview.datasetName);
+    const command = buildRunPipelineCommand({
+      solverRoot: effectiveSolverRoot(),
+      repoId: preview.repoId,
+      scenario: preview.scenario,
+      rangePath: remoteRangePath,
+      settings: preview.settings,
+      statusFilePath: preview.pipelineStatusFilePath,
+      hfToken: this.hfToken,
+      redactSecrets: true
+    });
     const job: SolverJob = {
-      id: randomUUID(),
+      id: jobId,
       serverId: preview.server.id,
       rangePath: preview.rangePath,
       rangeName: preview.rangeName,
@@ -98,13 +111,13 @@ export class SolverJobService {
       scenario: preview.scenario,
       repoId: preview.repoId,
       settings: preview.settings,
-      command: preview.commandPreview,
+      command,
       solverRangeText: preview.solverRangeText,
       status: "queued",
       queueMode: input.queueMode ?? "manual",
       confirmUnstudied: Boolean(input.confirmUnstudied),
       tmuxSession: preview.tmuxSession,
-      remoteRangePath: preview.remoteRangePath,
+      remoteRangePath,
       createdAt: now,
       updatedAt: now,
       startedAt: null,
@@ -130,10 +143,10 @@ export class SolverJobService {
     const executionCommand = this.buildExecutionCommand(job);
 
     this.options.db.updateSolverJob(job.id, { status: "deploying", lastError: null });
-    this.recordEvent(job.id, "deploying", `Deploying range file to ${job.remoteRangePath}.`, null);
+    this.recordEvent(job.id, "deploying", `Submitting selected range to ${job.remoteRangePath}.`, null);
     try {
       await this.executor.run(server, this.options.credentials!, buildDeployRangeCommand(job));
-      this.recordEvent(job.id, "deployed", "Range file deployed.", null);
+      this.recordEvent(job.id, "deployed", "Selected range submitted.", null);
       await this.executor.run(server, this.options.credentials!, buildTmuxStartCommand(job, effectiveSolverRoot(), executionCommand));
       const now = new Date().toISOString();
       this.recordEvent(job.id, "started", `Started tmux session ${job.tmuxSession}.`, job.command);
@@ -338,7 +351,7 @@ export class SolverJobService {
       solverRoot: effectiveSolverRoot(),
       repoId: job.repoId,
       scenario: job.scenario,
-      rangeFileName: `${job.datasetName}.txt`,
+      rangePath: job.remoteRangePath,
       settings: job.settings,
       statusFilePath: statusFileFromJob(job),
       hfToken: this.hfToken
@@ -376,18 +389,18 @@ export function buildSolverJobPreview({
 
   const file = readPreflopRangeFile(preflopRangesPath, input.rangePath);
   const settings = normalizeSolverJobSettings(input.settings);
-  const scenario = scenarioFromRangePath(input.rangePath);
+  const scenario = scenarioFromPreviewInput(input);
   const datasetName = datasetNameFromRangePath(input.rangePath, scenario);
   const repoId = `${repoNamespace}/${datasetName}`;
   const solverRangeText = solverRangeTextFromDocument(file.summary.data);
   const tmuxSession = server.tmuxSession?.trim() || "solver";
   const pipelineStatusFilePath = server.pipelineStatusFilePath?.trim() || defaultPipelineStatusFilePath;
-  const remoteRangePath = joinRemotePath(solverRoot, "ranges", scenario, `${datasetName}.txt`);
+  const remoteRangePath = jobScopedRemoteRangePath("<job-id>", datasetName);
   const commandPreview = buildRunPipelineCommand({
     solverRoot,
     repoId,
     scenario,
-    rangeFileName: `${datasetName}.txt`,
+    rangePath: remoteRangePath,
     settings,
     statusFilePath: pipelineStatusFilePath,
     hfToken,
@@ -470,14 +483,7 @@ export function datasetNameFromRangePath(rangePath: string, scenario: SolverScen
   }
   if (scenario.startsWith("sia-sod")) {
     const base = [byPrefix.get("sia"), byPrefix.get("sod")].filter(Boolean).join("-");
-    const suffix = scenario === "sia-sod"
-      ? ""
-      : scenario === "sia-sod-open2"
-        ? "-open2"
-        : scenario === "sia-sod-open2.5"
-          ? "-open2.5"
-          : "-open3";
-    return base ? `${base}${suffix}` : fallbackDatasetName(stem);
+    return base || fallbackDatasetName(stem);
   }
   if (scenario === "soa-sid") {
     const name = [byPrefix.get("soa"), byPrefix.get("sid")].filter(Boolean).join("-");
@@ -509,11 +515,20 @@ export function scenarioFromRangePath(rangePath: string): SolverScenario {
   return "sia-sod";
 }
 
+function scenarioFromPreviewInput(input: SolverJobPreviewRequest): SolverScenario {
+  if (input.scenario == null) return scenarioFromRangePath(input.rangePath);
+  if ((SOLVER_SCENARIOS as readonly string[]).includes(input.scenario)) return input.scenario;
+  throw new Error(`Unsupported solver scenario: ${input.scenario}`);
+}
+
 export function buildRunPipelineCommand({
   solverRoot,
   repoId,
   scenario,
+  rangePath,
   rangeFileName,
+  oopRange,
+  ipRange,
   settings,
   statusFilePath,
   hfToken,
@@ -522,7 +537,10 @@ export function buildRunPipelineCommand({
   solverRoot: string;
   repoId: string;
   scenario: SolverScenario;
-  rangeFileName: string;
+  rangePath?: string;
+  rangeFileName?: string;
+  oopRange?: string;
+  ipRange?: string;
   settings: SolverJobSettings;
   statusFilePath: string;
   hfToken?: string | null;
@@ -543,8 +561,19 @@ export function buildRunPipelineCommand({
     "--export-format",
     settings.exportFormat,
     "--status-file",
-    statusFilePath
+    statusFilePath,
+    "--scenario",
+    scenario
   ];
+  if (rangePath) {
+    args.push("--range-path", rangePath);
+  } else if (oopRange && ipRange) {
+    args.push("--oop-range", oopRange, "--ip-range", ipRange);
+  } else if (rangeFileName) {
+    args.push("--range-file", rangeFileName);
+  } else {
+    throw new Error("A range path, inline ranges, or range file name is required.");
+  }
   const environmentExports: string[] = [];
   if (settings.uploadEnabled) {
     const normalizedHfToken = hfToken?.trim();
@@ -565,13 +594,7 @@ export function buildRunPipelineCommand({
       String(settings.uploadAttemptTimeoutSeconds)
     );
   } else {
-    args.push(
-      "--no-upload",
-      "--scenario",
-      scenario,
-      "--range-file",
-      rangeFileName
-    );
+    args.push("--no-upload");
   }
   if (settings.stallTimeoutSeconds != null) args.push("--stall-timeout", String(settings.stallTimeoutSeconds));
   if (settings.noOutputTimeoutSeconds != null) args.push("--no-output-timeout", String(settings.noOutputTimeoutSeconds));
@@ -589,7 +612,6 @@ export function buildDeployRangeCommand(job: SolverJob): string {
     `RANGE_PATH=${shellQuoteRemotePath(job.remoteRangePath)}`,
     `TMP_PATH=${shellQuoteRemotePath(tmpPath)}`,
     `mkdir -p ${shellQuoteRemotePath(dirnameRemote(job.remoteRangePath))}`,
-    `if [ -f "$RANGE_PATH" ]; then cp "$RANGE_PATH" "$RANGE_PATH.bak.$(date +%Y%m%d%H%M%S)"; fi`,
     `cat > "$TMP_PATH" <<'SOLVER_RANGE_EOF'`,
     job.solverRangeText.trimEnd(),
     "SOLVER_RANGE_EOF",
@@ -802,6 +824,10 @@ function joinRemotePath(...parts: string[]): string {
 
 function effectiveSolverRoot(): string {
   return DEFAULT_SOLVER_ROOT;
+}
+
+function jobScopedRemoteRangePath(jobId: string, datasetName: string): string {
+  return joinRemotePath(effectiveSolverRoot(), "job-ranges", jobId, `${datasetName}.txt`);
 }
 
 function dirnameRemote(remotePath: string): string {

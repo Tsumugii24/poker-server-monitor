@@ -27,7 +27,7 @@ describe("solver job helpers", () => {
 
     const openPath = "SOD/2.5bb/SIA-45 vs SOD-40.json";
     expect(scenarioFromRangePath(openPath)).toBe("sia-sod-open2.5");
-    expect(datasetNameFromRangePath(openPath, "sia-sod-open2.5")).toBe("sia-45-sod-40-open2.5");
+    expect(datasetNameFromRangePath(openPath, "sia-sod-open2.5")).toBe("sia-45-sod-40");
   });
 
   it("converts reviewed range JSON into solver range text", () => {
@@ -48,7 +48,7 @@ describe("solver job helpers", () => {
       solverRoot: "/srv/solver",
       repoId: "Tsumugii/3ia-4.2-3od-4.3",
       scenario: "3ia-3od",
-      rangeFileName: "3ia-4.2-3od-4.3.txt",
+      rangePath: "~/solver/job-ranges/job-1/3ia-4.2-3od-4.3.txt",
       statusFilePath: "~/run/status.json",
       settings: {
         ...DEFAULT_SOLVER_JOB_SETTINGS,
@@ -61,7 +61,8 @@ describe("solver job helpers", () => {
     expect(command).toContain("cd '/srv/solver'");
     expect(command).toContain("'--no-upload'");
     expect(command).toContain("'--scenario' '3ia-3od'");
-    expect(command).toContain("'--range-file' '3ia-4.2-3od-4.3.txt'");
+    expect(command).toContain("'--range-path' '~/solver/job-ranges/job-1/3ia-4.2-3od-4.3.txt'");
+    expect(command).not.toContain("'--range-file'");
     expect(command).not.toContain("'--repo-id'");
     expect(command).not.toContain("'--upload-format'");
     expect(command).not.toContain("'--upload-attempt-timeout'");
@@ -78,7 +79,7 @@ describe("solver job helpers", () => {
       solverRoot: "/srv/solver",
       repoId: "Tsumugii/3ia-4.2-3od-4.3",
       scenario: "3ia-3od",
-      rangeFileName: "3ia-4.2-3od-4.3.txt",
+      rangePath: "~/solver/job-ranges/job-1/3ia-4.2-3od-4.3.txt",
       statusFilePath: "~/run/status.json",
       settings: DEFAULT_SOLVER_JOB_SETTINGS,
       hfToken: "hf_test_token"
@@ -88,8 +89,31 @@ describe("solver job helpers", () => {
     expect(command).toContain("export https_proxy='http://127.0.0.1:7890'");
     expect(command).toContain("export HF_TOKEN='hf_test_token'");
     expect(command).toContain("'--repo-id' 'Tsumugii/3ia-4.2-3od-4.3'");
+    expect(command).toContain("'--scenario' '3ia-3od'");
+    expect(command).toContain("'--range-path' '~/solver/job-ranges/job-1/3ia-4.2-3od-4.3.txt'");
     expect(command).toContain("'--upload-format' 'parquet'");
     expect(command).not.toContain("'--no-upload'");
+  });
+
+  it("can build a run_pipeline command with inline OOP/IP ranges", () => {
+    const command = buildRunPipelineCommand({
+      solverRoot: "/srv/solver",
+      repoId: "Tsumugii/manual-range",
+      scenario: "sia-sod",
+      oopRange: "AA,AKs:0.500",
+      ipRange: "KK,AQs:0.250",
+      statusFilePath: "~/run/status.json",
+      settings: {
+        ...DEFAULT_SOLVER_JOB_SETTINGS,
+        uploadEnabled: false
+      }
+    });
+
+    expect(command).toContain("'--scenario' 'sia-sod'");
+    expect(command).toContain("'--oop-range' 'AA,AKs:0.500'");
+    expect(command).toContain("'--ip-range' 'KK,AQs:0.250'");
+    expect(command).not.toContain("'--range-path'");
+    expect(command).not.toContain("'--range-file'");
   });
 
   it("redacts HF token in display commands", () => {
@@ -97,7 +121,7 @@ describe("solver job helpers", () => {
       solverRoot: "/srv/solver",
       repoId: "Tsumugii/3ia-4.2-3od-4.3",
       scenario: "3ia-3od",
-      rangeFileName: "3ia-4.2-3od-4.3.txt",
+      rangePath: "~/solver/job-ranges/job-1/3ia-4.2-3od-4.3.txt",
       statusFilePath: "~/run/status.json",
       settings: DEFAULT_SOLVER_JOB_SETTINGS,
       hfToken: "hf_test_token",
@@ -113,7 +137,7 @@ describe("solver job helpers", () => {
       solverRoot: "/srv/solver",
       repoId: "Tsumugii/3ia-4.2-3od-4.3",
       scenario: "3ia-3od",
-      rangeFileName: "3ia-4.2-3od-4.3.txt",
+      rangePath: "~/solver/job-ranges/job-1/3ia-4.2-3od-4.3.txt",
       statusFilePath: "~/run/status.json",
       settings: DEFAULT_SOLVER_JOB_SETTINGS
     })).toThrow("HF_TOKEN is required");
@@ -161,12 +185,23 @@ describe("solver job API", () => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "server-monitor-jobs-"));
     preflopRangesPath = path.join(tempDir, "preflop-ranges");
     fs.mkdirSync(path.join(preflopRangesPath, "3OD-EP"), { recursive: true });
+    fs.mkdirSync(path.join(preflopRangesPath, "SOD", "2.5bb"), { recursive: true });
     fs.writeFileSync(
       path.join(preflopRangesPath, "3OD-EP", "3OD-4.3 vs 3IA-4.2.json"),
       JSON.stringify({
         player_names: { A: "3OD-4.3", B: "3IA-4.2" },
         player_positions: { A: "OOP", B: "IP" },
         learned: false,
+        A: { raise: "AA", call: "AKs:0.250" },
+        B: { raise: "KK:0.500", call: "KQs" }
+      })
+    );
+    fs.writeFileSync(
+      path.join(preflopRangesPath, "SOD", "2.5bb", "SIA-45 vs SOD-40.json"),
+      JSON.stringify({
+        player_names: { A: "SOD-40", B: "SIA-45" },
+        player_positions: { A: "OOP", B: "IP" },
+        learned: true,
         A: { raise: "AA", call: "AKs:0.250" },
         B: { raise: "KK:0.500", call: "KQs" }
       })
@@ -216,11 +251,13 @@ describe("solver job API", () => {
     expect(preview.status).toBe(200);
     expect(preview.body.repoId).toBe("Tsumugii/3ia-4.2-3od-4.3");
     expect(preview.body.scenario).toBe("3ia-3od");
-    expect(preview.body.remoteRangePath).toBe("~/solver/ranges/3ia-3od/3ia-4.2-3od-4.3.txt");
+    expect(preview.body.remoteRangePath).toBe("~/solver/job-ranges/<job-id>/3ia-4.2-3od-4.3.txt");
     expect(preview.body.requiresConfirmation).toBe(true);
     expect(preview.body.commandPreview).toContain("export HF_TOKEN=$HF_TOKEN");
     expect(preview.body.commandPreview).not.toContain("hf_test_token");
     expect(preview.body.commandPreview).toContain("export http_proxy='http://127.0.0.1:7890'");
+    expect(preview.body.commandPreview).toContain("'--scenario' '3ia-3od'");
+    expect(preview.body.commandPreview).toContain("'--range-path' '~/solver/job-ranges/<job-id>/3ia-4.2-3od-4.3.txt'");
 
     const noUploadPreview = await request(app)
       .post("/api/jobs/preview")
@@ -231,7 +268,7 @@ describe("solver job API", () => {
     expect(noUploadPreview.body.settings.estimateMemory).toBe(false);
     expect(noUploadPreview.body.commandPreview).toContain("'--no-upload'");
     expect(noUploadPreview.body.commandPreview).toContain("'--scenario' '3ia-3od'");
-    expect(noUploadPreview.body.commandPreview).toContain("'--range-file' '3ia-4.2-3od-4.3.txt'");
+    expect(noUploadPreview.body.commandPreview).toContain("'--range-path' '~/solver/job-ranges/<job-id>/3ia-4.2-3od-4.3.txt'");
     expect(noUploadPreview.body.commandPreview).not.toContain("'--repo-id'");
     expect(noUploadPreview.body.commandPreview).not.toContain("'--upload-format'");
     expect(noUploadPreview.body.commandPreview).not.toContain("'--upload-attempt-timeout'");
@@ -259,10 +296,15 @@ describe("solver job API", () => {
     expect(started.body.job.status).toBe("running");
     expect(commands).toHaveLength(2);
     expect(commands[0]).toContain("OOP_RANGE");
-    expect(commands[0]).toContain('RANGE_PATH="$HOME/solver/ranges/3ia-3od/3ia-4.2-3od-4.3.txt"');
+    expect(commands[0]).toContain(`RANGE_PATH="$HOME/solver/job-ranges/${created.body.job.id}/3ia-4.2-3od-4.3.txt"`);
+    expect(commands[0]).not.toContain(".bak.");
     expect(commands[1]).toContain('-c "$HOME/solver"');
     expect(commands[1]).toContain("tmux send-keys");
     expect(commands[1]).toContain("run_pipeline.py");
+    expect(commands[1]).toContain("--scenario");
+    expect(commands[1]).toContain("3ia-3od");
+    expect(commands[1]).toContain("--range-path");
+    expect(commands[1]).toContain(`job-ranges/${created.body.job.id}/3ia-4.2-3od-4.3.txt`);
     expect(commands[1]).toContain("hf_test_token");
 
     const list = await request(app).get("/api/jobs");
@@ -328,6 +370,46 @@ describe("solver job API", () => {
     expect(list.status).toBe(200);
     expect(list.body.jobs).toHaveLength(0);
     expect(list.body.events).toHaveLength(0);
+  });
+
+  it("keeps open-size scenario out of the dataset repo name while passing the scenario explicitly", async () => {
+    const solverJobService = new SolverJobService({
+      db,
+      preflopRangesPath,
+      credentials: { username: "root", password: "secret" },
+      defaultPipelineStatusFilePath: "~/run/solver_running_status.json",
+      repoNamespace: "Tsumugii",
+      hfToken: "hf_test_token"
+    });
+    const app = createApp({ db, refreshService, preflopRangesPath, solverJobService });
+
+    const preview = await request(app)
+      .post("/api/jobs/preview")
+      .send({ serverId: "solver-01", rangePath: "SOD/2.5bb/SIA-45 vs SOD-40.json" });
+
+    expect(preview.status).toBe(200);
+    expect(preview.body.datasetName).toBe("sia-45-sod-40");
+    expect(preview.body.repoId).toBe("Tsumugii/sia-45-sod-40");
+    expect(preview.body.scenario).toBe("sia-sod-open2.5");
+    expect(preview.body.remoteRangePath).toBe("~/solver/job-ranges/<job-id>/sia-45-sod-40.txt");
+    expect(preview.body.commandPreview).toContain("'--repo-id' 'Tsumugii/sia-45-sod-40'");
+    expect(preview.body.commandPreview).toContain("'--scenario' 'sia-sod-open2.5'");
+    expect(preview.body.commandPreview).toContain("'--range-path' '~/solver/job-ranges/<job-id>/sia-45-sod-40.txt'");
+
+    const overridden = await request(app)
+      .post("/api/jobs/preview")
+      .send({
+        serverId: "solver-01",
+        rangePath: "SOD/2.5bb/SIA-45 vs SOD-40.json",
+        scenario: "sia-sod-open3"
+      });
+
+    expect(overridden.status).toBe(200);
+    expect(overridden.body.datasetName).toBe("sia-45-sod-40");
+    expect(overridden.body.repoId).toBe("Tsumugii/sia-45-sod-40");
+    expect(overridden.body.scenario).toBe("sia-sod-open3");
+    expect(overridden.body.remoteRangePath).toBe("~/solver/job-ranges/<job-id>/sia-45-sod-40.txt");
+    expect(overridden.body.commandPreview).toContain("'--scenario' 'sia-sod-open3'");
   });
 
   it("reconciles an active job when server inventory reports the task is idle", async () => {

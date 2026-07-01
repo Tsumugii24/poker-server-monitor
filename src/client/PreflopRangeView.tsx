@@ -41,6 +41,7 @@ import {
 import {
   DEFAULT_SOLVER_JOB_SETTINGS,
   SOLVER_EXPORT_FORMATS,
+  SOLVER_SCENARIOS,
   SOLVER_UPLOAD_FORMATS,
   type SolverExportFormat,
   type SolverJob,
@@ -48,6 +49,7 @@ import {
   type SolverJobPreview,
   type SolverJobSettings,
   type SolverJobsResponse,
+  type SolverScenario,
   type SolverUploadFormat
 } from "../shared/solverJobs";
 import type {
@@ -131,6 +133,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
   const [selectedServerId, setSelectedServerId] = useState("");
   const [jobSettings, setJobSettings] = useState<SolverJobSettings>(DEFAULT_SOLVER_JOB_SETTINGS);
   const [jobPreview, setJobPreview] = useState<SolverJobPreview | null>(null);
+  const [selectedJobScenario, setSelectedJobScenario] = useState<SolverScenario | "">("");
   const [confirmUnstudied, setConfirmUnstudied] = useState(false);
   const [jobBusy, setJobBusy] = useState<string | null>(null);
   const [jobError, setJobError] = useState<string | null>(null);
@@ -205,6 +208,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
 
   useEffect(() => {
     setJobPreview(null);
+    setSelectedJobScenario("");
     setConfirmUnstudied(false);
   }, [selectedPath?.path]);
 
@@ -550,7 +554,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
     }
   };
 
-  const previewJob = async () => {
+  const previewJob = async (scenarioOverride = selectedJobScenario) => {
     if (!selectedRangePathForJob || !selectedServerId) return;
     setJobBusy("preview");
     setJobError(null);
@@ -561,6 +565,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
         body: JSON.stringify({
           serverId: selectedServerId,
           rangePath: selectedRangePathForJob,
+          scenario: scenarioOverride || undefined,
           settings: jobSettings,
           confirmUnstudied
         })
@@ -570,6 +575,14 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
       setJobError(caught instanceof Error ? caught.message : String(caught));
     } finally {
       setJobBusy(null);
+    }
+  };
+
+  const changeJobScenario = (scenario: SolverScenario | "") => {
+    setSelectedJobScenario(scenario);
+    setJobPreview(null);
+    if (selectedRangePathForJob && selectedServerId) {
+      void previewJob(scenario);
     }
   };
 
@@ -589,6 +602,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
         body: JSON.stringify({
           serverId: selectedServerId,
           rangePath: selectedRangePathForJob,
+          scenario: selectedJobScenario || undefined,
           settings: jobSettings,
           confirmUnstudied,
           queueMode
@@ -1068,6 +1082,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
           selectedRangeLearned={Boolean(draft?.learned)}
           settings={jobSettings}
           preview={jobPreview}
+          selectedScenario={selectedJobScenario}
           confirmUnstudied={confirmUnstudied}
           busy={jobBusy}
           error={jobError}
@@ -1084,6 +1099,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
             setConfirmUnstudied(checked);
             setJobPreview(null);
           }}
+          onScenarioChange={changeJobScenario}
           onPreview={() => void previewJob()}
           onStartNow={() => void createSolverJob("manual", true)}
           onQueueNext={() => void createSolverJob("queue_next", false)}
@@ -1220,12 +1236,14 @@ function SolverJobPanel({
   selectedRangeLearned,
   settings,
   preview,
+  selectedScenario,
   confirmUnstudied,
   busy,
   error,
   onRefresh,
   onServerChange,
   onSettingsChange,
+  onScenarioChange,
   onConfirmUnstudiedChange,
   onPreview,
   onStartNow,
@@ -1241,12 +1259,14 @@ function SolverJobPanel({
   selectedRangeLearned: boolean;
   settings: SolverJobSettings;
   preview: SolverJobPreview | null;
+  selectedScenario: SolverScenario | "";
   confirmUnstudied: boolean;
   busy: string | null;
   error: string | null;
   onRefresh: () => void;
   onServerChange: (serverId: string) => void;
   onSettingsChange: (patch: Partial<SolverJobSettings>) => void;
+  onScenarioChange: (scenario: SolverScenario | "") => void;
   onConfirmUnstudiedChange: (checked: boolean) => void;
   onPreview: () => void;
   onStartNow: () => void;
@@ -1467,14 +1487,25 @@ function SolverJobPanel({
                 </div>
                 <div>
                   <dt>Scenario</dt>
-                  <dd>{preview.scenario}</dd>
+                  <dd className="solver-job-scenario-cell">
+                    <select
+                      value={selectedScenario}
+                      onChange={(event) => onScenarioChange(event.target.value as SolverScenario | "")}
+                      disabled={busy != null}
+                    >
+                      <option value="">Auto: {preview.scenario}</option>
+                      {SOLVER_SCENARIOS.map((scenario) => (
+                        <option key={scenario} value={scenario}>{scenario}</option>
+                      ))}
+                    </select>
+                  </dd>
                 </div>
                 <div>
                   <dt>Dataset</dt>
                   <dd>{preview.datasetName}</dd>
                 </div>
                 <div>
-                  <dt>Remote Range</dt>
+                  <dt>Submitted Range</dt>
                   <dd>{preview.remoteRangePath}</dd>
                 </div>
               </dl>

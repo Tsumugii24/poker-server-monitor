@@ -65,6 +65,7 @@ export const DEFAULT_SOLVER_JOB_SETTINGS: SolverJobSettings = {
 export type SolverJobPreviewRequest = {
   serverId: string;
   rangePath: string;
+  scenario?: SolverScenario;
   settings?: Partial<SolverJobSettings>;
   confirmUnstudied?: boolean;
 };

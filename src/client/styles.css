@@ -4739,6 +4739,29 @@ td .port-value {
   white-space: nowrap;
 }
 
+.solver-job-preview dd.solver-job-scenario-cell {
+  overflow: visible;
+  white-space: normal;
+}
+
+.solver-job-preview select {
+  width: 100%;
+  min-height: 32px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 5px 8px;
+  color: var(--text-primary);
+  background: var(--bg-base);
+  font: inherit;
+  font-size: 12px;
+  outline: none;
+}
+
+.solver-job-preview select:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-subtle);
+}
+
 .solver-job-preview pre {
   max-height: 120px;
   overflow: auto;

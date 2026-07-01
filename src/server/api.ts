@@ -50,7 +50,12 @@ import {
   type UploadedPreflopRangeFile
 } from "./preflopRangeStore";
 import { SolverJobService } from "./solverJobService";
-import { SOLVER_JOB_QUEUE_MODES, type SolverJobCreateRequest, type SolverJobPreviewRequest } from "../shared/solverJobs";
+import {
+  SOLVER_JOB_QUEUE_MODES,
+  SOLVER_SCENARIOS,
+  type SolverJobCreateRequest,
+  type SolverJobPreviewRequest
+} from "../shared/solverJobs";
 
 export type AppDependencies = {
   db: MonitorDatabase;
@@ -1140,6 +1145,15 @@ function isSolverJobPreviewRequest(value: unknown): value is SolverJobPreviewReq
   if (!isRecord(value)) return false;
   if (typeof value.serverId !== "string" || value.serverId.trim() === "") return false;
   if (typeof value.rangePath !== "string" || value.rangePath.trim() === "") return false;
+  if (
+    value.scenario != null &&
+    (
+      typeof value.scenario !== "string" ||
+      !(SOLVER_SCENARIOS as readonly string[]).includes(value.scenario)
+    )
+  ) {
+    return false;
+  }
   if (value.settings != null && !isRecord(value.settings)) return false;
   if (value.confirmUnstudied != null && typeof value.confirmUnstudied !== "boolean") return false;
   return true;
