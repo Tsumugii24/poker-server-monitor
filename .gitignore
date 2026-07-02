@@ -6,6 +6,8 @@ dist/
 build/
 coverage/
 *.log
+__pycache__/
+*.pyc
 .superpowers/
 .playwright-mcp/
 data/*.sqlite
@@ -19,6 +21,7 @@ data/*.db-*
 /config/solver-scenarios.json
 .range_status.json
 .range_progress.json
+hf_dataset_progress.md
 
 tmp/
 temp/
