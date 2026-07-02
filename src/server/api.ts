@@ -80,6 +80,7 @@ export type AppDependencies = {
   hfToken?: string | null;
   hfProxyUrl?: string | null;
   solverHfProxyUrl?: string | null;
+  sshUsername?: string | null;
   defaultRefreshIntervalMs?: number;
   sendTestAlert?: (message: string, roomId: string) => Promise<void> | void;
   startAlertConnector?: () => Promise<void> | void;
@@ -117,6 +118,7 @@ export function createApp({
   hfToken = null,
   hfProxyUrl = null,
   solverHfProxyUrl = null,
+  sshUsername = null,
   defaultRefreshIntervalMs = 3_600_000,
   sendTestAlert,
   startAlertConnector,
@@ -154,6 +156,7 @@ export function createApp({
     const body: OverviewResponse = {
       generatedAt: new Date().toISOString(),
       refresh: refreshService.getState(),
+      sshUsername,
       summary,
       description: describeOverview(summary),
       servers,

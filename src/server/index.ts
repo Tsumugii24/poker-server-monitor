@@ -89,6 +89,7 @@ async function main(): Promise<void> {
     hfToken: config.hfToken,
     hfProxyUrl: config.hfProxyUrl,
     solverHfProxyUrl: config.solverHfProxyUrl,
+    sshUsername: config.ssh.username,
     defaultRefreshIntervalMs: config.refreshIntervalMs,
     sendTestAlert: sendWeChatTarget,
     startAlertConnector: () => legacyNotifier.ensureStarted(),

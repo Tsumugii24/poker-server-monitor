@@ -5,6 +5,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Clock,
+  Copy,
   Cpu,
   Gauge,
   Grid3X3,
@@ -1035,6 +1036,7 @@ function OverviewView({
         <ServerTable
           servers={pagedServers}
           idSortDirection={idSortDirection}
+          sshUsername={overview.sshUsername ?? null}
           onToggleIdSort={toggleIdSort}
           onOpenServer={onOpenServer}
           onUpdateServerNote={onUpdateServerNote}
@@ -1123,12 +1125,14 @@ function MetricCard({ label, value, subtext }: { label: string; value: string; s
 function ServerTable({
   servers,
   idSortDirection,
+  sshUsername,
   onToggleIdSort,
   onOpenServer,
   onUpdateServerNote
 }: {
   servers: ServerRow[];
   idSortDirection: SortDirection;
+  sshUsername: string | null;
   onToggleIdSort: () => void;
   onOpenServer: (serverId: string) => void;
   onUpdateServerNote: (serverId: string, note: string) => Promise<void>;
@@ -1136,6 +1140,7 @@ function ServerTable({
   const [editingNoteId, setEditingNoteId] = useState<string | null>(null);
   const [draftNote, setDraftNote] = useState("");
   const [savingId, setSavingId] = useState<string | null>(null);
+  const [copiedSshServerId, setCopiedSshServerId] = useState<string | null>(null);
 
   const startEditingNote = (server: ServerRow) => {
     setEditingNoteId(server.id);
@@ -1160,6 +1165,20 @@ function ServerTable({
       cancelEditingNote();
     } finally {
       setSavingId(null);
+    }
+  };
+
+  const copySshCommand = async (server: ServerRow) => {
+    if (!sshUsername) return;
+
+    try {
+      await writeTextToClipboard(formatSshCommand(server, sshUsername));
+      setCopiedSshServerId(server.id);
+      window.setTimeout(() => {
+        setCopiedSshServerId((current) => current === server.id ? null : current);
+      }, 1500);
+    } catch (error) {
+      console.error("Failed to copy SSH command", error);
     }
   };
 
@@ -1190,12 +1209,13 @@ function ServerTable({
             <th>Load</th>
             <th>Uptime</th>
             <th>Note</th>
+            <th aria-label="SSH">SSH</th>
           </tr>
         </thead>
         <tbody>
           {servers.length === 0 ? (
             <tr className="empty-row">
-              <td colSpan={12}>No servers configured.</td>
+              <td colSpan={13}>No servers configured.</td>
             </tr>
           ) : null}
           {servers.map((server) => (
@@ -1273,6 +1293,24 @@ function ServerTable({
                     {server.note}
                   </button>
                 )}
+              </td>
+              <td className="ssh-copy-cell">
+                <button
+                  className={
+                    copiedSshServerId === server.id
+                      ? "inventory-action-button ssh-copy-button copied"
+                      : "inventory-action-button ssh-copy-button"
+                  }
+                  aria-label={`Copy SSH command for ${server.id}`}
+                  title={sshUsername ? formatSshCommand(server, sshUsername) : "SSH username is not configured"}
+                  disabled={!sshUsername}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    void copySshCommand(server);
+                  }}
+                >
+                  {copiedSshServerId === server.id ? <Check size={15} /> : <Copy size={15} />}
+                </button>
               </td>
             </tr>
           ))}
@@ -2076,6 +2114,27 @@ async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, init);
   if (!response.ok) throw new Error(`Request failed: ${response.status}`);
   return (await response.json()) as T;
+}
+
+function formatSshCommand(server: ServerRow, username: string): string {
+  return `ssh -p ${server.port} ${username}@${server.host}`;
+}
+
+async function writeTextToClipboard(text: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  document.body.appendChild(textarea);
+  textarea.select();
+  document.execCommand("copy");
+  textarea.remove();
 }
 
 function routeFromLocation(): Route {

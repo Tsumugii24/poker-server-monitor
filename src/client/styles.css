@@ -587,7 +587,7 @@ h1, h2, h3, p {
 
 table {
   width: 100%;
-  min-width: 980px;
+  min-width: 1040px;
   border-collapse: collapse;
 }
 
@@ -854,6 +854,16 @@ td .port-value {
   border-color: var(--accent);
   color: var(--accent);
   background: var(--accent-subtle);
+}
+
+.ssh-copy-cell {
+  width: 48px;
+}
+
+.ssh-copy-button.copied {
+  border-color: var(--green-text);
+  color: var(--green-text);
+  background: color-mix(in srgb, var(--green-text) 12%, transparent);
 }
 
 .inventory-action-button.danger,

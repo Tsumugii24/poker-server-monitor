@@ -275,6 +275,7 @@ export type OverallHistoryPoint = {
 export type OverviewResponse = {
   generatedAt: string;
   refresh: RefreshState;
+  sshUsername?: string | null;
   summary: OverviewSummary;
   description: string;
   servers: ServerRow[];

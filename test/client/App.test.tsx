@@ -8,6 +8,7 @@ import { defaultAlertSettingsFixture, enabledRecipientSettings } from "../fixtur
 const overview = {
   generatedAt: "2026-05-12T00:00:00.000Z",
   refresh: { active: false, nextRefreshAt: "2026-05-12T01:00:00.000Z", lastRun: null },
+  sshUsername: "jane",
   summary: {
     total: 2,
     online: 2,
@@ -451,6 +452,28 @@ describe("App", () => {
     expect(await screen.findByText("sia-45-sod-40")).toHaveClass("inventory-display-name");
     expect(screen.getByText("3ia-16.5-3od-13")).toBeInTheDocument();
     expect(document.querySelectorAll(".server-dataset-name.has-dataset")).toHaveLength(2);
+  });
+
+  it("copies the SSH login command from the inventory table", async () => {
+    const writeText = vi.fn(async () => undefined);
+    const originalClipboard = navigator.clipboard;
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText }
+    });
+
+    try {
+      render(<App />);
+
+      await userEvent.click(await screen.findByRole("button", { name: "Copy SSH command for prod-01" }));
+
+      expect(writeText).toHaveBeenCalledWith("ssh -p 22 jane@10.0.0.1");
+    } finally {
+      Object.defineProperty(navigator, "clipboard", {
+        configurable: true,
+        value: originalClipboard
+      });
+    }
   });
 
   it("paginates search results after filtering and id sorting", async () => {
