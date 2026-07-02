@@ -7,6 +7,7 @@ import { loadAlertSettings, loadRuntimeConfig, loadServerInventory } from "./con
 import { MonitorDatabase } from "./db";
 import { RefreshService } from "./refreshService";
 import { SolverJobService } from "./solverJobService";
+import { loadSolverScenarioLibrary } from "./scenarioLibraryStore";
 import { WeChatAccountManager } from "./wechatAccountManager";
 import { WeChatNotifier } from "./wechatNotifier";
 
@@ -64,7 +65,8 @@ async function main(): Promise<void> {
     credentials: config.ssh,
     defaultPipelineStatusFilePath: config.pipelineStatusFilePath,
     repoNamespace: config.solverJobRepoNamespace,
-    hfToken: config.hfToken
+    hfToken: config.hfToken,
+    getScenarioLibrary: () => loadSolverScenarioLibrary(config.solverScenarioLibraryPath).scenarios
   });
   windowlessInterval(() => {
     void solverJobService.reconcileAndStartQueuedJobs().catch((error: unknown) => {
@@ -78,7 +80,10 @@ async function main(): Promise<void> {
     inventoryPath: config.inventoryPath,
     alertSettingsPath: config.alertSettingsPath,
     preflopRangesPath: config.preflopRangesPath,
+    solverScenarioLibraryPath: config.solverScenarioLibraryPath,
     solverJobService,
+    solverJobRepoNamespace: config.solverJobRepoNamespace,
+    hfToken: config.hfToken,
     defaultRefreshIntervalMs: config.refreshIntervalMs,
     sendTestAlert: sendWeChatTarget,
     startAlertConnector: () => legacyNotifier.ensureStarted(),

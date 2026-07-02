@@ -16,6 +16,9 @@ data/*.db-*
 
 /config/servers.json
 /config/alerts.json
+/config/solver-scenarios.json
+.range_status.json
+.range_progress.json
 
 tmp/
 temp/

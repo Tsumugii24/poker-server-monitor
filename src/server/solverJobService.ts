@@ -2,16 +2,19 @@ import { randomUUID } from "node:crypto";
 import {
   DEFAULT_SOLVER_JOB_SETTINGS,
   SOLVER_EXPORT_FORMATS,
-  SOLVER_SCENARIOS,
+  DEFAULT_SOLVER_SCENARIO_LIBRARY,
   SOLVER_UPLOAD_FORMATS,
   type SolverJob,
   type SolverJobCreateRequest,
+  type SolverDatasetRepoEnsureRequest,
+  type SolverDatasetRepoStatus,
   type SolverJobEvent,
   type SolverJobPreview,
   type SolverJobPreviewRequest,
   type SolverJobSettings,
   type SolverJobStatus,
-  type SolverScenario
+  type SolverScenario,
+  type SolverScenarioLibraryItem
 } from "../shared/solverJobs";
 import type { PipelineStatusSnapshot, ServerRow } from "../shared/types";
 import {
@@ -21,10 +24,16 @@ import {
   type PreflopPlayerKey,
   type PreflopRangeDocument
 } from "../shared/preflopRange";
+import {
+  datasetNameFromRangePath,
+  scenarioFromRangePath
+} from "../shared/preflopDataset";
 import type { MonitorDatabase } from "./db";
 import { readPreflopRangeFile } from "./preflopRangeStore";
 import type { SshCredentials, SshExecutor } from "./sshCollector";
 import { Ssh2Executor } from "./sshCollector";
+
+export { datasetNameFromRangePath, scenarioFromRangePath } from "../shared/preflopDataset";
 
 type SolverJobServiceOptions = {
   db: MonitorDatabase;
@@ -34,24 +43,28 @@ type SolverJobServiceOptions = {
   defaultPipelineStatusFilePath?: string;
   repoNamespace?: string;
   hfToken?: string | null;
+  getScenarioLibrary?: () => SolverScenarioLibraryItem[];
 };
 
 const ACTIVE_JOB_STATUSES = new Set<SolverJobStatus>(["deploying", "running", "stopping"]);
 const DEFAULT_SOLVER_ROOT = "~/solver";
 const HF_UPLOAD_PROXY = "http://127.0.0.1:7890";
 const ACTIVE_JOB_RECONCILE_GRACE_MS = 15_000;
+const HUGGING_FACE_ORIGIN = "https://huggingface.co";
 
 export class SolverJobService {
   private readonly executor: SshExecutor;
   private readonly repoNamespace: string;
   private readonly defaultPipelineStatusFilePath: string;
   private readonly hfToken: string | null;
+  private readonly getScenarioLibrary: () => SolverScenarioLibraryItem[];
 
   constructor(private readonly options: SolverJobServiceOptions) {
     this.executor = options.executor ?? new Ssh2Executor();
     this.repoNamespace = (options.repoNamespace ?? "Tsumugii").trim() || "Tsumugii";
     this.defaultPipelineStatusFilePath = options.defaultPipelineStatusFilePath ?? "~/run/solver_running_status.json";
     this.hfToken = options.hfToken?.trim() || null;
+    this.getScenarioLibrary = options.getScenarioLibrary ?? (() => DEFAULT_SOLVER_SCENARIO_LIBRARY);
   }
 
   listJobs() {
@@ -78,15 +91,59 @@ export class SolverJobService {
       preflopRangesPath: this.options.preflopRangesPath,
       defaultPipelineStatusFilePath: this.defaultPipelineStatusFilePath,
       repoNamespace: this.repoNamespace,
-      hfToken: this.hfToken
+      hfToken: this.hfToken,
+      scenarioLibrary: this.getScenarioLibrary()
     });
   }
 
-  create(input: SolverJobCreateRequest): SolverJob {
+  async checkDatasetRepo(input: SolverJobPreviewRequest): Promise<SolverDatasetRepoStatus> {
+    const preview = this.preview(input);
+    const exists = await huggingFaceDatasetRepoExists(preview.repoId, this.hfToken);
+    return {
+      preview,
+      datasetName: preview.datasetName,
+      repoId: preview.repoId,
+      url: huggingFaceDatasetUrl(preview.repoId),
+      exists,
+      created: false,
+      requiresConfirmation: !exists,
+      tokenConfigured: Boolean(this.hfToken),
+      message: exists ? "Dataset repo exists." : "Dataset repo does not exist."
+    };
+  }
+
+  async ensureDatasetRepo(input: SolverDatasetRepoEnsureRequest): Promise<SolverDatasetRepoStatus> {
+    const status = await this.checkDatasetRepo(input);
+    if (status.exists) return status;
+    if (!input.confirmDatasetName) {
+      return {
+        ...status,
+        requiresConfirmation: true,
+        message: "Dataset repo is missing. Confirm the dataset name before creating it."
+      };
+    }
+    if (!this.hfToken) {
+      throw new Error("HF_TOKEN is required to create a missing Hugging Face dataset repo.");
+    }
+    await createHuggingFaceDatasetRepo(status.repoId, this.hfToken);
+    return {
+      ...status,
+      exists: true,
+      created: true,
+      requiresConfirmation: false,
+      message: "Dataset repo created."
+    };
+  }
+
+  async create(input: SolverJobCreateRequest): Promise<SolverJob> {
     const preview = this.preview(input);
     this.ensureServerOnline(preview.server);
-    if (preview.requiresConfirmation && !input.confirmUnstudied) {
-      throw new Error("Range is not marked studied; confirmation is required before submitting.");
+    if (!preview.learned) {
+      throw new Error("Range must be approved before submitting to solver jobs.");
+    }
+    const datasetRepo = await this.ensureDatasetRepo(input);
+    if (!datasetRepo.exists) {
+      throw new Error("Dataset repo is missing. Confirm the dataset name and create the repo before submitting this job.");
     }
 
     const now = new Date().toISOString();
@@ -368,6 +425,7 @@ export class SolverJobService {
       createdAt: new Date().toISOString()
     });
   }
+
 }
 
 export function buildSolverJobPreview({
@@ -376,7 +434,8 @@ export function buildSolverJobPreview({
   preflopRangesPath,
   defaultPipelineStatusFilePath,
   repoNamespace,
-  hfToken
+  hfToken,
+  scenarioLibrary = DEFAULT_SOLVER_SCENARIO_LIBRARY
 }: {
   input: SolverJobPreviewRequest;
   server: ServerRow;
@@ -384,13 +443,14 @@ export function buildSolverJobPreview({
   defaultPipelineStatusFilePath: string;
   repoNamespace: string;
   hfToken?: string | null;
+  scenarioLibrary?: SolverScenarioLibraryItem[];
 }): SolverJobPreview {
   const solverRoot = effectiveSolverRoot();
 
   const file = readPreflopRangeFile(preflopRangesPath, input.rangePath);
   const settings = normalizeSolverJobSettings(input.settings);
-  const scenario = scenarioFromPreviewInput(input);
-  const datasetName = datasetNameFromRangePath(input.rangePath, scenario);
+  const scenario = scenarioFromPreviewInput(input, scenarioLibrary);
+  const datasetName = normalizeDatasetName(input.datasetName) ?? datasetNameFromRangePath(input.rangePath, scenario);
   const repoId = `${repoNamespace}/${datasetName}`;
   const solverRangeText = solverRangeTextFromDocument(file.summary.data);
   const tmuxSession = server.tmuxSession?.trim() || "solver";
@@ -409,7 +469,7 @@ export function buildSolverJobPreview({
   const warnings: string[] = [];
   const learned = file.summary.data.learned;
   if (!learned) {
-    warnings.push("Range is not marked studied.");
+    warnings.push("Range must be approved before solver job submission.");
   }
 
   return {
@@ -427,7 +487,7 @@ export function buildSolverJobPreview({
     pipelineStatusFilePath,
     settings,
     warnings,
-    requiresConfirmation: !learned && !input.confirmUnstudied
+    requiresConfirmation: !learned
   };
 }
 
@@ -469,56 +529,110 @@ export function solverRangeTextFromDocument(document: PreflopRangeDocument): str
   ].join("\n");
 }
 
-export function datasetNameFromRangePath(rangePath: string, scenario: SolverScenario): string {
-  const stem = (rangePath.split("/").at(-1) ?? rangePath)
-    .replace(/\.(json|range|txt)$/i, "")
-    .replace(/\s+\d+$/g, "");
-  const tokens = [...stem.matchAll(/\b(3ia|3od|sia|sod|soa|sid)[-\s_]*(\d+(?:\.\d+)?)/gi)]
-    .map((match) => `${match[1]!.toLowerCase()}-${trimNumericLabel(match[2]!)}`);
-  const byPrefix = new Map(tokens.map((token) => [token.split("-")[0], token]));
-
-  if (scenario === "3ia-3od") {
-    const name = [byPrefix.get("3ia"), byPrefix.get("3od")].filter(Boolean).join("-");
-    return name || fallbackDatasetName(stem);
+function scenarioFromPreviewInput(
+  input: SolverJobPreviewRequest,
+  scenarioLibrary: SolverScenarioLibraryItem[]
+): SolverScenario {
+  const scenarioIds = new Set(scenarioLibrary.map((scenario) => scenario.id));
+  if (input.scenario == null) {
+    const inferred = scenarioFromRangePath(input.rangePath);
+    if (scenarioIds.has(inferred)) return inferred;
+    throw new Error(`Unsupported solver scenario: ${inferred}`);
   }
-  if (scenario.startsWith("sia-sod")) {
-    const base = [byPrefix.get("sia"), byPrefix.get("sod")].filter(Boolean).join("-");
-    return base || fallbackDatasetName(stem);
-  }
-  if (scenario === "soa-sid") {
-    const name = [byPrefix.get("soa"), byPrefix.get("sid")].filter(Boolean).join("-");
-    return name || fallbackDatasetName(stem);
-  }
-
-  return fallbackDatasetName(stem);
-}
-
-function fallbackDatasetName(stem: string): string {
-  const fallback = stem.toLowerCase()
-    .replace(/\bvs\b/g, "-")
-    .replace(/[^a-z0-9.]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .replace(/-+/g, "-");
-  return fallback;
-}
-
-export function scenarioFromRangePath(rangePath: string): SolverScenario {
-  const normalized = rangePath.toLowerCase();
-  if (normalized.includes("3ia") || normalized.includes("3od")) return "3ia-3od";
-  if (normalized.includes("soa") || normalized.includes("sid")) return "soa-sid";
-  if (normalized.includes("sod/2.5bb")) return "sia-sod-open2.5";
-  if (normalized.includes("sod/2bb")) return "sia-sod-open2";
-  if (normalized.includes("sod/3bb")) return "sia-sod-open3";
-  if (normalized.includes("open2.5")) return "sia-sod-open2.5";
-  if (normalized.includes("open2")) return "sia-sod-open2";
-  if (normalized.includes("open3")) return "sia-sod-open3";
-  return "sia-sod";
-}
-
-function scenarioFromPreviewInput(input: SolverJobPreviewRequest): SolverScenario {
-  if (input.scenario == null) return scenarioFromRangePath(input.rangePath);
-  if ((SOLVER_SCENARIOS as readonly string[]).includes(input.scenario)) return input.scenario;
+  if (scenarioIds.has(input.scenario)) return input.scenario;
   throw new Error(`Unsupported solver scenario: ${input.scenario}`);
+}
+
+function normalizeDatasetName(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim();
+  if (!normalized) return null;
+  if (
+    normalized.length > 96 ||
+    normalized.startsWith(".") ||
+    normalized.endsWith(".") ||
+    normalized.startsWith("-") ||
+    normalized.endsWith("-") ||
+    normalized.includes("..") ||
+    normalized.includes("--") ||
+    !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(normalized)
+  ) {
+    throw new Error("Dataset name must use letters, numbers, '.', '_' or '-' and cannot start/end with '.' or '-'.");
+  }
+  return normalized;
+}
+
+async function huggingFaceDatasetRepoExists(repoId: string, hfToken: string | null): Promise<boolean> {
+  const response = await fetch(`${HUGGING_FACE_ORIGIN}/api/datasets/${repoIdPath(repoId)}`, {
+    headers: huggingFaceHeaders(hfToken),
+    signal: AbortSignal.timeout(10_000)
+  });
+  if (response.status === 404) return false;
+  if (response.ok) return true;
+  throw new Error(`Hugging Face dataset repo check failed for ${repoId}: ${await huggingFaceErrorMessage(response)}`);
+}
+
+async function createHuggingFaceDatasetRepo(repoId: string, hfToken: string): Promise<void> {
+  const { namespace, name } = splitRepoId(repoId);
+  const response = await fetch(`${HUGGING_FACE_ORIGIN}/api/repos/create`, {
+    method: "POST",
+    headers: {
+      ...huggingFaceHeaders(hfToken),
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      name,
+      organization: namespace,
+      type: "dataset",
+      private: false
+    }),
+    signal: AbortSignal.timeout(15_000)
+  });
+  if (response.ok || response.status === 409) return;
+  if (response.status === 400 && await huggingFaceDatasetRepoExists(repoId, hfToken)) return;
+  throw new Error(`Hugging Face dataset repo creation failed for ${repoId}: ${await huggingFaceErrorMessage(response)}`);
+}
+
+function huggingFaceDatasetUrl(repoId: string): string {
+  return `${HUGGING_FACE_ORIGIN}/datasets/${repoId}`;
+}
+
+function splitRepoId(repoId: string): { namespace: string; name: string } {
+  const [namespace, ...rest] = repoId.split("/");
+  const name = rest.join("/");
+  if (!namespace || !name || name.includes("/")) {
+    throw new Error(`Invalid Hugging Face repo id: ${repoId}`);
+  }
+  return { namespace, name };
+}
+
+function repoIdPath(repoId: string): string {
+  return repoId.split("/").map((part) => encodeURIComponent(part)).join("/");
+}
+
+function huggingFaceHeaders(hfToken: string | null): Record<string, string> {
+  const token = hfToken?.trim();
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+async function huggingFaceErrorMessage(response: Response): Promise<string> {
+  const fallback = `${response.status} ${response.statusText}`;
+  try {
+    const text = await response.text();
+    if (!text.trim()) return fallback;
+    try {
+      const parsed = JSON.parse(text) as unknown;
+      if (typeof parsed === "object" && parsed !== null && "error" in parsed) {
+        const error = (parsed as { error?: unknown }).error;
+        if (typeof error === "string") return `${fallback} - ${error}`;
+      }
+    } catch {
+      // Use raw text below.
+    }
+    return `${fallback} - ${text.slice(0, 300)}`;
+  } catch {
+    return fallback;
+  }
 }
 
 export function buildRunPipelineCommand({
@@ -809,10 +923,6 @@ function nullablePositiveInteger(value: unknown): number | null {
   if (value == null || value === "") return null;
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
-}
-
-function trimNumericLabel(value: string): string {
-  return value.replace(/\.0$/, "");
 }
 
 function joinRemotePath(...parts: string[]): string {

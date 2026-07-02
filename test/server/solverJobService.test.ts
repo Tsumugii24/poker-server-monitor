@@ -17,6 +17,7 @@ import {
   solverRangeTextFromDocument,
   SolverJobService
 } from "../../src/server/solverJobService";
+import { loadSolverScenarioLibrary } from "../../src/server/scenarioLibraryStore";
 import type { SshExecutor } from "../../src/server/sshCollector";
 
 describe("solver job helpers", () => {
@@ -163,6 +164,7 @@ describe("solver job helpers", () => {
 describe("solver job API", () => {
   let tempDir: string;
   let preflopRangesPath: string;
+  let scenarioLibraryPath: string;
   let db: MonitorDatabase;
   let refreshService: RefreshService;
   let commands: string[];
@@ -184,6 +186,7 @@ describe("solver job API", () => {
   beforeEach(async () => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "server-monitor-jobs-"));
     preflopRangesPath = path.join(tempDir, "preflop-ranges");
+    scenarioLibraryPath = path.join(tempDir, "solver-scenarios.json");
     fs.mkdirSync(path.join(preflopRangesPath, "3OD-EP"), { recursive: true });
     fs.mkdirSync(path.join(preflopRangesPath, "SOD", "2.5bb"), { recursive: true });
     fs.writeFileSync(
@@ -218,10 +221,12 @@ describe("solver job API", () => {
         throw new Error("not used");
       }
     });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ id: "dataset" }), { status: 200 })));
     commands = [];
   });
 
   afterEach(() => {
+    vi.unstubAllGlobals();
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
@@ -279,21 +284,38 @@ describe("solver job API", () => {
       .send({ serverId: "solver-01", rangePath });
 
     expect(rejected.status).toBe(409);
-    expect(rejected.body.message).toContain("confirmation is required");
+    expect(rejected.body.message).toContain("must be approved");
+
+    await approveRange(app, rangePath);
+
+    const approvedPreview = await request(app)
+      .post("/api/jobs/preview")
+      .send({ serverId: "solver-01", rangePath });
+    expect(approvedPreview.status).toBe(200);
+    expect(approvedPreview.body.requiresConfirmation).toBe(false);
 
     const created = await request(app)
       .post("/api/jobs")
-      .send({ serverId: "solver-01", rangePath, confirmUnstudied: true });
+      .send({ serverId: "solver-01", rangePath });
 
     expect(created.status).toBe(201);
     expect(created.body.job.status).toBe("queued");
     expect(created.body.job.command).toContain("export HF_TOKEN=$HF_TOKEN");
     expect(created.body.job.command).not.toContain("hf_test_token");
 
+    const queuedRange = await request(app)
+      .get("/api/preflop-ranges/file")
+      .query({ path: rangePath });
+    expect(queuedRange.body.summary.data.runStatus).toBe("queue");
+
     const started = await request(app).post(`/api/jobs/${created.body.job.id}/start`);
 
     expect(started.status).toBe(200);
     expect(started.body.job.status).toBe("running");
+    const runningRange = await request(app)
+      .get("/api/preflop-ranges/file")
+      .query({ path: rangePath });
+    expect(runningRange.body.summary.data.runStatus).toBe("running");
     expect(commands).toHaveLength(2);
     expect(commands[0]).toContain("OOP_RANGE");
     expect(commands[0]).toContain(`RANGE_PATH="$HOME/solver/job-ranges/${created.body.job.id}/3ia-4.2-3od-4.3.txt"`);
@@ -338,9 +360,10 @@ describe("solver job API", () => {
     });
     const app = createApp({ db, refreshService, preflopRangesPath, solverJobService });
     const rangePath = "3OD-EP/3OD-4.3 vs 3IA-4.2.json";
+    await approveRange(app, rangePath);
     const created = await request(app)
       .post("/api/jobs")
-      .send({ serverId: "solver-01", rangePath, confirmUnstudied: true });
+      .send({ serverId: "solver-01", rangePath });
     await request(app).post(`/api/jobs/${created.body.job.id}/start`);
 
     const activeDelete = await request(app).post(`/api/jobs/${created.body.job.id}/delete`);
@@ -412,6 +435,169 @@ describe("solver job API", () => {
     expect(overridden.body.commandPreview).toContain("'--scenario' 'sia-sod-open3'");
   });
 
+  it("manages scenario library and uses custom scenarios in preview", async () => {
+    const solverJobService = new SolverJobService({
+      db,
+      preflopRangesPath,
+      credentials: { username: "root", password: "secret" },
+      defaultPipelineStatusFilePath: "~/run/solver_running_status.json",
+      repoNamespace: "Tsumugii",
+      hfToken: "hf_test_token",
+      getScenarioLibrary: () => loadSolverScenarioLibrary(scenarioLibraryPath).scenarios
+    });
+    const app = createApp({
+      db,
+      refreshService,
+      preflopRangesPath,
+      solverScenarioLibraryPath: scenarioLibraryPath,
+      solverJobService
+    });
+
+    const list = await request(app).get("/api/scenarios");
+
+    expect(list.status).toBe(200);
+    expect(list.body.scenarios.map((scenario: { id: string }) => scenario.id)).toContain("sia-sod");
+
+    const added = await request(app)
+      .post("/api/scenarios")
+      .send({
+        scenario: {
+          id: "custom-test",
+          label: "Custom Test",
+          rangeSubdir: "custom-test",
+          configTemplate: "SIA_SOD_CONFIG",
+          pot: 7,
+          effectiveStack: 91,
+          description: "Custom test scenario"
+        }
+      });
+
+    expect(added.status).toBe(201);
+    expect(added.body.scenarios).toContainEqual(expect.objectContaining({
+      id: "custom-test",
+      pot: 7,
+      effectiveStack: 91
+    }));
+
+    const preview = await request(app)
+      .post("/api/jobs/preview")
+      .send({
+        serverId: "solver-01",
+        rangePath: "SOD/2.5bb/SIA-45 vs SOD-40.json",
+        scenario: "custom-test",
+        datasetName: "custom-dataset"
+      });
+
+    expect(preview.status).toBe(200);
+    expect(preview.body.scenario).toBe("custom-test");
+    expect(preview.body.commandPreview).toContain("'--scenario' 'custom-test'");
+
+    const updated = await request(app)
+      .patch("/api/scenarios/custom-test")
+      .send({
+        scenario: {
+          id: "custom-test-renamed",
+          label: "Custom Test Renamed",
+          rangeSubdir: "custom-test-renamed",
+          configTemplate: "SOA_SID_CONFIG",
+          pot: 8,
+          effectiveStack: 90
+        }
+      });
+
+    expect(updated.status).toBe(200);
+    expect(updated.body.scenarios).toContainEqual(expect.objectContaining({
+      id: "custom-test-renamed",
+      configTemplate: "SOA_SID_CONFIG"
+    }));
+
+    const deleted = await request(app).delete("/api/scenarios/custom-test-renamed");
+
+    expect(deleted.status).toBe(200);
+    expect(deleted.body.scenarios.some((scenario: { id: string }) => scenario.id === "custom-test-renamed")).toBe(false);
+  });
+
+  it("requires confirmation before creating a missing Hugging Face dataset repo", async () => {
+    let repoExists = false;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/datasets/")) {
+        return new Response(JSON.stringify({ id: "dataset" }), { status: repoExists ? 200 : 404 });
+      }
+      if (url.includes("/api/repos/create")) {
+        repoExists = true;
+        return new Response(JSON.stringify({ url: "https://huggingface.co/datasets/Tsumugii/manual-dataset" }), { status: 200 });
+      }
+      return new Response("{}", { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const solverJobService = new SolverJobService({
+      db,
+      preflopRangesPath,
+      credentials: { username: "root", password: "secret" },
+      defaultPipelineStatusFilePath: "~/run/solver_running_status.json",
+      repoNamespace: "Tsumugii",
+      hfToken: "hf_test_token"
+    });
+    const app = createApp({ db, refreshService, preflopRangesPath, solverJobService });
+    const rangePath = "3OD-EP/3OD-4.3 vs 3IA-4.2.json";
+    await approveRange(app, rangePath);
+
+    const check = await request(app)
+      .post("/api/jobs/dataset-repo/check")
+      .send({ serverId: "solver-01", rangePath, datasetName: "manual-dataset" });
+
+    expect(check.status).toBe(200);
+    expect(check.body).toMatchObject({
+      datasetName: "manual-dataset",
+      repoId: "Tsumugii/manual-dataset",
+      exists: false,
+      requiresConfirmation: true
+    });
+
+    const rejected = await request(app)
+      .post("/api/jobs")
+      .send({ serverId: "solver-01", rangePath, datasetName: "manual-dataset" });
+
+    expect(rejected.status).toBe(409);
+    expect(rejected.body.message).toContain("Dataset repo is missing");
+
+    const ensured = await request(app)
+      .post("/api/jobs/dataset-repo/ensure")
+      .send({
+        serverId: "solver-01",
+        rangePath,
+        datasetName: "manual-dataset",
+        confirmDatasetName: true
+      });
+
+    expect(ensured.status).toBe(200);
+    expect(ensured.body).toMatchObject({
+      datasetName: "manual-dataset",
+      exists: true,
+      created: true,
+      requiresConfirmation: false
+    });
+    const createCall = fetchMock.mock.calls.find(([url]) => String(url).includes("/api/repos/create"));
+    expect(createCall?.[1]?.body).toContain('"organization":"Tsumugii"');
+    expect(createCall?.[1]?.body).toContain('"type":"dataset"');
+
+    const created = await request(app)
+      .post("/api/jobs")
+      .send({
+        serverId: "solver-01",
+        rangePath,
+        datasetName: "manual-dataset",
+        confirmDatasetName: true
+      });
+
+    expect(created.status).toBe(201);
+    expect(created.body.job).toMatchObject({
+      datasetName: "manual-dataset",
+      repoId: "Tsumugii/manual-dataset"
+    });
+  });
+
   it("reconciles an active job when server inventory reports the task is idle", async () => {
     const executor: SshExecutor = {
       run: vi.fn(async (_server, _credentials, command) => {
@@ -429,9 +615,10 @@ describe("solver job API", () => {
       hfToken: "hf_test_token"
     });
     const app = createApp({ db, refreshService, preflopRangesPath, solverJobService });
+    await approveRange(app, "3OD-EP/3OD-4.3 vs 3IA-4.2.json");
     const created = await request(app)
       .post("/api/jobs")
-      .send({ serverId: "solver-01", rangePath: "3OD-EP/3OD-4.3 vs 3IA-4.2.json", confirmUnstudied: true });
+      .send({ serverId: "solver-01", rangePath: "3OD-EP/3OD-4.3 vs 3IA-4.2.json" });
     const started = await request(app).post(`/api/jobs/${created.body.job.id}/start`);
     const collectedAt = new Date(Date.parse(started.body.job.startedAt) + 20_000).toISOString();
     db.insertPipelineSnapshot(idlePipelineSnapshot("solver-01", collectedAt));
@@ -466,9 +653,10 @@ describe("solver job API", () => {
       hfToken: "hf_test_token"
     });
     const app = createApp({ db, refreshService, preflopRangesPath, solverJobService });
+    await approveRange(app, "3OD-EP/3OD-4.3 vs 3IA-4.2.json");
     const created = await request(app)
       .post("/api/jobs")
-      .send({ serverId: "solver-01", rangePath: "3OD-EP/3OD-4.3 vs 3IA-4.2.json", confirmUnstudied: true });
+      .send({ serverId: "solver-01", rangePath: "3OD-EP/3OD-4.3 vs 3IA-4.2.json" });
     const started = await request(app).post(`/api/jobs/${created.body.job.id}/start`);
     db.insertSnapshot(metricSnapshot("solver-01", "offline", new Date(Date.now() + 1000).toISOString()));
 
@@ -541,4 +729,11 @@ function idlePipelineSnapshot(serverId: string, collectedAt: string): PipelineSt
     errorCode: null,
     errorMessage: null
   };
+}
+
+async function approveRange(app: ReturnType<typeof createApp>, rangePath: string): Promise<void> {
+  const response = await request(app)
+    .post("/api/preflop-ranges/status")
+    .send({ path: rangePath, status: "approved" });
+  expect(response.status).toBe(200);
 }

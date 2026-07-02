@@ -17,6 +17,7 @@ export type RuntimeConfig = {
   inventoryPath: string;
   alertSettingsPath: string;
   preflopRangesPath: string;
+  solverScenarioLibraryPath: string;
   pipelineStatusFilePath: string;
   solverJobRepoNamespace: string;
   hfToken: string | null;
@@ -64,6 +65,7 @@ export function loadRuntimeConfig(env: EnvSource = process.env): RuntimeConfig {
     inventoryPath: env.SERVER_MONITOR_INVENTORY_PATH ?? "config/servers.json",
     alertSettingsPath: env.SERVER_MONITOR_ALERT_SETTINGS_PATH ?? "config/alerts.json",
     preflopRangesPath: env.SERVER_MONITOR_PREFLOP_RANGES_PATH ?? "config/preflop-ranges",
+    solverScenarioLibraryPath: env.SERVER_MONITOR_SOLVER_SCENARIOS_PATH ?? "config/solver-scenarios.json",
     pipelineStatusFilePath: env.PIPELINE_STATUS_FILE ?? "~/run/solver_running_status.json",
     solverJobRepoNamespace: env.HF_DEFAULT_NAMESPACE ?? "Tsumugii",
     hfToken: env.HF_TOKEN?.trim() || null,

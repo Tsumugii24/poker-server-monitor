@@ -12,7 +12,7 @@ import type {
   WeChatRecipient
 } from "../shared/types";
 import type { PreflopRangeDocument } from "../shared/preflopRange";
-import { PREFLOP_RANGE_STATUSES } from "../shared/preflopRange";
+import { PREFLOP_REVIEW_STATUSES } from "../shared/preflopRange";
 import {
   createServerInventoryEntry,
   deleteServerInventoryEntry,
@@ -35,6 +35,7 @@ import type { RefreshService } from "./refreshService";
 import { buildWeChatDelivery } from "../shared/wechatDelivery";
 import { defaultWeChatStoredSession } from "../shared/wechatSession";
 import {
+  approveAllPreflopRanges,
   buildPreflopRangeDownload,
   createPreflopRangeFolder,
   deletePreflopRangePath,
@@ -43,19 +44,28 @@ import {
   readPreflopRangeFile,
   renamePreflopRangePath,
   reorderPreflopRanges,
+  refreshPreflopRangeProgress,
   savePreflopRangeFile,
   saveUploadedPreflopRangeFiles,
   updatePreflopRangeLearned,
   updatePreflopRangeStatus,
+  type PreflopRangeRuntimeInput,
   type UploadedPreflopRangeFile
 } from "./preflopRangeStore";
 import { SolverJobService } from "./solverJobService";
 import {
   SOLVER_JOB_QUEUE_MODES,
-  SOLVER_SCENARIOS,
+  type SolverDatasetRepoEnsureRequest,
   type SolverJobCreateRequest,
-  type SolverJobPreviewRequest
+  type SolverJobPreviewRequest,
+  type SolverScenarioLibraryItem
 } from "../shared/solverJobs";
+import {
+  addSolverScenario,
+  deleteSolverScenario,
+  loadSolverScenarioLibrary,
+  updateSolverScenario
+} from "./scenarioLibraryStore";
 
 export type AppDependencies = {
   db: MonitorDatabase;
@@ -63,7 +73,10 @@ export type AppDependencies = {
   inventoryPath?: string;
   alertSettingsPath?: string;
   preflopRangesPath?: string;
+  solverScenarioLibraryPath?: string;
   solverJobService?: SolverJobService;
+  solverJobRepoNamespace?: string;
+  hfToken?: string | null;
   defaultRefreshIntervalMs?: number;
   sendTestAlert?: (message: string, roomId: string) => Promise<void> | void;
   startAlertConnector?: () => Promise<void> | void;
@@ -95,7 +108,10 @@ export function createApp({
   inventoryPath = "config/servers.json",
   alertSettingsPath = "config/alerts.json",
   preflopRangesPath = "config/preflop-ranges",
-  solverJobService = new SolverJobService({ db, preflopRangesPath }),
+  solverScenarioLibraryPath = "config/solver-scenarios.json",
+  solverJobService: providedSolverJobService,
+  solverJobRepoNamespace = "Tsumugii",
+  hfToken = null,
   defaultRefreshIntervalMs = 3_600_000,
   sendTestAlert,
   startAlertConnector,
@@ -114,6 +130,13 @@ export function createApp({
   updateWeChatAccount,
   verifyWeChatAccount
 }: AppDependencies): Express {
+  const solverJobService = providedSolverJobService ?? new SolverJobService({
+    db,
+    preflopRangesPath,
+    repoNamespace: solverJobRepoNamespace,
+    hfToken,
+    getScenarioLibrary: () => loadSolverScenarioLibrary(solverScenarioLibraryPath).scenarios
+  });
   const app = express();
   app.use(express.json({ limit: "25mb" }));
 
@@ -234,9 +257,13 @@ export function createApp({
 
   // ── Range Library ─────────────────────────────────────
 
+  const preflopRangeRuntime = (): PreflopRangeRuntimeInput => ({
+    jobs: solverJobService.listJobs().jobs
+  });
+
   app.get("/api/preflop-ranges", (_request, response) => {
     try {
-      response.json(listPreflopRanges(preflopRangesPath));
+      response.json(listPreflopRanges(preflopRangesPath, preflopRangeRuntime()));
     } catch (error) {
       respondPreflopRangeError(response, error, "preflop_range_list_failed");
     }
@@ -244,9 +271,29 @@ export function createApp({
 
   app.get("/api/preflop-ranges/file", (request, response) => {
     try {
-      response.json(readPreflopRangeFile(preflopRangesPath, String(request.query.path ?? "")));
+      response.json(readPreflopRangeFile(
+        preflopRangesPath,
+        String(request.query.path ?? ""),
+        preflopRangeRuntime()
+      ));
     } catch (error) {
       respondPreflopRangeError(response, error, "preflop_range_read_failed");
+    }
+  });
+
+  app.post("/api/preflop-ranges/refresh-progress", async (_request, response) => {
+    try {
+      const progress = await refreshPreflopRangeProgress(preflopRangesPath, {
+        hfToken,
+        repoNamespace: solverJobRepoNamespace
+      });
+      response.json({
+        ok: true,
+        ...progress,
+        ...listPreflopRanges(preflopRangesPath, preflopRangeRuntime())
+      });
+    } catch (error) {
+      respondPreflopRangeError(response, error, "preflop_range_progress_failed");
     }
   });
 
@@ -357,14 +404,14 @@ export function createApp({
 
     try {
       if (typeof request.body.status === "string") {
-        if (!(PREFLOP_RANGE_STATUSES as readonly string[]).includes(request.body.status)) {
+        if (!(PREFLOP_REVIEW_STATUSES as readonly string[]).includes(request.body.status)) {
           response.status(400).json({ error: "invalid_preflop_status", message: "status is invalid" });
           return;
         }
         response.json(updatePreflopRangeStatus(
           preflopRangesPath,
           request.body.path,
-          request.body.status as (typeof PREFLOP_RANGE_STATUSES)[number]
+          request.body.status as (typeof PREFLOP_REVIEW_STATUSES)[number]
         ));
         return;
       }
@@ -375,6 +422,14 @@ export function createApp({
       response.status(400).json({ error: "invalid_preflop_status", message: "status or learned is required" });
     } catch (error) {
       respondPreflopRangeError(response, error, "preflop_range_status_failed");
+    }
+  });
+
+  app.post("/api/preflop-ranges/approve-all", (_request, response) => {
+    try {
+      response.json({ ok: true, ...approveAllPreflopRanges(preflopRangesPath, preflopRangeRuntime()) });
+    } catch (error) {
+      respondPreflopRangeError(response, error, "preflop_range_approve_all_failed");
     }
   });
 
@@ -395,6 +450,60 @@ export function createApp({
       response.json({ ok: true });
     } catch (error) {
       respondPreflopRangeError(response, error, "preflop_range_delete_failed");
+    }
+  });
+
+  // ── Solver scenario library ──────────────────────────────────
+
+  app.get("/api/scenarios", (_request, response) => {
+    try {
+      response.json(loadSolverScenarioLibrary(solverScenarioLibraryPath));
+    } catch (error) {
+      response.status(500).json({
+        error: "solver_scenario_list_failed",
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  app.post("/api/scenarios", (request, response) => {
+    if (!isRecord(request.body) || !isRecord(request.body.scenario)) {
+      response.status(400).json({ error: "invalid_solver_scenario", message: "scenario is required" });
+      return;
+    }
+
+    try {
+      response.status(201).json(addSolverScenario(
+        solverScenarioLibraryPath,
+        request.body.scenario as SolverScenarioLibraryItem
+      ));
+    } catch (error) {
+      respondScenarioLibraryError(response, error, "solver_scenario_create_failed");
+    }
+  });
+
+  app.patch("/api/scenarios/:id", (request, response) => {
+    if (!isRecord(request.body) || !isRecord(request.body.scenario)) {
+      response.status(400).json({ error: "invalid_solver_scenario", message: "scenario is required" });
+      return;
+    }
+
+    try {
+      response.json(updateSolverScenario(
+        solverScenarioLibraryPath,
+        request.params.id,
+        request.body.scenario as SolverScenarioLibraryItem
+      ));
+    } catch (error) {
+      respondScenarioLibraryError(response, error, "solver_scenario_update_failed");
+    }
+  });
+
+  app.delete("/api/scenarios/:id", (request, response) => {
+    try {
+      response.json(deleteSolverScenario(solverScenarioLibraryPath, request.params.id));
+    } catch (error) {
+      respondScenarioLibraryError(response, error, "solver_scenario_delete_failed");
     }
   });
 
@@ -421,14 +530,40 @@ export function createApp({
     }
   });
 
-  app.post("/api/jobs", (request, response) => {
+  app.post("/api/jobs/dataset-repo/check", async (request, response) => {
+    if (!isSolverJobPreviewRequest(request.body)) {
+      response.status(400).json({ error: "invalid_solver_dataset_repo_check" });
+      return;
+    }
+
+    try {
+      response.json(await solverJobService.checkDatasetRepo(request.body));
+    } catch (error) {
+      respondSolverJobError(response, error, "solver_dataset_repo_check_failed");
+    }
+  });
+
+  app.post("/api/jobs/dataset-repo/ensure", async (request, response) => {
+    if (!isSolverDatasetRepoEnsureRequest(request.body)) {
+      response.status(400).json({ error: "invalid_solver_dataset_repo_ensure" });
+      return;
+    }
+
+    try {
+      response.json(await solverJobService.ensureDatasetRepo(request.body));
+    } catch (error) {
+      respondSolverJobError(response, error, "solver_dataset_repo_ensure_failed");
+    }
+  });
+
+  app.post("/api/jobs", async (request, response) => {
     if (!isSolverJobCreateRequest(request.body)) {
       response.status(400).json({ error: "invalid_solver_job" });
       return;
     }
 
     try {
-      const job = solverJobService.create(request.body);
+      const job = await solverJobService.create(request.body);
       response.status(201).json({
         job,
         events: solverJobService.getJob(job.id).events
@@ -1149,19 +1284,28 @@ function isSolverJobPreviewRequest(value: unknown): value is SolverJobPreviewReq
     value.scenario != null &&
     (
       typeof value.scenario !== "string" ||
-      !(SOLVER_SCENARIOS as readonly string[]).includes(value.scenario)
+      value.scenario.trim() === ""
     )
   ) {
     return false;
   }
   if (value.settings != null && !isRecord(value.settings)) return false;
+  if (value.datasetName != null && typeof value.datasetName !== "string") return false;
   if (value.confirmUnstudied != null && typeof value.confirmUnstudied !== "boolean") return false;
+  return true;
+}
+
+function isSolverDatasetRepoEnsureRequest(value: unknown): value is SolverDatasetRepoEnsureRequest {
+  if (!isSolverJobPreviewRequest(value)) return false;
+  const candidate = value as Record<string, unknown>;
+  if (candidate.confirmDatasetName != null && typeof candidate.confirmDatasetName !== "boolean") return false;
   return true;
 }
 
 function isSolverJobCreateRequest(value: unknown): value is SolverJobCreateRequest {
   if (!isSolverJobPreviewRequest(value)) return false;
   const candidate = value as Record<string, unknown>;
+  if (candidate.confirmDatasetName != null && typeof candidate.confirmDatasetName !== "boolean") return false;
   if (
     candidate.queueMode != null &&
     (
@@ -1304,9 +1448,25 @@ function respondSolverJobError(
   const message = error instanceof Error ? error.message : String(error);
   const status = /not found|does not exist/i.test(message)
     ? 404
-    : /already has active|must be stopped|must be canceled|confirmation is required|online server|is offline|is unknown/i.test(message)
+    : /already has active|must be stopped|must be canceled|confirmation is required|must be approved|dataset repo is missing|online server|is offline|is unknown/i.test(message)
       ? 409
       : /missing|must have|required|invalid|outside|not marked studied/i.test(message)
+        ? 400
+        : 500;
+  response.status(status).json({ error: code, message });
+}
+
+function respondScenarioLibraryError(
+  response: express.Response,
+  error: unknown,
+  code: string
+): void {
+  const message = error instanceof Error ? error.message : String(error);
+  const status = /not found/i.test(message)
+    ? 404
+    : /already exists|duplicate/i.test(message)
+      ? 409
+      : /required|must|invalid/i.test(message)
         ? 400
         : 500;
   response.status(status).json({ error: code, message });

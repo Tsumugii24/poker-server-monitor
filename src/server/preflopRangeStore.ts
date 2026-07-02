@@ -2,21 +2,66 @@ import fs from "node:fs";
 import path from "node:path";
 import AdmZip from "adm-zip";
 import {
+  PREFLOP_REVIEW_STATUSES,
+  PREFLOP_RUN_STATUSES,
   normalizePreflopRangeDocument,
   serializePreflopRangeDocument,
-  setPreflopLearned,
-  setPreflopStatus,
   summarizePreflopRange,
   type PreflopRangeDocument,
   type PreflopRangeFileItem,
   type PreflopRangeFileResponse,
   type PreflopRangeFolderItem,
-  type PreflopRangeStatus,
+  type PreflopRangeProgress,
+  type PreflopReviewStatus,
+  type PreflopRunStatus,
   type PreflopRangeTreeItem,
   type PreflopRangeTreeResponse
 } from "../shared/preflopRange";
+import { datasetNameFromRangePath, scenarioFromRangePath } from "../shared/preflopDataset";
+import type { SolverJob, SolverJobStatus } from "../shared/solverJobs";
 
 const ORDER_FILE = ".range_order.json";
+const STATUS_FILE = ".range_status.json";
+const PROGRESS_FILE = ".range_progress.json";
+const SOLVER_TOTAL_ROWS = 1755;
+const RUNNING_JOB_STATUSES = new Set<SolverJobStatus>(["deploying", "running", "stopping"]);
+
+type RangeStatusEntry = {
+  reviewStatus: PreflopReviewStatus;
+  runStatus: PreflopRunStatus;
+  updatedAt: string;
+};
+
+type RangeStatusMetadata = {
+  version: 1;
+  ranges: Record<string, RangeStatusEntry>;
+};
+
+type RangeProgressEntry = PreflopRangeProgress & {
+  updatedAt?: string;
+};
+
+type RangeProgressMetadata = {
+  version: 1;
+  ranges: Record<string, RangeProgressEntry>;
+};
+
+export type PreflopRangeRuntimeInput = {
+  jobs?: SolverJob[];
+  progress?: RangeProgressMetadata;
+};
+
+type RangeRuntimeContext = {
+  jobsByPath: Map<string, SolverJob[]>;
+  progress: RangeProgressMetadata;
+};
+
+export type PreflopRangeProgressRefreshResult = {
+  root: string;
+  checked: number;
+  failed: number;
+  progress: RangeProgressMetadata;
+};
 
 export type UploadedPreflopRangeFile = {
   filename?: unknown;
@@ -30,19 +75,25 @@ export type PreflopRangeDownload = {
   buffer: Buffer;
 };
 
-export function listPreflopRanges(rootPath: string): PreflopRangeTreeResponse {
+export function listPreflopRanges(rootPath: string, runtimeInput?: PreflopRangeRuntimeInput): PreflopRangeTreeResponse {
   const root = ensureRoot(rootPath);
+  const runtime = createRangeRuntimeContext(root, runtimeInput);
   return {
     root,
-    tree: buildTree(root, root)
+    tree: buildTree(root, root, runtime)
   };
 }
 
-export function readPreflopRangeFile(rootPath: string, relativePath: string): PreflopRangeFileResponse {
+export function readPreflopRangeFile(
+  rootPath: string,
+  relativePath: string,
+  runtimeInput?: PreflopRangeRuntimeInput
+): PreflopRangeFileResponse {
   const root = ensureRoot(rootPath);
   const target = safePath(root, relativePath);
   assertRangeFile(target);
-  const data = normalizePreflopRangeDocument(readJson(target), path.basename(target));
+  const runtime = createRangeRuntimeContext(root, runtimeInput);
+  const data = applyRuntimeState(root, target, readRangeDocumentWithStatus(root, target), runtime);
   const stat = fs.statSync(target);
   return {
     path: relativeString(root, target),
@@ -63,6 +114,52 @@ export function savePreflopRangeFile(
   writeRangeDocument(target, document);
   appendToOrder(root, path.dirname(target), path.basename(target));
   return readPreflopRangeFile(root, relativeString(root, target));
+}
+
+export async function refreshPreflopRangeProgress(
+  rootPath: string,
+  options: { hfToken?: string | null; repoNamespace?: string; totalRows?: number } = {}
+): Promise<PreflopRangeProgressRefreshResult> {
+  const root = ensureRoot(rootPath);
+  const metadata = loadProgressMetadata(root);
+  const nextRanges: Record<string, RangeProgressEntry> = {};
+  const repoNamespace = normalizedRepoNamespace(options.repoNamespace);
+  const totalRows = positiveTotalRows(options.totalRows);
+  const approvedFiles = walkRangeFiles(root).flatMap((file) => {
+    const document = readRangeDocumentWithStatus(root, file);
+    if (document.reviewStatus !== "approved") return [];
+    const rangePath = relativeString(root, file);
+    return [{
+      file,
+      rangePath,
+      datasetName: canonicalDatasetName(rangePath)
+    }];
+  });
+
+  let failed = 0;
+  await runWithConcurrency(approvedFiles, 4, async ({ rangePath, datasetName }) => {
+    const checkedAt = new Date().toISOString();
+    const previous = metadata.ranges[rangePath];
+    try {
+      const rows = await fetchHuggingFaceDatasetRows(`${repoNamespace}/${datasetName}`, options.hfToken ?? null);
+      nextRanges[rangePath] = progressEntry(datasetName, rows, totalRows, checkedAt);
+    } catch (error) {
+      failed += 1;
+      const fallbackRows = previous?.datasetName === datasetName ? previous.rows : 0;
+      nextRanges[rangePath] = {
+        ...progressEntry(datasetName, fallbackRows, totalRows, checkedAt),
+        error: error instanceof Error ? error.message : String(error)
+      };
+    }
+  });
+
+  saveProgressMetadata(root, { version: 1, ranges: nextRanges });
+  return {
+    root,
+    checked: approvedFiles.length,
+    failed,
+    progress: { version: 1, ranges: nextRanges }
+  };
 }
 
 export function createPreflopRangeFolder(rootPath: string, parentRelative: string, name: string): string {
@@ -91,6 +188,8 @@ export function renamePreflopRangePath(rootPath: string, relativePath: string, n
   ));
   const oldName = path.basename(target);
   fs.renameSync(target, destination);
+  renameStatusKeys(root, target, destination);
+  renameProgressKeys(root, target, destination);
 
   const metadata = loadOrderMetadata(root);
   const parentKey = folderKey(root, path.dirname(destination));
@@ -118,6 +217,8 @@ export function deletePreflopRangePath(rootPath: string, relativePath: string): 
   } else {
     throw new Error("Only range JSON files and folders can be deleted.");
   }
+  deleteStatusKeys(root, target);
+  deleteProgressKeys(root, target);
   removeFromOrder(root, parent, name);
 }
 
@@ -138,6 +239,8 @@ export function movePreflopRangePath(rootPath: string, sourceRelative: string, t
   const destination = uniquePath(path.join(targetFolder, path.basename(source)));
   const oldParent = path.dirname(source);
   fs.renameSync(source, destination);
+  renameStatusKeys(root, source, destination);
+  renameProgressKeys(root, source, destination);
   removeFromOrder(root, oldParent, path.basename(source));
   appendToOrder(root, targetFolder, path.basename(destination));
   if (fs.statSync(destination).isDirectory()) renameOrderKeys(root, source, destination);
@@ -170,22 +273,57 @@ export function updatePreflopRangeLearned(rootPath: string, relativePath: string
   const root = ensureRoot(rootPath);
   const target = safePath(root, relativePath);
   assertRangeFile(target);
-  const data = normalizePreflopRangeDocument(readJson(target), path.basename(target));
-  writeRangeDocument(target, setPreflopLearned(data, learned));
+  setStoredReviewStatus(root, target, learned ? "approved" : "under_review");
   return readPreflopRangeFile(root, relativeString(root, target));
 }
 
 export function updatePreflopRangeStatus(
   rootPath: string,
   relativePath: string,
-  status: PreflopRangeStatus
+  status: PreflopReviewStatus
 ): PreflopRangeFileResponse {
   const root = ensureRoot(rootPath);
   const target = safePath(root, relativePath);
   assertRangeFile(target);
-  const data = normalizePreflopRangeDocument(readJson(target), path.basename(target));
-  writeRangeDocument(target, setPreflopStatus(data, status));
+  setStoredReviewStatus(root, target, status);
   return readPreflopRangeFile(root, relativeString(root, target));
+}
+
+export function updatePreflopRangeRunStatus(
+  rootPath: string,
+  relativePath: string,
+  runStatus: PreflopRunStatus
+): PreflopRangeFileResponse {
+  const root = ensureRoot(rootPath);
+  const target = safePath(root, relativePath);
+  assertRangeFile(target);
+  setStoredRunStatus(root, target, runStatus);
+  return readPreflopRangeFile(root, relativeString(root, target));
+}
+
+export function approveAllPreflopRanges(
+  rootPath: string,
+  runtimeInput?: PreflopRangeRuntimeInput
+): { count: number; tree: PreflopRangeTreeItem[]; root: string } {
+  const root = ensureRoot(rootPath);
+  const metadata = loadStatusMetadata(root);
+  const now = new Date().toISOString();
+  let count = 0;
+  for (const file of walkRangeFiles(root)) {
+    const key = relativeString(root, file);
+    metadata.ranges[key] = {
+      reviewStatus: "approved",
+      runStatus: "idle",
+      updatedAt: now
+    };
+    count += 1;
+  }
+  saveStatusMetadata(root, metadata);
+  return {
+    count,
+    root,
+    tree: buildTree(root, root, createRangeRuntimeContext(root, runtimeInput))
+  };
 }
 
 export function saveUploadedPreflopRangeFiles(
@@ -245,7 +383,7 @@ export function buildPreflopRangeDownload(rootPath: string, relativePath: string
   };
 }
 
-function buildTree(root: string, folder: string): PreflopRangeTreeItem[] {
+function buildTree(root: string, folder: string, runtime: RangeRuntimeContext): PreflopRangeTreeItem[] {
   return orderedChildren(root, folder).flatMap((item): PreflopRangeTreeItem[] => {
     const name = path.basename(item);
     if (name.startsWith(".")) return [];
@@ -255,28 +393,36 @@ function buildTree(root: string, folder: string): PreflopRangeTreeItem[] {
         type: "folder",
         name,
         path: relativeString(root, item),
-        children: buildTree(root, item)
+        children: buildTree(root, item, runtime)
       };
       return [folderItem];
     }
     if (stat.isFile() && path.extname(item).toLowerCase() === ".json") {
-      return [fileSummary(root, item)];
+      return [fileSummary(root, item, runtime)];
     }
     return [];
   });
 }
 
-function fileSummary(root: string, file: string): PreflopRangeFileItem {
+function fileSummary(root: string, file: string, runtime: RangeRuntimeContext): PreflopRangeFileItem {
   let label = "Invalid JSON";
   let learned = false;
-  let status: PreflopRangeStatus = "under_review";
+  let status: PreflopReviewStatus = "under_review";
+  let reviewStatus: PreflopReviewStatus = "under_review";
+  let runStatus: PreflopRunStatus = "idle";
+  let datasetName: string | undefined;
+  let progress: PreflopRangeProgress | undefined;
   let rangePct: PreflopRangeFileItem["rangePct"] = { A: 0, B: 0 };
   try {
-    const data = normalizePreflopRangeDocument(readJson(file), path.basename(file));
+    const data = applyRuntimeState(root, file, readRangeDocumentWithStatus(root, file), runtime);
     const summary = summarizePreflopRange(data, path.basename(file));
     label = `${summary.players.A.name} vs ${summary.players.B.name}`;
     learned = summary.data.learned;
     status = summary.data.status;
+    reviewStatus = summary.data.reviewStatus;
+    runStatus = summary.data.runStatus;
+    datasetName = canonicalDatasetName(relativeString(root, file));
+    progress = reviewStatus === "approved" ? runtimeProgress(root, file, runtime, datasetName) : undefined;
     rangePct = {
       A: Math.round((summary.players.A.stats.raise + summary.players.A.stats.call) * 10) / 10,
       B: Math.round((summary.players.B.stats.raise + summary.players.B.stats.call) * 10) / 10
@@ -295,8 +441,91 @@ function fileSummary(root: string, file: string): PreflopRangeFileItem {
     label,
     learned,
     status,
+    reviewStatus,
+    runStatus,
+    datasetName,
+    progress,
     rangePct
   };
+}
+
+function readRangeDocumentWithStatus(root: string, file: string): PreflopRangeDocument {
+  const data = normalizePreflopRangeDocument(readJson(file), path.basename(file));
+  const stored = loadStatusMetadata(root).ranges[relativeString(root, file)];
+  if (!stored) return data;
+  return {
+    ...data,
+    status: stored.reviewStatus,
+    reviewStatus: stored.reviewStatus,
+    runStatus: "idle",
+    learned: stored.reviewStatus === "approved"
+  };
+}
+
+function createRangeRuntimeContext(root: string, input: PreflopRangeRuntimeInput = {}): RangeRuntimeContext {
+  const jobsByPath = new Map<string, SolverJob[]>();
+  for (const job of input.jobs ?? []) {
+    const existing = jobsByPath.get(job.rangePath) ?? [];
+    existing.push(job);
+    jobsByPath.set(job.rangePath, existing);
+  }
+  return {
+    jobsByPath,
+    progress: input.progress ?? loadProgressMetadata(root)
+  };
+}
+
+function applyRuntimeState(
+  root: string,
+  file: string,
+  document: PreflopRangeDocument,
+  runtime: RangeRuntimeContext
+): PreflopRangeDocument {
+  if (document.reviewStatus !== "approved") {
+    return {
+      ...document,
+      runStatus: "idle"
+    };
+  }
+  return {
+    ...document,
+    runStatus: runtimeRunStatus(root, file, runtime)
+  };
+}
+
+function runtimeRunStatus(root: string, file: string, runtime: RangeRuntimeContext): PreflopRunStatus {
+  const rangePath = relativeString(root, file);
+  const jobs = runtime.jobsByPath.get(rangePath) ?? [];
+  if (jobs.some((job) => RUNNING_JOB_STATUSES.has(job.status))) return "running";
+  if (jobs.some((job) => job.status === "queued")) return "queue";
+
+  const progress = runtimeProgress(root, file, runtime, canonicalDatasetName(rangePath));
+  return progress.ratio >= 1 ? "solved" : "idle";
+}
+
+function runtimeProgress(
+  root: string,
+  file: string,
+  runtime: RangeRuntimeContext,
+  datasetName = canonicalDatasetName(relativeString(root, file))
+): PreflopRangeProgress {
+  const rangePath = relativeString(root, file);
+  const entry = runtime.progress.ranges[rangePath];
+  if (entry?.datasetName === datasetName) {
+    return {
+      datasetName,
+      rows: normalizedRows(entry.rows),
+      totalRows: positiveTotalRows(entry.totalRows),
+      ratio: clampRatio(entry.ratio),
+      checkedAt: entry.checkedAt,
+      error: entry.error
+    };
+  }
+  return progressEntry(datasetName, 0, SOLVER_TOTAL_ROWS, entry?.checkedAt);
+}
+
+function canonicalDatasetName(rangePath: string): string {
+  return datasetNameFromRangePath(rangePath, scenarioFromRangePath(rangePath));
 }
 
 function ensureRoot(rootPath: string): string {
@@ -339,6 +568,14 @@ function orderedChildren(root: string, folder: string): string[] {
 
 function orderFilePath(root: string): string {
   return path.join(root, ORDER_FILE);
+}
+
+function statusFilePath(root: string): string {
+  return path.join(root, STATUS_FILE);
+}
+
+function progressFilePath(root: string): string {
+  return path.join(root, PROGRESS_FILE);
 }
 
 function loadOrderMetadata(root: string): Record<string, string[]> {
@@ -406,6 +643,321 @@ function deleteOrderKeys(root: string, deletedPath: string): void {
   saveOrderMetadata(root, Object.fromEntries(
     Object.entries(metadata).filter(([key]) => key !== deletedKey && !key.startsWith(`${deletedKey}/`))
   ));
+}
+
+function loadStatusMetadata(root: string): RangeStatusMetadata {
+  const file = statusFilePath(root);
+  if (!fs.existsSync(file)) return { version: 1, ranges: {} };
+  try {
+    const data = JSON.parse(fs.readFileSync(file, "utf8")) as unknown;
+    const rawRanges = isRecord(data) && isRecord(data.ranges)
+      ? data.ranges
+      : isRecord(data)
+        ? data
+        : {};
+    const ranges: Record<string, RangeStatusEntry> = {};
+    for (const [key, value] of Object.entries(rawRanges)) {
+      const entry = normalizeStoredStatusEntry(value);
+      if (!entry) continue;
+      ranges[String(key)] = {
+        ...entry,
+        updatedAt: isRecord(value) && typeof value.updatedAt === "string" ? value.updatedAt : new Date(0).toISOString()
+      };
+    }
+    return { version: 1, ranges };
+  } catch {
+    return { version: 1, ranges: {} };
+  }
+}
+
+function saveStatusMetadata(root: string, metadata: RangeStatusMetadata): void {
+  fs.writeFileSync(statusFilePath(root), `${JSON.stringify(metadata, null, 2)}\n`);
+}
+
+function loadProgressMetadata(root: string): RangeProgressMetadata {
+  const file = progressFilePath(root);
+  if (!fs.existsSync(file)) return { version: 1, ranges: {} };
+  try {
+    const data = JSON.parse(fs.readFileSync(file, "utf8")) as unknown;
+    const rawRanges = isRecord(data) && isRecord(data.ranges)
+      ? data.ranges
+      : isRecord(data)
+        ? data
+        : {};
+    const ranges: Record<string, RangeProgressEntry> = {};
+    for (const [key, value] of Object.entries(rawRanges)) {
+      const entry = normalizeProgressEntry(value);
+      if (entry) ranges[String(key)] = entry;
+    }
+    return { version: 1, ranges };
+  } catch {
+    return { version: 1, ranges: {} };
+  }
+}
+
+function saveProgressMetadata(root: string, metadata: RangeProgressMetadata): void {
+  fs.writeFileSync(progressFilePath(root), `${JSON.stringify(metadata, null, 2)}\n`);
+}
+
+function setStoredReviewStatus(root: string, file: string, status: PreflopReviewStatus): void {
+  const normalizedStatus = normalizeStoredReviewStatus(status);
+  if (!normalizedStatus) {
+    throw new Error("Invalid range review status.");
+  }
+  const metadata = loadStatusMetadata(root);
+  metadata.ranges[relativeString(root, file)] = {
+    reviewStatus: normalizedStatus,
+    runStatus: "idle",
+    updatedAt: new Date().toISOString()
+  };
+  saveStatusMetadata(root, metadata);
+}
+
+function setStoredRunStatus(root: string, file: string, runStatus: PreflopRunStatus): void {
+  const normalizedRunStatus = normalizeStoredRunStatus(runStatus);
+  if (!normalizedRunStatus) {
+    throw new Error("Invalid range run status.");
+  }
+  const metadata = loadStatusMetadata(root);
+  const key = relativeString(root, file);
+  const current = metadata.ranges[key];
+  const storedDocument = normalizePreflopRangeDocument(readJson(file), path.basename(file));
+  const reviewStatus = current?.reviewStatus ?? storedDocument.reviewStatus;
+  if (reviewStatus !== "approved") {
+    throw new Error("Range must be approved before run status can be updated.");
+  }
+  metadata.ranges[key] = {
+    reviewStatus,
+    runStatus: normalizedRunStatus,
+    updatedAt: new Date().toISOString()
+  };
+  saveStatusMetadata(root, metadata);
+}
+
+function renameStatusKeys(root: string, oldPath: string, newPath: string): void {
+  const metadata = loadStatusMetadata(root);
+  if (Object.keys(metadata.ranges).length === 0) return;
+  const oldKey = relativeString(root, oldPath);
+  const newKey = relativeString(root, newPath);
+  const ranges: Record<string, RangeStatusEntry> = {};
+  let changed = false;
+  for (const [key, value] of Object.entries(metadata.ranges)) {
+    if (key === oldKey || key.startsWith(`${oldKey}/`)) {
+      ranges[`${newKey}${key.slice(oldKey.length)}`] = value;
+      changed = true;
+    } else {
+      ranges[key] = value;
+    }
+  }
+  if (changed) saveStatusMetadata(root, { version: 1, ranges });
+}
+
+function renameProgressKeys(root: string, oldPath: string, newPath: string): void {
+  const metadata = loadProgressMetadata(root);
+  if (Object.keys(metadata.ranges).length === 0) return;
+  const oldKey = relativeString(root, oldPath);
+  const newKey = relativeString(root, newPath);
+  const ranges: Record<string, RangeProgressEntry> = {};
+  let changed = false;
+  for (const [key, value] of Object.entries(metadata.ranges)) {
+    if (key === oldKey || key.startsWith(`${oldKey}/`)) {
+      ranges[`${newKey}${key.slice(oldKey.length)}`] = value;
+      changed = true;
+    } else {
+      ranges[key] = value;
+    }
+  }
+  if (changed) saveProgressMetadata(root, { version: 1, ranges });
+}
+
+function deleteStatusKeys(root: string, deletedPath: string): void {
+  const metadata = loadStatusMetadata(root);
+  if (Object.keys(metadata.ranges).length === 0) return;
+  const deletedKey = relativeString(root, deletedPath);
+  const ranges = Object.fromEntries(
+    Object.entries(metadata.ranges).filter(([key]) => key !== deletedKey && !key.startsWith(`${deletedKey}/`))
+  );
+  if (Object.keys(ranges).length !== Object.keys(metadata.ranges).length) {
+    saveStatusMetadata(root, { version: 1, ranges });
+  }
+}
+
+function deleteProgressKeys(root: string, deletedPath: string): void {
+  const metadata = loadProgressMetadata(root);
+  if (Object.keys(metadata.ranges).length === 0) return;
+  const deletedKey = relativeString(root, deletedPath);
+  const ranges = Object.fromEntries(
+    Object.entries(metadata.ranges).filter(([key]) => key !== deletedKey && !key.startsWith(`${deletedKey}/`))
+  );
+  if (Object.keys(ranges).length !== Object.keys(metadata.ranges).length) {
+    saveProgressMetadata(root, { version: 1, ranges });
+  }
+}
+
+function normalizeStoredStatusEntry(value: unknown): Omit<RangeStatusEntry, "updatedAt"> | null {
+  const reviewSource = isRecord(value) ? value.reviewStatus ?? value.status : value;
+  const runSource = isRecord(value) ? value.runStatus ?? value.status : value;
+  const reviewStatus = normalizeStoredReviewStatus(reviewSource);
+  if (!reviewStatus) return null;
+  return {
+    reviewStatus,
+    runStatus: reviewStatus === "approved" ? normalizeStoredRunStatus(runSource) ?? "idle" : "idle"
+  };
+}
+
+function normalizeStoredReviewStatus(value: unknown): PreflopReviewStatus | null {
+  const normalized = String(value ?? "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+  if ((PREFLOP_REVIEW_STATUSES as readonly string[]).includes(normalized)) {
+    return normalized as PreflopReviewStatus;
+  }
+  if ((PREFLOP_RUN_STATUSES as readonly string[]).includes(normalized)) {
+    return "approved";
+  }
+  return null;
+}
+
+function normalizeStoredRunStatus(value: unknown): PreflopRunStatus | null {
+  const normalized = String(value ?? "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+  if ((PREFLOP_RUN_STATUSES as readonly string[]).includes(normalized)) {
+    return normalized as PreflopRunStatus;
+  }
+  return null;
+}
+
+function normalizeProgressEntry(value: unknown): RangeProgressEntry | null {
+  if (!isRecord(value)) return null;
+  const datasetName = typeof value.datasetName === "string" && value.datasetName.trim()
+    ? value.datasetName.trim()
+    : null;
+  if (!datasetName) return null;
+  const totalRows = positiveTotalRows(value.totalRows);
+  return {
+    datasetName,
+    rows: normalizedRows(value.rows),
+    totalRows,
+    ratio: clampRatio(value.ratio ?? normalizedRows(value.rows) / totalRows),
+    checkedAt: typeof value.checkedAt === "string" ? value.checkedAt : undefined,
+    updatedAt: typeof value.updatedAt === "string" ? value.updatedAt : undefined,
+    error: typeof value.error === "string" ? value.error : undefined
+  };
+}
+
+function progressEntry(datasetName: string, rows: number, totalRows: number, checkedAt?: string): RangeProgressEntry {
+  const normalizedTotal = positiveTotalRows(totalRows);
+  const normalizedRowCount = normalizedRows(rows);
+  return {
+    datasetName,
+    rows: normalizedRowCount,
+    totalRows: normalizedTotal,
+    ratio: clampRatio(normalizedRowCount / normalizedTotal),
+    checkedAt,
+    updatedAt: checkedAt
+  };
+}
+
+async function fetchHuggingFaceDatasetRows(repoId: string, hfToken: string | null): Promise<number> {
+  const url = `https://datasets-server.huggingface.co/size?dataset=${encodeURIComponent(repoId)}`;
+  const headers: Record<string, string> = {};
+  const token = hfToken?.trim();
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const response = await fetch(url, {
+    headers,
+    signal: AbortSignal.timeout(10_000)
+  });
+  if (response.status === 404) return 0;
+  if (!response.ok) {
+    throw new Error(`Hugging Face size check failed for ${repoId}: ${response.status} ${response.statusText}`);
+  }
+  const data = await response.json() as unknown;
+  return normalizedRows(extractHuggingFaceRows(data) ?? 0);
+}
+
+function extractHuggingFaceRows(data: unknown): number | null {
+  const record = isRecord(data) ? data : null;
+  const size = record && isRecord(record.size) ? record.size : null;
+  const sizeDatasetRows = readNestedNumber(size, ["dataset", "num_rows"]);
+  if (sizeDatasetRows != null) return sizeDatasetRows;
+  const datasetRows = readNestedNumber(data, ["dataset", "num_rows"]);
+  if (datasetRows != null) return datasetRows;
+
+  const splits: unknown[] | null = size && Array.isArray(size.splits)
+    ? size.splits
+    : record && Array.isArray(record.splits)
+      ? record.splits
+      : null;
+  if (splits) {
+    const splitRows = splits
+      .map((split: unknown) => isRecord(split) && typeof split.num_rows === "number" ? split.num_rows : null)
+      .filter((value): value is number => value != null);
+    if (splitRows.length > 0) return splitRows.reduce((sum: number, value: number) => sum + value, 0);
+  }
+
+  return findFirstNumRows(data);
+}
+
+function readNestedNumber(value: unknown, keys: string[]): number | null {
+  let current = value;
+  for (const key of keys) {
+    if (!isRecord(current)) return null;
+    current = current[key];
+  }
+  return typeof current === "number" && Number.isFinite(current) ? current : null;
+}
+
+function findFirstNumRows(value: unknown): number | null {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findFirstNumRows(item);
+      if (found != null) return found;
+    }
+    return null;
+  }
+  if (!isRecord(value)) return null;
+  if (typeof value.num_rows === "number" && Number.isFinite(value.num_rows)) return value.num_rows;
+  for (const child of Object.values(value)) {
+    const found = findFirstNumRows(child);
+    if (found != null) return found;
+  }
+  return null;
+}
+
+function normalizedRows(value: unknown): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) return 0;
+  return Math.floor(parsed);
+}
+
+function positiveTotalRows(value: unknown): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return SOLVER_TOTAL_ROWS;
+  return Math.floor(parsed);
+}
+
+function clampRatio(value: unknown): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) return 0;
+  return Math.min(1, parsed);
+}
+
+function normalizedRepoNamespace(value: unknown): string {
+  const namespace = typeof value === "string" ? value.trim() : "";
+  return namespace || "Tsumugii";
+}
+
+async function runWithConcurrency<T>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T) => Promise<void>
+): Promise<void> {
+  let index = 0;
+  const workerCount = Math.max(1, Math.min(concurrency, items.length));
+  await Promise.all(Array.from({ length: workerCount }, async () => {
+    while (index < items.length) {
+      const item = items[index]!;
+      index += 1;
+      await worker(item);
+    }
+  }));
 }
 
 function uniquePath(target: string): string {

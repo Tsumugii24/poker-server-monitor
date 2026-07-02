@@ -21,6 +21,19 @@ describe("preflop range helpers", () => {
     expect(document.A.call).toBe("AQs:0.250");
   });
 
+  it("maps legacy run statuses into review and run layers", () => {
+    const document = normalizePreflopRangeDocument({
+      status: "running",
+      A: { raise: "AA", call: "" },
+      B: { raise: "", call: "KK" }
+    });
+
+    expect(document.status).toBe("approved");
+    expect(document.reviewStatus).toBe("approved");
+    expect(document.runStatus).toBe("running");
+    expect(document.learned).toBe(true);
+  });
+
   it("summarizes raise, call, and fold percentages for both players", () => {
     const summary = summarizePreflopRange({
       player_names: { A: "HERO", B: "VILLAIN" },

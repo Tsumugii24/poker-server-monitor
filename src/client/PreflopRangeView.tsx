@@ -25,7 +25,9 @@ import {
   PREFLOP_HAND_GRID,
   PREFLOP_RANKS,
   PREFLOP_PLAYERS,
-  PREFLOP_RANGE_STATUSES,
+  PREFLOP_REVIEW_STATUSES,
+  PREFLOP_RUN_STATUSES,
+  normalizePreflopRangeDocument,
   summarizePreflopRange,
   type PreflopHandCode,
   type PreflopPlayerKey,
@@ -33,23 +35,29 @@ import {
   type PreflopRangeFileItem,
   type PreflopRangeFileResponse,
   type PreflopRangeFolderItem,
-  type PreflopRangeStatus,
+  type PreflopRangeProgress,
+  type PreflopReviewStatus,
+  type PreflopRunStatus,
   type PreflopRangeSummary,
   type PreflopRangeTreeItem,
   type PreflopRangeTreeResponse
 } from "../shared/preflopRange";
 import {
   DEFAULT_SOLVER_JOB_SETTINGS,
+  DEFAULT_SOLVER_SCENARIO_LIBRARY,
   SOLVER_EXPORT_FORMATS,
-  SOLVER_SCENARIOS,
   SOLVER_UPLOAD_FORMATS,
   type SolverExportFormat,
+  type SolverDatasetRepoStatus,
   type SolverJob,
   type SolverJobEvent,
   type SolverJobPreview,
+  type SolverJobPreviewRequest,
   type SolverJobSettings,
   type SolverJobsResponse,
   type SolverScenario,
+  type SolverScenarioLibraryItem,
+  type SolverScenarioLibraryResponse,
   type SolverUploadFormat
 } from "../shared/solverJobs";
 import type {
@@ -79,9 +87,11 @@ type DropTarget = {
 type PendingStatusChange = {
   path: string;
   name: string;
-  from: PreflopRangeStatus;
-  to: PreflopRangeStatus;
+  from: PreflopReviewStatus;
+  to: PreflopReviewStatus;
 };
+
+type RangeStatusView = "labeling" | "already";
 
 type OfflineServerNotice = {
   serverId: string;
@@ -90,12 +100,26 @@ type OfflineServerNotice = {
   action: string;
 };
 
+type PendingDatasetRepoAction = {
+  action: "preview" | "start-now" | "queue-next";
+  request: SolverJobPreviewRequest;
+};
+
+type PendingScenarioLibraryAction = {
+  action: "add" | "update" | "delete";
+  scenario: SolverScenarioLibraryItem;
+  previousId?: string;
+};
+
 const EXPANDED_FOLDERS_KEY = "preflop-range-expanded-folders";
 const DEFAULT_SELECTED_HAND = "AA";
-const RANGE_STATUS_LABELS: Record<PreflopRangeStatus, string> = {
+const REVIEW_STATUS_LABELS: Record<PreflopReviewStatus, string> = {
   under_review: "Under review",
   has_problem: "Has problem",
-  approved: "Approved",
+  approved: "Approved"
+};
+const RUN_STATUS_LABELS: Record<PreflopRunStatus, string> = {
+  idle: "Idle",
   queue: "Queue",
   running: "Running",
   solved: "Solved"
@@ -116,11 +140,16 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
   const [renamingPath, setRenamingPath] = useState<string | null>(null);
   const [renamingName, setRenamingName] = useState("");
   const [rangeManageMode, setRangeManageMode] = useState(false);
-  const [visibleStatuses, setVisibleStatuses] = useState<Set<PreflopRangeStatus>>(
-    () => new Set(PREFLOP_RANGE_STATUSES)
+  const [rangeStatusView, setRangeStatusView] = useState<RangeStatusView>("labeling");
+  const [visibleReviewStatuses, setVisibleReviewStatuses] = useState<Set<PreflopReviewStatus>>(
+    () => new Set(PREFLOP_REVIEW_STATUSES)
+  );
+  const [visibleRunStatuses, setVisibleRunStatuses] = useState<Set<PreflopRunStatus>>(
+    () => new Set(PREFLOP_RUN_STATUSES)
   );
   const [deleteTarget, setDeleteTarget] = useState<SelectedRangePath | null>(null);
   const [pendingStatusChange, setPendingStatusChange] = useState<PendingStatusChange | null>(null);
+  const [approveAllPending, setApproveAllPending] = useState(false);
   const [rangeTextCopied, setRangeTextCopied] = useState(false);
   const [dragItem, setDragItem] = useState<DragItem | null>(null);
   const [dropTarget, setDropTarget] = useState<DropTarget | null>(null);
@@ -134,19 +163,56 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
   const [jobSettings, setJobSettings] = useState<SolverJobSettings>(DEFAULT_SOLVER_JOB_SETTINGS);
   const [jobPreview, setJobPreview] = useState<SolverJobPreview | null>(null);
   const [selectedJobScenario, setSelectedJobScenario] = useState<SolverScenario | "">("");
+  const [jobDatasetName, setJobDatasetName] = useState("");
+  const [jobDatasetNameTouched, setJobDatasetNameTouched] = useState(false);
   const [confirmUnstudied, setConfirmUnstudied] = useState(false);
   const [jobBusy, setJobBusy] = useState<string | null>(null);
   const [jobError, setJobError] = useState<string | null>(null);
+  const [scenarioLibrary, setScenarioLibrary] = useState<SolverScenarioLibraryItem[]>(DEFAULT_SOLVER_SCENARIO_LIBRARY);
+  const [scenarioLibraryUpdatedAt, setScenarioLibraryUpdatedAt] = useState<string | null>(null);
+  const [selectedScenarioLibraryId, setSelectedScenarioLibraryId] = useState<string>(DEFAULT_SOLVER_SCENARIO_LIBRARY[0]?.id ?? "");
+  const [scenarioManageMode, setScenarioManageMode] = useState(false);
+  const [scenarioDraft, setScenarioDraft] = useState<SolverScenarioLibraryItem>(
+    DEFAULT_SOLVER_SCENARIO_LIBRARY[0] ?? emptyScenarioLibraryItem()
+  );
+  const [scenarioCopied, setScenarioCopied] = useState(false);
+  const [pendingScenarioAction, setPendingScenarioAction] = useState<PendingScenarioLibraryAction | null>(null);
   const [offlineServerNotice, setOfflineServerNotice] = useState<OfflineServerNotice | null>(null);
+  const [datasetRepoStatus, setDatasetRepoStatus] = useState<SolverDatasetRepoStatus | null>(null);
+  const [datasetRepoDialog, setDatasetRepoDialog] = useState<SolverDatasetRepoStatus | null>(null);
+  const [datasetRepoConfirmed, setDatasetRepoConfirmed] = useState(false);
+  const [pendingDatasetRepoAction, setPendingDatasetRepoAction] = useState<PendingDatasetRepoAction | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const folderInputRef = useRef<HTMLInputElement | null>(null);
 
   const loadTree = useCallback(async () => {
+    setLoading(true);
     setError(null);
     try {
       const response = await fetchPreflopJson<PreflopRangeTreeResponse>("/api/preflop-ranges");
-      setTree(response.tree);
-      if (currentFolderPath && !findFolder(response.tree, currentFolderPath)) {
+      const normalizedTree = normalizeRangeTreeItems(response.tree);
+      setTree(normalizedTree);
+      if (currentFolderPath && !findFolder(normalizedTree, currentFolderPath)) {
+        setCurrentFolderPath("");
+      }
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setLoading(false);
+    }
+  }, [currentFolderPath]);
+
+  const refreshRangeProgress = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const response = await fetchPreflopJson<PreflopRangeTreeResponse & { ok: boolean; checked: number; failed: number }>(
+        "/api/preflop-ranges/refresh-progress",
+        { method: "POST" }
+      );
+      const normalizedTree = normalizeRangeTreeItems(response.tree);
+      setTree(normalizedTree);
+      if (currentFolderPath && !findFolder(normalizedTree, currentFolderPath)) {
         setCurrentFolderPath("");
       }
     } catch (caught) {
@@ -198,6 +264,25 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
     void loadJobContext();
   }, [loadJobContext]);
 
+  const loadScenarioLibrary = useCallback(async () => {
+    try {
+      const response = await fetchPreflopJson<SolverScenarioLibraryResponse>("/api/scenarios");
+      setScenarioLibrary(response.scenarios);
+      setScenarioLibraryUpdatedAt(response.updatedAt);
+      setSelectedScenarioLibraryId((current) =>
+        current && response.scenarios.some((scenario) => scenario.id === current)
+          ? current
+          : response.scenarios[0]?.id ?? ""
+      );
+    } catch (caught) {
+      setJobError(caught instanceof Error ? caught.message : String(caught));
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadScenarioLibrary();
+  }, [loadScenarioLibrary]);
+
   useEffect(() => {
     try {
       localStorage.setItem(EXPANDED_FOLDERS_KEY, JSON.stringify([...expandedFolders]));
@@ -209,25 +294,45 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
   useEffect(() => {
     setJobPreview(null);
     setSelectedJobScenario("");
+    setJobDatasetName("");
+    setJobDatasetNameTouched(false);
+    setDatasetRepoStatus(null);
+    setDatasetRepoDialog(null);
+    setDatasetRepoConfirmed(false);
+    setPendingDatasetRepoAction(null);
     setConfirmUnstudied(false);
   }, [selectedPath?.path]);
 
   const folder = findFolder(tree, currentFolderPath);
   const currentFolderItems = folder ? folder.children : tree;
   const currentItems = useMemo(
-    () => filterTreeItems(currentFolderItems, query, visibleStatuses),
-    [currentFolderItems, query, visibleStatuses]
+    () => filterTreeItems(currentFolderItems, query, rangeStatusView, visibleReviewStatuses, visibleRunStatuses),
+    [currentFolderItems, query, rangeStatusView, visibleReviewStatuses, visibleRunStatuses]
   );
   const summary = useMemo<PreflopRangeSummary | null>(
     () => draft ? summarizePreflopRange(draft, selectedPath?.name ?? "") : selectedFile?.summary ?? null,
     [draft, selectedFile, selectedPath?.name]
   );
   const selectedFolderForWrites = selectedPath?.type === "folder" ? selectedPath.path : currentFolderPath;
-  const statusCounts = useMemo(() => countRangeStatuses(tree), [tree]);
-  const allStatusesVisible = visibleStatuses.size === PREFLOP_RANGE_STATUSES.length;
+  const reviewStatusCounts = useMemo(() => countReviewStatuses(tree), [tree]);
+  const runStatusCounts = useMemo(() => countRunStatuses(tree), [tree]);
+  const allStatusesVisible = rangeStatusView === "labeling"
+    ? visibleReviewStatuses.size === PREFLOP_REVIEW_STATUSES.length
+    : visibleRunStatuses.size === PREFLOP_RUN_STATUSES.length;
+  const statusScopeCount = rangeStatusView === "labeling" ? countFiles(tree) : countApprovedFiles(tree);
   const selectedRangePathForJob = selectedPath?.type === "file" ? selectedPath.path : "";
   const selectedRangeNameForJob = selectedPath?.type === "file" ? displayRangeName(selectedPath.name) : "";
   const solverRangeText = useMemo(() => summary ? formatSolverRangeText(summary) : "", [summary]);
+  const selectedScenarioLibraryItem = useMemo(
+    () => scenarioLibrary.find((scenario) => scenario.id === selectedScenarioLibraryId) ?? scenarioLibrary[0] ?? null,
+    [scenarioLibrary, selectedScenarioLibraryId]
+  );
+
+  useEffect(() => {
+    if (!scenarioManageMode && selectedScenarioLibraryItem) {
+      setScenarioDraft(selectedScenarioLibraryItem);
+    }
+  }, [scenarioManageMode, selectedScenarioLibraryItem]);
 
   const clearSelectedRange = () => {
     setSelectedPath(null);
@@ -264,9 +369,9 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
     }
     setError(null);
     try {
-      const response = await fetchPreflopJson<PreflopRangeFileResponse>(
+      const response = normalizeRangeFileResponse(await fetchPreflopJson<PreflopRangeFileResponse>(
         `/api/preflop-ranges/file?path=${encodeURIComponent(item.path)}`
-      );
+      ));
       setSelectedPath({ type: "file", path: item.path, name: item.name });
       setSelectedFile(response);
       setDraft(response.summary.data);
@@ -287,9 +392,9 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
     }
   };
 
-  const requestRangeStatusChange = (status: PreflopRangeStatus, item?: PreflopRangeFileItem) => {
+  const requestRangeStatusChange = (status: PreflopReviewStatus, item?: PreflopRangeFileItem) => {
     const targetPath = item?.path ?? (selectedPath?.type === "file" ? selectedPath.path : "");
-    const originalStatus = item?.status ?? draft?.status;
+    const originalStatus = item?.reviewStatus ?? draft?.reviewStatus ?? draft?.status;
     const targetName = item?.name ?? selectedPath?.name ?? targetPath;
     if (!targetPath || !originalStatus || originalStatus === status) return;
     setPendingStatusChange({
@@ -300,16 +405,16 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
     });
   };
 
-  const updateRangeStatus = async (status: PreflopRangeStatus, targetPath: string) => {
+  const updateRangeStatus = async (status: PreflopReviewStatus, targetPath: string) => {
     if (!targetPath) return false;
     setError(null);
     setSaving(true);
     try {
-      const response = await fetchPreflopJson<PreflopRangeFileResponse>("/api/preflop-ranges/status", {
+      const response = normalizeRangeFileResponse(await fetchPreflopJson<PreflopRangeFileResponse>("/api/preflop-ranges/status", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ path: targetPath, status })
-      });
+      }));
       if (selectedPath?.type === "file" && selectedPath.path === targetPath) {
         setSelectedFile(response);
         setDraft(response.summary.data);
@@ -328,6 +433,30 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
     if (!pendingStatusChange) return;
     const updated = await updateRangeStatus(pendingStatusChange.to, pendingStatusChange.path);
     if (updated) setPendingStatusChange(null);
+  };
+
+  const confirmApproveAllRanges = async () => {
+    setError(null);
+    setSaving(true);
+    try {
+      const response = await fetchPreflopJson<{ ok: boolean; count: number; tree: PreflopRangeTreeItem[] }>(
+        "/api/preflop-ranges/approve-all",
+        { method: "POST" }
+      );
+      setTree(normalizeRangeTreeItems(response.tree));
+      if (selectedPath?.type === "file") {
+        const selectedResponse = normalizeRangeFileResponse(await fetchPreflopJson<PreflopRangeFileResponse>(
+          `/api/preflop-ranges/file?path=${encodeURIComponent(selectedPath.path)}`
+        ));
+        setSelectedFile(selectedResponse);
+        setDraft(selectedResponse.summary.data);
+      }
+      setApproveAllPending(false);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setSaving(false);
+    }
   };
 
   const createFolder = async () => {
@@ -366,11 +495,31 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
   }, [rangeManageMode]);
 
   const showAllStatuses = () => {
-    setVisibleStatuses(new Set(PREFLOP_RANGE_STATUSES));
+    if (rangeStatusView === "labeling") {
+      setVisibleReviewStatuses(new Set(PREFLOP_REVIEW_STATUSES));
+    } else {
+      setVisibleRunStatuses(new Set(PREFLOP_RUN_STATUSES));
+    }
   };
 
-  const toggleStatusFilter = (status: PreflopRangeStatus) => {
-    setVisibleStatuses((current) => {
+  const activateRangeStatusView = (view: RangeStatusView) => {
+    setRangeStatusView(view);
+    if (view === "already") {
+      void refreshRangeProgress();
+    }
+  };
+
+  const toggleReviewStatusFilter = (status: PreflopReviewStatus) => {
+    setVisibleReviewStatuses((current) => {
+      const next = new Set(current);
+      if (next.has(status)) next.delete(status);
+      else next.add(status);
+      return next;
+    });
+  };
+
+  const toggleRunStatusFilter = (status: PreflopRunStatus) => {
+    setVisibleRunStatuses((current) => {
       const next = new Set(current);
       if (next.has(status)) next.delete(status);
       else next.add(status);
@@ -554,23 +703,53 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
     }
   };
 
+  const clearDatasetRepoGate = () => {
+    setDatasetRepoStatus(null);
+    setDatasetRepoDialog(null);
+    setDatasetRepoConfirmed(false);
+    setPendingDatasetRepoAction(null);
+  };
+
+  const solverJobRequest = (scenarioOverride = selectedJobScenario): SolverJobPreviewRequest | null => {
+    if (!selectedRangePathForJob || !selectedServerId) return null;
+    return {
+      serverId: selectedServerId,
+      rangePath: selectedRangePathForJob,
+      scenario: scenarioOverride || undefined,
+      datasetName: jobDatasetNameTouched ? jobDatasetName.trim() || undefined : undefined,
+      settings: jobSettings,
+      confirmUnstudied
+    };
+  };
+
+  const checkDatasetRepoForAction = async (
+    action: PendingDatasetRepoAction["action"],
+    requestPayload: SolverJobPreviewRequest
+  ): Promise<SolverDatasetRepoStatus | null> => {
+    const status = await fetchPreflopJson<SolverDatasetRepoStatus>("/api/jobs/dataset-repo/check", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(requestPayload)
+    });
+    setJobPreview(status.preview);
+    setDatasetRepoStatus(status);
+    setJobDatasetName(status.datasetName);
+    if (!status.exists) {
+      setDatasetRepoDialog(status);
+      setDatasetRepoConfirmed(false);
+      setPendingDatasetRepoAction({ action, request: { ...requestPayload, datasetName: status.datasetName } });
+      return null;
+    }
+    return status;
+  };
+
   const previewJob = async (scenarioOverride = selectedJobScenario) => {
-    if (!selectedRangePathForJob || !selectedServerId) return;
+    const requestPayload = solverJobRequest(scenarioOverride);
+    if (!requestPayload) return;
     setJobBusy("preview");
     setJobError(null);
     try {
-      const preview = await fetchPreflopJson<SolverJobPreview>("/api/jobs/preview", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          serverId: selectedServerId,
-          rangePath: selectedRangePathForJob,
-          scenario: scenarioOverride || undefined,
-          settings: jobSettings,
-          confirmUnstudied
-        })
-      });
-      setJobPreview(preview);
+      await checkDatasetRepoForAction("preview", requestPayload);
     } catch (caught) {
       setJobError(caught instanceof Error ? caught.message : String(caught));
     } finally {
@@ -581,13 +760,16 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
   const changeJobScenario = (scenario: SolverScenario | "") => {
     setSelectedJobScenario(scenario);
     setJobPreview(null);
+    if (!jobDatasetNameTouched) setJobDatasetName("");
+    clearDatasetRepoGate();
     if (selectedRangePathForJob && selectedServerId) {
       void previewJob(scenario);
     }
   };
 
   const createSolverJob = async (queueMode: "manual" | "queue_next", autoStart: boolean) => {
-    if (!selectedRangePathForJob || !selectedServerId) return;
+    const requestPayload = solverJobRequest();
+    if (!requestPayload) return;
     const server = servers.find((candidate) => candidate.id === selectedServerId) ?? null;
     if (!serverIsOnlineForJob(server)) {
       showOfflineServerNotice(server, selectedServerId, autoStart ? "start job" : "queue job");
@@ -596,15 +778,32 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
     setJobBusy(autoStart ? "start-now" : "queue-next");
     setJobError(null);
     try {
+      const repoStatus = await checkDatasetRepoForAction(autoStart ? "start-now" : "queue-next", requestPayload);
+      if (!repoStatus) return;
+      await createSolverJobAfterRepoReady(queueMode, autoStart, {
+        ...requestPayload,
+        datasetName: repoStatus.datasetName,
+        confirmDatasetName: true
+      });
+    } catch (caught) {
+      setJobError(caught instanceof Error ? caught.message : String(caught));
+      await loadJobContext();
+      await loadTree();
+    } finally {
+      setJobBusy(null);
+    }
+  };
+
+  const createSolverJobAfterRepoReady = async (
+    queueMode: "manual" | "queue_next",
+    autoStart: boolean,
+    requestPayload: SolverJobPreviewRequest & { confirmDatasetName: boolean }
+  ) => {
       const created = await fetchPreflopJson<{ job: SolverJob; events: SolverJobEvent[] }>("/api/jobs", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          serverId: selectedServerId,
-          rangePath: selectedRangePathForJob,
-          scenario: selectedJobScenario || undefined,
-          settings: jobSettings,
-          confirmUnstudied,
+          ...requestPayload,
           queueMode
         })
       });
@@ -616,9 +815,148 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
       }
       setJobPreview(null);
       await loadJobContext();
+      await loadTree();
+  };
+
+  const confirmDatasetRepoCreation = async () => {
+    if (!datasetRepoDialog || !pendingDatasetRepoAction || !datasetRepoConfirmed) return;
+    setJobBusy("dataset-repo");
+    setJobError(null);
+    try {
+      const ensured = await fetchPreflopJson<SolverDatasetRepoStatus>("/api/jobs/dataset-repo/ensure", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ...pendingDatasetRepoAction.request,
+          datasetName: datasetRepoDialog.datasetName,
+          confirmDatasetName: true
+        })
+      });
+      setDatasetRepoStatus(ensured);
+      setJobPreview(ensured.preview);
+      setJobDatasetName(ensured.datasetName);
+      const pending = pendingDatasetRepoAction;
+      setDatasetRepoDialog(null);
+      setPendingDatasetRepoAction(null);
+      setDatasetRepoConfirmed(false);
+      if (pending.action === "preview") return;
+      await createSolverJobAfterRepoReady(
+        pending.action === "start-now" ? "manual" : "queue_next",
+        pending.action === "start-now",
+        {
+          ...pending.request,
+          datasetName: ensured.datasetName,
+          confirmDatasetName: true
+        }
+      );
     } catch (caught) {
       setJobError(caught instanceof Error ? caught.message : String(caught));
       await loadJobContext();
+      await loadTree();
+    } finally {
+      setJobBusy(null);
+    }
+  };
+
+  const selectScenarioLibraryItem = (scenarioId: string) => {
+    const scenario = scenarioLibrary.find((item) => item.id === scenarioId);
+    if (!scenario) return;
+    setSelectedScenarioLibraryId(scenario.id);
+    setScenarioDraft(scenario);
+    onScenarioLibrarySelect(scenario.id);
+  };
+
+  const onScenarioLibrarySelect = (scenarioId: string) => {
+    changeJobScenario(scenarioId);
+  };
+
+  const copyScenarioSettings = async () => {
+    if (!selectedScenarioLibraryItem) return;
+    try {
+      await navigator.clipboard.writeText(formatScenarioLibraryText(selectedScenarioLibraryItem));
+      setScenarioCopied(true);
+      window.setTimeout(() => setScenarioCopied(false), 1400);
+    } catch {
+      setJobError("Unable to copy scenario settings.");
+    }
+  };
+
+  const startAddScenario = () => {
+    setScenarioManageMode(true);
+    setSelectedScenarioLibraryId("");
+    setScenarioDraft(emptyScenarioLibraryItem());
+  };
+
+  const requestScenarioAdd = () => {
+    const scenario = normalizeScenarioDraft(scenarioDraft);
+    if (!scenario) {
+      setJobError("Scenario id, label, config template, pot and effective stack are required.");
+      return;
+    }
+    setPendingScenarioAction({ action: "add", scenario });
+  };
+
+  const requestScenarioUpdate = () => {
+    const scenario = normalizeScenarioDraft(scenarioDraft);
+    if (!scenario || !selectedScenarioLibraryId) {
+      setJobError("Select a scenario before updating.");
+      return;
+    }
+    setPendingScenarioAction({ action: "update", scenario, previousId: selectedScenarioLibraryId });
+  };
+
+  const requestScenarioDelete = () => {
+    if (!selectedScenarioLibraryItem) return;
+    setPendingScenarioAction({ action: "delete", scenario: selectedScenarioLibraryItem });
+  };
+
+  const confirmScenarioLibraryAction = async () => {
+    if (!pendingScenarioAction) return;
+    setJobBusy(`scenario:${pendingScenarioAction.action}`);
+    setJobError(null);
+    try {
+      let response: SolverScenarioLibraryResponse;
+      if (pendingScenarioAction.action === "add") {
+        response = await fetchPreflopJson<SolverScenarioLibraryResponse>("/api/scenarios", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ scenario: pendingScenarioAction.scenario })
+        });
+      } else if (pendingScenarioAction.action === "update") {
+        response = await fetchPreflopJson<SolverScenarioLibraryResponse>(
+          `/api/scenarios/${encodeURIComponent(pendingScenarioAction.previousId ?? pendingScenarioAction.scenario.id)}`,
+          {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ scenario: pendingScenarioAction.scenario })
+          }
+        );
+      } else {
+        response = await fetchPreflopJson<SolverScenarioLibraryResponse>(
+          `/api/scenarios/${encodeURIComponent(pendingScenarioAction.scenario.id)}`,
+          { method: "DELETE" }
+        );
+      }
+      setScenarioLibrary(response.scenarios);
+      setScenarioLibraryUpdatedAt(response.updatedAt);
+      const nextSelectedId = pendingScenarioAction.action === "delete"
+        ? response.scenarios[0]?.id ?? ""
+        : pendingScenarioAction.scenario.id;
+      setSelectedScenarioLibraryId(nextSelectedId);
+      const nextScenario = response.scenarios.find((scenario) => scenario.id === nextSelectedId) ?? response.scenarios[0];
+      setScenarioDraft(nextScenario ?? emptyScenarioLibraryItem());
+      if (
+        pendingScenarioAction.action === "update" &&
+        selectedJobScenario === pendingScenarioAction.previousId &&
+        pendingScenarioAction.previousId !== pendingScenarioAction.scenario.id
+      ) {
+        changeJobScenario(pendingScenarioAction.scenario.id);
+      } else if (selectedJobScenario && !response.scenarios.some((scenario) => scenario.id === selectedJobScenario)) {
+        changeJobScenario("");
+      }
+      setPendingScenarioAction(null);
+    } catch (caught) {
+      setJobError(caught instanceof Error ? caught.message : String(caught));
     } finally {
       setJobBusy(null);
     }
@@ -638,9 +976,11 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
         { method: "POST" }
       );
       await loadJobContext();
+      await loadTree();
     } catch (caught) {
       setJobError(caught instanceof Error ? caught.message : String(caught));
       await loadJobContext();
+      await loadTree();
     } finally {
       setJobBusy(null);
     }
@@ -667,7 +1007,11 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
           <h2>Range Library</h2>
         </div>
         <div className="preflop-heading-actions">
-          <button className="icon-button" onClick={() => void loadTree()} disabled={loading || saving}>
+          <button
+            className="icon-button"
+            onClick={() => void (rangeStatusView === "already" ? refreshRangeProgress() : loadTree())}
+            disabled={loading || saving}
+          >
             <RefreshCw size={16} />
             Refresh
           </button>
@@ -704,34 +1048,73 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
             />
           </label>
 
-          <div className="preflop-status-filters" aria-label="Range status filters">
-            <button
-              className={`preflop-status-filter-chip all ${allStatusesVisible ? "active" : "inactive"}`}
-              aria-pressed={allStatusesVisible}
-              onClick={showAllStatuses}
-            >
-              All
-              <span>{countFiles(tree)}</span>
-            </button>
-            {PREFLOP_RANGE_STATUSES.map((status) => {
-              const visible = visibleStatuses.has(status);
-              return (
-                <button
-                  key={status}
-                  className={[
-                    "preflop-status-filter-chip",
-                    `status-${status}`,
-                    visible ? "active" : "inactive"
-                  ].join(" ")}
-                  aria-pressed={visible}
-                  onClick={() => toggleStatusFilter(status)}
-                >
-                  <span className={`preflop-status-initial status-${status}`}>{rangeStatusInitial(status)}</span>
-                  {RANGE_STATUS_LABELS[status]}
-                  <span>{statusCounts[status]}</span>
-                </button>
-              );
-            })}
+          <div className="preflop-status-control">
+            <div className="preflop-status-mode-switch" aria-label="Range status mode">
+              <button
+                className={rangeStatusView === "labeling" ? "active" : ""}
+                aria-pressed={rangeStatusView === "labeling"}
+                onClick={() => activateRangeStatusView("labeling")}
+              >
+                All Labeling
+                <span>{countFiles(tree)}</span>
+              </button>
+              <button
+                className={rangeStatusView === "already" ? "active" : ""}
+                aria-pressed={rangeStatusView === "already"}
+                onClick={() => activateRangeStatusView("already")}
+              >
+                Already
+                <span>{countApprovedFiles(tree)}</span>
+              </button>
+            </div>
+
+            <div className="preflop-status-filters" aria-label="Range status filters">
+              <button
+                className={`preflop-status-filter-chip all ${allStatusesVisible ? "active" : "inactive"}`}
+                aria-pressed={allStatusesVisible}
+                onClick={showAllStatuses}
+              >
+                All
+                <span>{statusScopeCount}</span>
+              </button>
+              {rangeStatusView === "labeling" ? PREFLOP_REVIEW_STATUSES.map((status) => {
+                const visible = visibleReviewStatuses.has(status);
+                return (
+                  <button
+                    key={status}
+                    className={[
+                      "preflop-status-filter-chip",
+                      `status-${status}`,
+                      visible ? "active" : "inactive"
+                    ].join(" ")}
+                    aria-pressed={visible}
+                    onClick={() => toggleReviewStatusFilter(status)}
+                  >
+                    <span className={`preflop-status-initial status-${status}`}>{reviewStatusInitial(status)}</span>
+                    {REVIEW_STATUS_LABELS[status]}
+                    <span>{reviewStatusCounts[status]}</span>
+                  </button>
+                );
+              }) : PREFLOP_RUN_STATUSES.map((status) => {
+                const visible = visibleRunStatuses.has(status);
+                return (
+                  <button
+                    key={status}
+                    className={[
+                      "preflop-status-filter-chip",
+                      `status-${status}`,
+                      visible ? "active" : "inactive"
+                    ].join(" ")}
+                    aria-pressed={visible}
+                    onClick={() => toggleRunStatusFilter(status)}
+                  >
+                    <span className={`preflop-status-initial status-${status}`}>{runStatusInitial(status)}</span>
+                    {RUN_STATUS_LABELS[status]}
+                    <span>{runStatusCounts[status]}</span>
+                  </button>
+                );
+              })}
+            </div>
           </div>
 
           <div className="preflop-command-grid">
@@ -746,6 +1129,10 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
             <button className="icon-button compact" onClick={() => setShowNewFolder((current) => !current)} disabled={saving}>
               <FolderPlus size={15} />
               New
+            </button>
+            <button className="icon-button compact" onClick={() => setApproveAllPending(true)} disabled={saving || countFiles(tree) === 0}>
+              <Check size={15} />
+              Approve All
             </button>
             <button className="icon-button compact" onClick={() => void downloadSelected()} disabled={saving}>
               <Download size={15} />
@@ -849,7 +1236,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
                       "preflop-file-row",
                       item.type === "folder" ? "folder" : "file",
                       selectedPath?.path === item.path ? "active" : "",
-                      item.type === "file" ? `status-${item.status}` : "",
+                      item.type === "file" ? `status-${rangeDisplayStatus(item, rangeStatusView)}` : "",
                       dropTarget?.path === item.path ? `drop-${dropTarget.mode}` : ""
                     ].filter(Boolean).join(" ")}
                     role="button"
@@ -931,13 +1318,21 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
                         )
                       )}
                     </span>
+                    {item.type === "file" && rangeStatusView === "already" ? (
+                      <span
+                        className={`preflop-progress-pill ${rangeProgressClass(item.progress?.ratio)}`}
+                        title={rangeProgressTitle(item)}
+                      >
+                        {formatRangeProgress(item.progress)}
+                      </span>
+                    ) : null}
                     {item.type === "folder" ? null : (
                       <span
-                        className={`preflop-status-badge status-${item.status}`}
-                        title={RANGE_STATUS_LABELS[item.status]}
-                        aria-label={RANGE_STATUS_LABELS[item.status]}
+                        className={`preflop-status-badge status-${rangeDisplayStatus(item, rangeStatusView)}`}
+                        title={rangeDisplayStatusLabel(item, rangeStatusView)}
+                        aria-label={rangeDisplayStatusLabel(item, rangeStatusView)}
                       >
-                        {rangeStatusInitial(item.status)}
+                        {rangeDisplayStatusInitial(item, rangeStatusView)}
                       </span>
                     )}
                   </div>
@@ -989,19 +1384,19 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
                 </div>
                 <div className="preflop-workspace-actions">
                   {selectedPath?.type === "file" ? (
-                    <label className={`preflop-detail-status-field status-${draft.status}`}>
-                      <span className={`preflop-status-initial status-${draft.status}`}>
-                        {rangeStatusInitial(draft.status)}
+                    <label className={`preflop-detail-status-field status-${draft.reviewStatus}`}>
+                      <span className={`preflop-status-initial status-${draft.reviewStatus}`}>
+                        {reviewStatusInitial(draft.reviewStatus)}
                       </span>
-                      <span className="preflop-detail-status-label">Status</span>
+                      <span className="preflop-detail-status-label">Review Status</span>
                       <select
-                        className={`preflop-detail-status-select status-${draft.status}`}
-                        value={draft.status}
-                        onChange={(event) => requestRangeStatusChange(event.target.value as PreflopRangeStatus)}
+                        className={`preflop-detail-status-select status-${draft.reviewStatus}`}
+                        value={draft.reviewStatus}
+                        onChange={(event) => requestRangeStatusChange(event.target.value as PreflopReviewStatus)}
                         disabled={saving}
                       >
-                        {PREFLOP_RANGE_STATUSES.map((status) => (
-                          <option key={status} value={status}>{RANGE_STATUS_LABELS[status]}</option>
+                        {PREFLOP_REVIEW_STATUSES.map((status) => (
+                          <option key={status} value={status}>{REVIEW_STATUS_LABELS[status]}</option>
                         ))}
                       </select>
                     </label>
@@ -1082,7 +1477,15 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
           selectedRangeLearned={Boolean(draft?.learned)}
           settings={jobSettings}
           preview={jobPreview}
+          datasetName={jobDatasetName}
+          datasetRepoStatus={datasetRepoStatus}
           selectedScenario={selectedJobScenario}
+          scenarioLibrary={scenarioLibrary}
+          scenarioLibraryUpdatedAt={scenarioLibraryUpdatedAt}
+          selectedScenarioLibraryId={selectedScenarioLibraryId}
+          scenarioManageMode={scenarioManageMode}
+          scenarioDraft={scenarioDraft}
+          scenarioCopied={scenarioCopied}
           confirmUnstudied={confirmUnstudied}
           busy={jobBusy}
           error={jobError}
@@ -1090,16 +1493,35 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
           onServerChange={(serverId) => {
             setSelectedServerId(serverId);
             setJobPreview(null);
+            clearDatasetRepoGate();
+          }}
+          onDatasetNameChange={(datasetName) => {
+            setJobDatasetName(datasetName);
+            setJobDatasetNameTouched(Boolean(datasetName.trim()));
+            setJobPreview(null);
+            clearDatasetRepoGate();
           }}
           onSettingsChange={(patch) => {
             setJobSettings((current) => ({ ...current, ...patch }));
             setJobPreview(null);
+            clearDatasetRepoGate();
           }}
           onConfirmUnstudiedChange={(checked) => {
             setConfirmUnstudied(checked);
             setJobPreview(null);
+            clearDatasetRepoGate();
           }}
           onScenarioChange={changeJobScenario}
+          onScenarioLibrarySelect={selectScenarioLibraryItem}
+          onScenarioManageModeChange={(manage) => {
+            setScenarioManageMode(manage);
+            if (!manage && selectedScenarioLibraryItem) setScenarioDraft(selectedScenarioLibraryItem);
+          }}
+          onScenarioDraftChange={(patch) => setScenarioDraft((current) => ({ ...current, ...patch }))}
+          onScenarioAdd={requestScenarioAdd}
+          onScenarioUpdate={requestScenarioUpdate}
+          onScenarioDelete={requestScenarioDelete}
+          onScenarioCopy={() => void copyScenarioSettings()}
           onPreview={() => void previewJob()}
           onStartNow={() => void createSolverJob("manual", true)}
           onQueueNext={() => void createSolverJob("queue_next", false)}
@@ -1136,6 +1558,110 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
         </div>
       ) : null}
 
+      {datasetRepoDialog ? (
+        <div className="modal-backdrop solver-dataset-backdrop" role="presentation" onClick={() => setDatasetRepoDialog(null)}>
+          <section
+            className="solver-dataset-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="solver-dataset-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="solver-dataset-icon">
+              <ClipboardList size={18} />
+            </div>
+            <div className="solver-dataset-content">
+              <h3 id="solver-dataset-title">Confirm dataset repo</h3>
+              <p>The Hugging Face dataset repo does not exist yet. Confirm the dataset name before creating it.</p>
+              <dl>
+                <div>
+                  <dt>Dataset</dt>
+                  <dd>{datasetRepoDialog.datasetName}</dd>
+                </div>
+                <div>
+                  <dt>Repo</dt>
+                  <dd>{datasetRepoDialog.repoId}</dd>
+                </div>
+                <div>
+                  <dt>Scenario</dt>
+                  <dd>{datasetRepoDialog.preview.scenario}</dd>
+                </div>
+                <div>
+                  <dt>URL</dt>
+                  <dd>{datasetRepoDialog.url}</dd>
+                </div>
+              </dl>
+              <label className="solver-dataset-confirm">
+                <input
+                  type="checkbox"
+                  checked={datasetRepoConfirmed}
+                  onChange={(event) => setDatasetRepoConfirmed(event.target.checked)}
+                />
+                <span>Dataset name is correct. Create this Hugging Face dataset repo.</span>
+              </label>
+              {!datasetRepoDialog.tokenConfigured ? (
+                <div className="notice error compact-notice">HF_TOKEN is required to create the dataset repo.</div>
+              ) : null}
+            </div>
+            <div className="solver-dataset-actions">
+              <button
+                className="icon-button compact"
+                onClick={() => {
+                  setDatasetRepoDialog(null);
+                  setPendingDatasetRepoAction(null);
+                  setDatasetRepoConfirmed(false);
+                }}
+                disabled={jobBusy === "dataset-repo"}
+              >
+                Cancel
+              </button>
+              <button
+                className="icon-button compact primary"
+                onClick={() => void confirmDatasetRepoCreation()}
+                disabled={!datasetRepoConfirmed || !datasetRepoDialog.tokenConfigured || jobBusy === "dataset-repo"}
+              >
+                <Check size={15} />
+                {jobBusy === "dataset-repo" ? "Creating..." : "Create Repo"}
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {pendingScenarioAction ? (
+        <div className="modal-backdrop preflop-confirm-backdrop" role="presentation" onClick={() => setPendingScenarioAction(null)}>
+          <section
+            className="preflop-confirm-dialog scenario-confirm-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="scenario-confirm-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="preflop-confirm-icon">
+              {pendingScenarioAction.action === "delete" ? <Trash2 size={18} /> : <Check size={18} />}
+            </div>
+            <div>
+              <h3 id="scenario-confirm-title">{scenarioActionTitle(pendingScenarioAction.action)}</h3>
+              <p>{pendingScenarioAction.scenario.id}</p>
+              <pre className="scenario-confirm-preview">{formatScenarioLibraryText(pendingScenarioAction.scenario)}</pre>
+            </div>
+            <div className="preflop-confirm-actions">
+              <button className="icon-button compact" onClick={() => setPendingScenarioAction(null)} disabled={jobBusy?.startsWith("scenario:")}>
+                Cancel
+              </button>
+              <button
+                className={`icon-button compact ${pendingScenarioAction.action === "delete" ? "danger" : "primary"}`}
+                onClick={() => void confirmScenarioLibraryAction()}
+                disabled={jobBusy?.startsWith("scenario:")}
+              >
+                {pendingScenarioAction.action === "delete" ? <Trash2 size={15} /> : <Check size={15} />}
+                Confirm
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
       {pendingStatusChange ? (
         <div className="modal-backdrop preflop-confirm-backdrop" role="presentation" onClick={() => setPendingStatusChange(null)}>
           <section
@@ -1153,11 +1679,11 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
               <p>{displayRangeName(pendingStatusChange.name)}</p>
               <div className="preflop-status-change-line">
                 <span className={`preflop-status-change-chip status-${pendingStatusChange.from}`}>
-                  {RANGE_STATUS_LABELS[pendingStatusChange.from]}
+                  {REVIEW_STATUS_LABELS[pendingStatusChange.from]}
                 </span>
                 <ChevronRight size={15} />
                 <span className={`preflop-status-change-chip status-${pendingStatusChange.to}`}>
-                  {RANGE_STATUS_LABELS[pendingStatusChange.to]}
+                  {REVIEW_STATUS_LABELS[pendingStatusChange.to]}
                 </span>
               </div>
             </div>
@@ -1168,6 +1694,35 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
               <button className="icon-button compact primary" onClick={() => void confirmRangeStatusChange()} disabled={saving}>
                 <Check size={15} />
                 Confirm
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {approveAllPending ? (
+        <div className="modal-backdrop preflop-confirm-backdrop" role="presentation" onClick={() => setApproveAllPending(false)}>
+          <section
+            className="preflop-confirm-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="preflop-approve-all-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="preflop-confirm-icon">
+              <Check size={18} />
+            </div>
+            <div>
+              <h3 id="preflop-approve-all-title">Approve all ranges?</h3>
+              <p>This will mark every range file in the library as Approved.</p>
+            </div>
+            <div className="preflop-confirm-actions">
+              <button className="icon-button compact" onClick={() => setApproveAllPending(false)} disabled={saving}>
+                Cancel
+              </button>
+              <button className="icon-button compact primary" onClick={() => void confirmApproveAllRanges()} disabled={saving}>
+                <Check size={15} />
+                Approve All
               </button>
             </div>
           </section>
@@ -1236,14 +1791,30 @@ function SolverJobPanel({
   selectedRangeLearned,
   settings,
   preview,
+  datasetName,
+  datasetRepoStatus,
   selectedScenario,
+  scenarioLibrary,
+  scenarioLibraryUpdatedAt,
+  selectedScenarioLibraryId,
+  scenarioManageMode,
+  scenarioDraft,
+  scenarioCopied,
   confirmUnstudied,
   busy,
   error,
   onRefresh,
   onServerChange,
+  onDatasetNameChange,
   onSettingsChange,
   onScenarioChange,
+  onScenarioLibrarySelect,
+  onScenarioManageModeChange,
+  onScenarioDraftChange,
+  onScenarioAdd,
+  onScenarioUpdate,
+  onScenarioDelete,
+  onScenarioCopy,
   onConfirmUnstudiedChange,
   onPreview,
   onStartNow,
@@ -1259,14 +1830,30 @@ function SolverJobPanel({
   selectedRangeLearned: boolean;
   settings: SolverJobSettings;
   preview: SolverJobPreview | null;
+  datasetName: string;
+  datasetRepoStatus: SolverDatasetRepoStatus | null;
   selectedScenario: SolverScenario | "";
+  scenarioLibrary: SolverScenarioLibraryItem[];
+  scenarioLibraryUpdatedAt: string | null;
+  selectedScenarioLibraryId: string;
+  scenarioManageMode: boolean;
+  scenarioDraft: SolverScenarioLibraryItem;
+  scenarioCopied: boolean;
   confirmUnstudied: boolean;
   busy: string | null;
   error: string | null;
   onRefresh: () => void;
   onServerChange: (serverId: string) => void;
+  onDatasetNameChange: (datasetName: string) => void;
   onSettingsChange: (patch: Partial<SolverJobSettings>) => void;
   onScenarioChange: (scenario: SolverScenario | "") => void;
+  onScenarioLibrarySelect: (scenarioId: string) => void;
+  onScenarioManageModeChange: (manage: boolean) => void;
+  onScenarioDraftChange: (patch: Partial<SolverScenarioLibraryItem>) => void;
+  onScenarioAdd: () => void;
+  onScenarioUpdate: () => void;
+  onScenarioDelete: () => void;
+  onScenarioCopy: () => void;
   onConfirmUnstudiedChange: (checked: boolean) => void;
   onPreview: () => void;
   onStartNow: () => void;
@@ -1281,13 +1868,15 @@ function SolverJobPanel({
     .filter((job) => !["deploying", "running", "stopping", "queued"].includes(job.status))
     .slice(0, 5);
   const latestEventByJobId = useMemo(() => latestJobEvents(events), [events]);
-  const requiresUnstudiedConfirmation = Boolean(selectedRangePath && !selectedRangeLearned) || Boolean(preview?.requiresConfirmation);
+  const requiresApproval = Boolean(selectedRangePath && !selectedRangeLearned) || Boolean(preview?.requiresConfirmation);
   const canSubmit = Boolean(selectedRangePath && selectedServerId && selectedServer);
-  const submitDisabled = !canSubmit || (requiresUnstudiedConfirmation && !confirmUnstudied) || busy != null;
+  const submitDisabled = !canSubmit || requiresApproval || busy != null;
   const warnings = [
     ...(!selectedRangePath ? ["Select a range file before creating a job."] : []),
+    ...(requiresApproval ? ["Approve this range before creating a solver job."] : []),
+    ...(datasetRepoStatus && !datasetRepoStatus.exists ? ["Dataset repo must be confirmed and created before submission."] : []),
     ...(preview?.warnings ?? [])
-  ];
+  ].filter((warning, index, all) => all.indexOf(warning) === index);
 
   return (
     <section className="panel solver-job-panel">
@@ -1310,7 +1899,7 @@ function SolverJobPanel({
             <span>Selected Range</span>
             <strong>{selectedRangeName || "None"}</strong>
             <em className={selectedRangeLearned ? "studied" : "unstudied"}>
-              {selectedRangePath ? (selectedRangeLearned ? "Studied" : "Needs confirmation") : "No file selected"}
+              {selectedRangePath ? (selectedRangeLearned ? "Approved" : "Needs approval") : "No file selected"}
             </em>
           </div>
 
@@ -1325,6 +1914,14 @@ function SolverJobPanel({
                   </option>
                 ))}
               </select>
+            </label>
+            <label className="solver-job-field wide">
+              <span>Dataset</span>
+              <input
+                value={datasetName}
+                placeholder="Auto from range"
+                onChange={(event) => onDatasetNameChange(event.target.value)}
+              />
             </label>
             <label className="solver-job-field">
               <span>Range Expr</span>
@@ -1418,16 +2015,6 @@ function SolverJobPanel({
               />
               <span>Use isomorphism</span>
             </label>
-            {requiresUnstudiedConfirmation ? (
-              <label className="warning">
-                <input
-                  type="checkbox"
-                  checked={confirmUnstudied}
-                  onChange={(event) => onConfirmUnstudiedChange(event.target.checked)}
-                />
-                <span>Submit unstudied range</span>
-              </label>
-            ) : null}
           </div>
 
           <div className="solver-job-advanced-grid">
@@ -1456,6 +2043,25 @@ function SolverJobPanel({
               />
             </label>
           </div>
+
+          <ScenarioLibraryPanel
+            scenarios={scenarioLibrary}
+            updatedAt={scenarioLibraryUpdatedAt}
+            selectedScenarioId={selectedScenarioLibraryId}
+            explicitScenarioId={selectedScenario}
+            manageMode={scenarioManageMode}
+            draft={scenarioDraft}
+            copied={scenarioCopied}
+            busy={busy}
+            onSelect={onScenarioLibrarySelect}
+            onAutoSelect={() => onScenarioChange("")}
+            onManageModeChange={onScenarioManageModeChange}
+            onDraftChange={onScenarioDraftChange}
+            onAdd={onScenarioAdd}
+            onUpdate={onScenarioUpdate}
+            onDelete={onScenarioDelete}
+            onCopy={onScenarioCopy}
+          />
 
           {warnings.length > 0 ? (
             <div className="solver-job-warnings">
@@ -1494,8 +2100,8 @@ function SolverJobPanel({
                       disabled={busy != null}
                     >
                       <option value="">Auto: {preview.scenario}</option>
-                      {SOLVER_SCENARIOS.map((scenario) => (
-                        <option key={scenario} value={scenario}>{scenario}</option>
+                      {scenarioLibrary.map((scenario) => (
+                        <option key={scenario.id} value={scenario.id}>{scenario.id}</option>
                       ))}
                     </select>
                   </dd>
@@ -1503,6 +2109,16 @@ function SolverJobPanel({
                 <div>
                   <dt>Dataset</dt>
                   <dd>{preview.datasetName}</dd>
+                </div>
+                <div>
+                  <dt>Repo Status</dt>
+                  <dd>
+                    {datasetRepoStatus ? (
+                      <span className={`solver-dataset-repo-status ${datasetRepoStatus.exists ? "ready" : "missing"}`}>
+                        {datasetRepoStatus.exists ? (datasetRepoStatus.created ? "Created" : "Exists") : "Missing"}
+                      </span>
+                    ) : "Not checked"}
+                  </dd>
                 </div>
                 <div>
                   <dt>Submitted Range</dt>
@@ -1548,6 +2164,154 @@ function SolverJobPanel({
           />
         </div>
       </div>
+    </section>
+  );
+}
+
+function ScenarioLibraryPanel({
+  scenarios,
+  updatedAt,
+  selectedScenarioId,
+  explicitScenarioId,
+  manageMode,
+  draft,
+  copied,
+  busy,
+  onSelect,
+  onAutoSelect,
+  onManageModeChange,
+  onDraftChange,
+  onAdd,
+  onUpdate,
+  onDelete,
+  onCopy
+}: {
+  scenarios: SolverScenarioLibraryItem[];
+  updatedAt: string | null;
+  selectedScenarioId: string;
+  explicitScenarioId: SolverScenario | "";
+  manageMode: boolean;
+  draft: SolverScenarioLibraryItem;
+  copied: boolean;
+  busy: string | null;
+  onSelect: (scenarioId: string) => void;
+  onAutoSelect: () => void;
+  onManageModeChange: (manage: boolean) => void;
+  onDraftChange: (patch: Partial<SolverScenarioLibraryItem>) => void;
+  onAdd: () => void;
+  onUpdate: () => void;
+  onDelete: () => void;
+  onCopy: () => void;
+}) {
+  const selectedScenario = scenarios.find((scenario) => scenario.id === selectedScenarioId) ?? scenarios[0] ?? null;
+  const disabled = busy != null;
+  return (
+    <section className="solver-scenario-library">
+      <div className="solver-scenario-head">
+        <div>
+          <strong>Scenario Library</strong>
+          <span>{updatedAt ? `Updated ${formatShortDateTime(updatedAt)}` : `${scenarios.length} defaults`}</span>
+        </div>
+        <div className="solver-scenario-actions">
+          <button className="icon-button compact" type="button" onClick={onCopy} disabled={!selectedScenario || disabled}>
+            <Copy size={14} />
+            {copied ? "Copied" : "Copy"}
+          </button>
+          <button
+            className={`icon-button compact ${manageMode ? "primary" : ""}`}
+            type="button"
+            onClick={() => onManageModeChange(!manageMode)}
+            disabled={disabled}
+          >
+            <Pencil size={14} />
+            {manageMode ? "Done" : "Manage"}
+          </button>
+        </div>
+      </div>
+
+      <div className="solver-scenario-selector">
+        <button
+          type="button"
+          className={!explicitScenarioId ? "active auto" : "auto"}
+          onClick={onAutoSelect}
+          disabled={disabled}
+        >
+          Auto
+        </button>
+        {scenarios.map((scenario) => (
+          <button
+            key={scenario.id}
+            type="button"
+            className={explicitScenarioId && selectedScenarioId === scenario.id ? "active" : ""}
+            onClick={() => onSelect(scenario.id)}
+            disabled={disabled}
+          >
+            {scenario.id}
+          </button>
+        ))}
+      </div>
+
+      {manageMode ? (
+        <div className="solver-scenario-editor">
+          <label>
+            <span>ID</span>
+            <input value={draft.id} onChange={(event) => onDraftChange({ id: event.target.value })} />
+          </label>
+          <label>
+            <span>Label</span>
+            <input value={draft.label} onChange={(event) => onDraftChange({ label: event.target.value })} />
+          </label>
+          <label>
+            <span>Range Subdir</span>
+            <input value={draft.rangeSubdir} onChange={(event) => onDraftChange({ rangeSubdir: event.target.value })} />
+          </label>
+          <label>
+            <span>Config Template</span>
+            <input value={draft.configTemplate} onChange={(event) => onDraftChange({ configTemplate: event.target.value })} />
+          </label>
+          <label>
+            <span>Pot</span>
+            <input
+              type="number"
+              min="1"
+              value={draft.pot}
+              onChange={(event) => onDraftChange({ pot: Number(event.target.value) })}
+            />
+          </label>
+          <label>
+            <span>Effective Stack</span>
+            <input
+              type="number"
+              min="1"
+              value={draft.effectiveStack}
+              onChange={(event) => onDraftChange({ effectiveStack: Number(event.target.value) })}
+            />
+          </label>
+          <label className="wide">
+            <span>Description</span>
+            <input
+              value={draft.description ?? ""}
+              onChange={(event) => onDraftChange({ description: event.target.value })}
+            />
+          </label>
+          <div className="solver-scenario-editor-actions">
+            <button className="icon-button compact" type="button" onClick={onAdd} disabled={disabled}>
+              <FolderPlus size={14} />
+              Add
+            </button>
+            <button className="icon-button compact primary" type="button" onClick={onUpdate} disabled={!selectedScenario || disabled}>
+              <Check size={14} />
+              Update
+            </button>
+            <button className="icon-button compact danger" type="button" onClick={onDelete} disabled={!selectedScenario || disabled}>
+              <Trash2 size={14} />
+              Delete
+            </button>
+          </div>
+        </div>
+      ) : (
+        <pre className="solver-scenario-text">{selectedScenario ? formatScenarioLibraryText(selectedScenario) : ""}</pre>
+      )}
     </section>
   );
 }
@@ -2014,6 +2778,80 @@ async function fetchPreflopJson<T>(url: string, init?: RequestInit): Promise<T> 
   return await response.json() as T;
 }
 
+function normalizeRangeTreeItems(items: PreflopRangeTreeItem[]): PreflopRangeTreeItem[] {
+  return items.map((item) => {
+    if (item.type === "folder") {
+      return {
+        ...item,
+        children: normalizeRangeTreeItems(item.children)
+      };
+    }
+    return normalizeRangeFileItem(item);
+  });
+}
+
+function normalizeRangeFileItem(item: PreflopRangeFileItem): PreflopRangeFileItem {
+  const reviewStatus = normalizeReviewStatusForClient(item.reviewStatus ?? item.status, Boolean(item.learned));
+  const runStatus = reviewStatus === "approved"
+    ? normalizeRunStatusForClient(item.runStatus ?? item.status)
+    : "idle";
+  const progress = normalizeRangeProgress(item.progress, item.datasetName);
+  return {
+    ...item,
+    status: reviewStatus,
+    reviewStatus,
+    runStatus,
+    datasetName: progress?.datasetName ?? item.datasetName,
+    progress,
+    learned: reviewStatus === "approved"
+  };
+}
+
+function normalizeRangeFileResponse(response: PreflopRangeFileResponse): PreflopRangeFileResponse {
+  const filename = response.path.split("/").at(-1) ?? response.path;
+  const data = normalizePreflopRangeDocument(response.summary.data, filename);
+  return {
+    ...response,
+    summary: summarizePreflopRange(data, filename)
+  };
+}
+
+function normalizeReviewStatusForClient(value: unknown, learnedFallback = false): PreflopReviewStatus {
+  const normalized = String(value ?? "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+  if ((PREFLOP_REVIEW_STATUSES as readonly string[]).includes(normalized)) {
+    return normalized as PreflopReviewStatus;
+  }
+  if ((PREFLOP_RUN_STATUSES as readonly string[]).includes(normalized)) {
+    return "approved";
+  }
+  return learnedFallback ? "approved" : "under_review";
+}
+
+function normalizeRunStatusForClient(value: unknown): PreflopRunStatus {
+  const normalized = String(value ?? "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+  if ((PREFLOP_RUN_STATUSES as readonly string[]).includes(normalized)) {
+    return normalized as PreflopRunStatus;
+  }
+  return "idle";
+}
+
+function normalizeRangeProgress(
+  value: PreflopRangeProgress | undefined,
+  datasetName: string | undefined
+): PreflopRangeProgress | undefined {
+  if (!value && !datasetName) return undefined;
+  const totalRows = positiveNumber(value?.totalRows, 1755);
+  const rows = Math.max(0, Math.floor(Number(value?.rows ?? 0)));
+  return {
+    datasetName: value?.datasetName || datasetName || "",
+    rows,
+    totalRows,
+    ratio: clampProgressRatio(value?.ratio ?? rows / totalRows),
+    checkedAt: value?.checkedAt,
+    error: value?.error
+  };
+}
+
 function findFolder(items: PreflopRangeTreeItem[], path: string): PreflopRangeFolderItem | null {
   if (!path) return { type: "folder", name: "All Ranges", path: "", children: items };
   for (const item of items) {
@@ -2028,14 +2866,17 @@ function findFolder(items: PreflopRangeTreeItem[], path: string): PreflopRangeFo
 function filterTreeItems(
   items: PreflopRangeTreeItem[],
   query: string,
-  visibleStatuses: Set<PreflopRangeStatus>
+  statusView: RangeStatusView,
+  visibleReviewStatuses: Set<PreflopReviewStatus>,
+  visibleRunStatuses: Set<PreflopRunStatus>
 ): PreflopRangeTreeItem[] {
   const normalized = query.trim().toLowerCase();
   return items.filter((item) => {
     if (item.type === "file") {
-      return visibleStatuses.has(item.status) && (!normalized || fileMatchesQuery(item, normalized));
+      return fileVisibleInStatusView(item, statusView, visibleReviewStatuses, visibleRunStatuses) &&
+        (!normalized || fileMatchesQuery(item, normalized));
     }
-    if (!folderHasVisibleStatus(item, visibleStatuses)) return false;
+    if (!folderHasVisibleStatus(item, statusView, visibleReviewStatuses, visibleRunStatuses)) return false;
     return !normalized || folderHasMatch(item, query);
   });
 }
@@ -2059,14 +2900,21 @@ function countFolderFiles(item: PreflopRangeFolderItem): number {
   return countFiles(item.children);
 }
 
-function countRangeStatuses(items: PreflopRangeTreeItem[]): Record<PreflopRangeStatus, number> {
-  const counts = Object.fromEntries(PREFLOP_RANGE_STATUSES.map((status) => [status, 0])) as Record<PreflopRangeStatus, number>;
+function countApprovedFiles(items: PreflopRangeTreeItem[]): number {
+  return items.reduce((count, item) => {
+    if (item.type === "folder") return count + countApprovedFiles(item.children);
+    return item.reviewStatus === "approved" ? count + 1 : count;
+  }, 0);
+}
+
+function countReviewStatuses(items: PreflopRangeTreeItem[]): Record<PreflopReviewStatus, number> {
+  const counts = Object.fromEntries(PREFLOP_REVIEW_STATUSES.map((status) => [status, 0])) as Record<PreflopReviewStatus, number>;
   const visit = (nodes: PreflopRangeTreeItem[]) => {
     for (const item of nodes) {
       if (item.type === "folder") {
         visit(item.children);
       } else {
-        counts[item.status] += 1;
+        counts[item.reviewStatus] += 1;
       }
     }
   };
@@ -2074,12 +2922,42 @@ function countRangeStatuses(items: PreflopRangeTreeItem[]): Record<PreflopRangeS
   return counts;
 }
 
-function folderHasVisibleStatus(item: PreflopRangeFolderItem, visibleStatuses: Set<PreflopRangeStatus>): boolean {
+function countRunStatuses(items: PreflopRangeTreeItem[]): Record<PreflopRunStatus, number> {
+  const counts = Object.fromEntries(PREFLOP_RUN_STATUSES.map((status) => [status, 0])) as Record<PreflopRunStatus, number>;
+  const visit = (nodes: PreflopRangeTreeItem[]) => {
+    for (const item of nodes) {
+      if (item.type === "folder") {
+        visit(item.children);
+      } else if (item.reviewStatus === "approved") {
+        counts[item.runStatus] += 1;
+      }
+    }
+  };
+  visit(items);
+  return counts;
+}
+
+function folderHasVisibleStatus(
+  item: PreflopRangeFolderItem,
+  statusView: RangeStatusView,
+  visibleReviewStatuses: Set<PreflopReviewStatus>,
+  visibleRunStatuses: Set<PreflopRunStatus>
+): boolean {
   return item.children.some((child) =>
     child.type === "folder"
-      ? folderHasVisibleStatus(child, visibleStatuses)
-      : visibleStatuses.has(child.status)
+      ? folderHasVisibleStatus(child, statusView, visibleReviewStatuses, visibleRunStatuses)
+      : fileVisibleInStatusView(child, statusView, visibleReviewStatuses, visibleRunStatuses)
   );
+}
+
+function fileVisibleInStatusView(
+  item: PreflopRangeFileItem,
+  statusView: RangeStatusView,
+  visibleReviewStatuses: Set<PreflopReviewStatus>,
+  visibleRunStatuses: Set<PreflopRunStatus>
+): boolean {
+  if (statusView === "labeling") return visibleReviewStatuses.has(item.reviewStatus);
+  return item.reviewStatus === "approved" && visibleRunStatuses.has(item.runStatus);
 }
 
 function fileMatchesQuery(item: PreflopRangeFileItem, normalizedQuery: string): boolean {
@@ -2105,8 +2983,56 @@ function pathBasename(pathValue: string): string {
   return pathValue.split("/").filter(Boolean).at(-1) ?? pathValue;
 }
 
-function rangeStatusInitial(status: PreflopRangeStatus): string {
-  return RANGE_STATUS_LABELS[status][0] ?? "?";
+function reviewStatusInitial(status: PreflopReviewStatus): string {
+  return REVIEW_STATUS_LABELS[status][0] ?? "?";
+}
+
+function runStatusInitial(status: PreflopRunStatus): string {
+  return RUN_STATUS_LABELS[status][0] ?? "?";
+}
+
+function rangeDisplayStatus(item: PreflopRangeFileItem, statusView: RangeStatusView): PreflopReviewStatus | PreflopRunStatus {
+  return statusView === "already" ? item.runStatus : item.reviewStatus;
+}
+
+function rangeDisplayStatusLabel(item: PreflopRangeFileItem, statusView: RangeStatusView): string {
+  return statusView === "already" ? RUN_STATUS_LABELS[item.runStatus] : REVIEW_STATUS_LABELS[item.reviewStatus];
+}
+
+function rangeDisplayStatusInitial(item: PreflopRangeFileItem, statusView: RangeStatusView): string {
+  return statusView === "already" ? runStatusInitial(item.runStatus) : reviewStatusInitial(item.reviewStatus);
+}
+
+function formatRangeProgress(progress: PreflopRangeProgress | undefined): string {
+  const ratio = clampProgressRatio(progress?.ratio ?? 0);
+  return `${Math.round(ratio * 100)}%`;
+}
+
+function rangeProgressTitle(item: PreflopRangeFileItem): string {
+  const progress = item.progress;
+  const rows = Math.max(0, Math.floor(Number(progress?.rows ?? 0)));
+  const total = positiveNumber(progress?.totalRows, 1755);
+  const checked = progress?.checkedAt ? ` · checked ${formatTimestamp(progress.checkedAt)}` : "";
+  const error = progress?.error ? ` · ${progress.error}` : "";
+  return `${rows} / ${total} rows${checked}${error}`;
+}
+
+function rangeProgressClass(ratio: unknown): string {
+  const normalized = clampProgressRatio(ratio);
+  if (normalized >= 1) return "complete";
+  if (normalized > 0) return "partial";
+  return "empty";
+}
+
+function clampProgressRatio(value: unknown): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) return 0;
+  return Math.min(1, parsed);
+}
+
+function positiveNumber(value: unknown, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 function folderName(path: string): string {
@@ -2180,6 +3106,11 @@ function formatLastUpdatedTime(file: PreflopRangeFileResponse): string {
   return `Last Updated Time: ${date.toLocaleString()}`;
 }
 
+function formatTimestamp(value: string): string {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+}
+
 function formatSolverRangeText(summary: PreflopRangeSummary): string {
   const orderedPlayers = orderedRangePlayers(summary);
   const oop = orderedPlayers.find((item) => item.role === "OOP") ?? orderedPlayers[1] ?? orderedPlayers[0];
@@ -2188,6 +3119,56 @@ function formatSolverRangeText(summary: PreflopRangeSummary): string {
     `OOP_RANGE = "${oop ? formatPlayerSolverRange(summary, oop.player) : ""}"`,
     `IP_RANGE = "${ip ? formatPlayerSolverRange(summary, ip.player) : ""}"`
   ].join("\n");
+}
+
+function formatScenarioLibraryText(scenario: SolverScenarioLibraryItem): string {
+  return [
+    `SCENARIO = "${scenario.id}"`,
+    `LABEL = "${scenario.label}"`,
+    `RANGE_SUBDIR = "${scenario.rangeSubdir}"`,
+    `CONFIG_TEMPLATE = "${scenario.configTemplate}"`,
+    `POT = ${scenario.pot}`,
+    `EFFECTIVE_STACK = ${scenario.effectiveStack}`,
+    scenario.description ? `DESCRIPTION = "${scenario.description}"` : ""
+  ].filter(Boolean).join("\n");
+}
+
+function emptyScenarioLibraryItem(): SolverScenarioLibraryItem {
+  return {
+    id: "",
+    label: "",
+    rangeSubdir: "",
+    configTemplate: "SIA_SOD_CONFIG",
+    pot: 5,
+    effectiveStack: 98
+  };
+}
+
+function normalizeScenarioDraft(draft: SolverScenarioLibraryItem): SolverScenarioLibraryItem | null {
+  const id = draft.id.trim();
+  const label = draft.label.trim();
+  const rangeSubdir = draft.rangeSubdir.trim() || id;
+  const configTemplate = draft.configTemplate.trim();
+  const pot = Number(draft.pot);
+  const effectiveStack = Number(draft.effectiveStack);
+  if (!id || !label || !rangeSubdir || !configTemplate || !Number.isFinite(pot) || !Number.isFinite(effectiveStack)) {
+    return null;
+  }
+  return {
+    id,
+    label,
+    rangeSubdir,
+    configTemplate,
+    pot,
+    effectiveStack,
+    ...(draft.description?.trim() ? { description: draft.description.trim() } : {})
+  };
+}
+
+function scenarioActionTitle(action: PendingScenarioLibraryAction["action"]): string {
+  if (action === "add") return "Add scenario?";
+  if (action === "update") return "Update scenario?";
+  return "Delete scenario?";
 }
 
 function formatPlayerSolverRange(summary: PreflopRangeSummary, player: PreflopPlayerKey): string {

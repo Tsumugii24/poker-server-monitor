@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import request from "supertest";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp } from "../../src/server/api";
 import { MonitorDatabase } from "../../src/server/db";
 import { RefreshService } from "../../src/server/refreshService";
@@ -40,6 +40,7 @@ describe("preflop range API", () => {
   });
 
   afterEach(() => {
+    vi.unstubAllGlobals();
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
@@ -63,8 +64,10 @@ describe("preflop range API", () => {
     expect(fileResponse.body.summary.players.A.matrix.AKs.raise).toBe(0.5);
   });
 
-  it("updates learned status and writes it to disk", async () => {
+  it("updates learned status in local metadata without changing the range file", async () => {
     const app = createApp({ db, refreshService: service, preflopRangesPath });
+    const rangeFile = path.join(preflopRangesPath, "3OD-EP", "3OD-4.3 vs 3IA-4.2.json");
+    const before = fs.readFileSync(rangeFile, "utf8");
 
     const response = await request(app)
       .post("/api/preflop-ranges/status")
@@ -73,13 +76,25 @@ describe("preflop range API", () => {
     expect(response.status).toBe(200);
     expect(response.body.summary.data.learned).toBe(true);
     expect(response.body.summary.data.status).toBe("approved");
-    const saved = JSON.parse(fs.readFileSync(path.join(preflopRangesPath, "3OD-EP", "3OD-4.3 vs 3IA-4.2.json"), "utf8"));
-    expect(saved.learned).toBe(true);
-    expect(saved.status).toBe("approved");
+    expect(fs.readFileSync(rangeFile, "utf8")).toBe(before);
+
+    const metadata = JSON.parse(fs.readFileSync(path.join(preflopRangesPath, ".range_status.json"), "utf8"));
+    expect(metadata.ranges["3OD-EP/3OD-4.3 vs 3IA-4.2.json"].reviewStatus).toBe("approved");
+    expect(metadata.ranges["3OD-EP/3OD-4.3 vs 3IA-4.2.json"].runStatus).toBe("idle");
+
+    const listResponse = await request(app).get("/api/preflop-ranges");
+    expect(listResponse.body.tree[0].children[0]).toMatchObject({
+      learned: true,
+      status: "approved",
+      reviewStatus: "approved",
+      runStatus: "idle"
+    });
   });
 
-  it("updates review status and writes it to disk", async () => {
+  it("updates review status in local metadata without changing the range file", async () => {
     const app = createApp({ db, refreshService: service, preflopRangesPath });
+    const rangeFile = path.join(preflopRangesPath, "3OD-EP", "3OD-4.3 vs 3IA-4.2.json");
+    const before = fs.readFileSync(rangeFile, "utf8");
 
     const response = await request(app)
       .post("/api/preflop-ranges/status")
@@ -88,9 +103,92 @@ describe("preflop range API", () => {
     expect(response.status).toBe(200);
     expect(response.body.summary.data.status).toBe("has_problem");
     expect(response.body.summary.data.learned).toBe(false);
-    const saved = JSON.parse(fs.readFileSync(path.join(preflopRangesPath, "3OD-EP", "3OD-4.3 vs 3IA-4.2.json"), "utf8"));
-    expect(saved.status).toBe("has_problem");
-    expect(saved.learned).toBe(false);
+    expect(fs.readFileSync(rangeFile, "utf8")).toBe(before);
+
+    const metadata = JSON.parse(fs.readFileSync(path.join(preflopRangesPath, ".range_status.json"), "utf8"));
+    expect(metadata.ranges["3OD-EP/3OD-4.3 vs 3IA-4.2.json"].reviewStatus).toBe("has_problem");
+    expect(metadata.ranges["3OD-EP/3OD-4.3 vs 3IA-4.2.json"].runStatus).toBe("idle");
+
+    const fileResponse = await request(app)
+      .get("/api/preflop-ranges/file")
+      .query({ path: "3OD-EP/3OD-4.3 vs 3IA-4.2.json" });
+    expect(fileResponse.body.summary.data.status).toBe("has_problem");
+    expect(fileResponse.body.summary.data.reviewStatus).toBe("has_problem");
+  });
+
+  it("approves all ranges in local metadata without changing range files", async () => {
+    fs.writeFileSync(
+      path.join(preflopRangesPath, "3OD-EP", "second.json"),
+      JSON.stringify({
+        A: { raise: "AA", call: "" },
+        B: { raise: "", call: "KK" }
+      })
+    );
+    const app = createApp({ db, refreshService: service, preflopRangesPath });
+    const firstFile = path.join(preflopRangesPath, "3OD-EP", "3OD-4.3 vs 3IA-4.2.json");
+    const before = fs.readFileSync(firstFile, "utf8");
+
+    const response = await request(app).post("/api/preflop-ranges/approve-all");
+
+    expect(response.status).toBe(200);
+    expect(response.body.count).toBe(2);
+    expect(fs.readFileSync(firstFile, "utf8")).toBe(before);
+
+    const metadata = JSON.parse(fs.readFileSync(path.join(preflopRangesPath, ".range_status.json"), "utf8"));
+    expect(metadata.ranges["3OD-EP/3OD-4.3 vs 3IA-4.2.json"]).toMatchObject({
+      reviewStatus: "approved",
+      runStatus: "idle"
+    });
+    expect(metadata.ranges["3OD-EP/second.json"]).toMatchObject({
+      reviewStatus: "approved",
+      runStatus: "idle"
+    });
+  });
+
+  it("refreshes Hugging Face progress and derives solved run status from row count", async () => {
+    const app = createApp({
+      db,
+      refreshService: service,
+      preflopRangesPath,
+      solverJobRepoNamespace: "Tsumugii",
+      hfToken: "hf_test_token"
+    });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      size: {
+        dataset: {
+          num_rows: 1755
+        }
+      }
+    }), { status: 200 })));
+
+    await request(app)
+      .post("/api/preflop-ranges/status")
+      .send({ path: "3OD-EP/3OD-4.3 vs 3IA-4.2.json", status: "approved" });
+
+    const response = await request(app).post("/api/preflop-ranges/refresh-progress");
+
+    expect(response.status).toBe(200);
+    expect(response.body.checked).toBe(1);
+    expect(response.body.failed).toBe(0);
+    expect(response.body.tree[0].children[0]).toMatchObject({
+      runStatus: "solved",
+      datasetName: "3ia-4.2-3od-4.3",
+      progress: {
+        rows: 1755,
+        totalRows: 1755,
+        ratio: 1
+      }
+    });
+
+    const progress = JSON.parse(fs.readFileSync(path.join(preflopRangesPath, ".range_progress.json"), "utf8"));
+    expect(progress.ranges["3OD-EP/3OD-4.3 vs 3IA-4.2.json"]).toMatchObject({
+      datasetName: "3ia-4.2-3od-4.3",
+      rows: 1755,
+      ratio: 1
+    });
+    expect(vi.mocked(fetch).mock.calls[0]?.[0]).toBe(
+      "https://datasets-server.huggingface.co/size?dataset=Tsumugii%2F3ia-4.2-3od-4.3"
+    );
   });
 
   it("uploads legacy .range files as .json", async () => {

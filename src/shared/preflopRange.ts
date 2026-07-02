@@ -10,15 +10,26 @@ export type PreflopPlayerPosition = (typeof PREFLOP_PLAYER_POSITIONS)[number];
 export const PREFLOP_RANGE_ACTIONS = ["raise", "call"] as const;
 export type PreflopRangeAction = (typeof PREFLOP_RANGE_ACTIONS)[number];
 
-export const PREFLOP_RANGE_STATUSES = [
+export const PREFLOP_REVIEW_STATUSES = [
   "under_review",
   "has_problem",
-  "approved",
+  "approved"
+] as const;
+export type PreflopReviewStatus = (typeof PREFLOP_REVIEW_STATUSES)[number];
+
+export const PREFLOP_RUN_STATUSES = [
+  "idle",
   "queue",
   "running",
   "solved"
 ] as const;
-export type PreflopRangeStatus = (typeof PREFLOP_RANGE_STATUSES)[number];
+export type PreflopRunStatus = (typeof PREFLOP_RUN_STATUSES)[number];
+
+export const PREFLOP_RANGE_STATUSES = [
+  ...PREFLOP_REVIEW_STATUSES,
+  ...PREFLOP_RUN_STATUSES
+] as const;
+export type PreflopRangeStatus = PreflopReviewStatus | PreflopRunStatus;
 
 export type PreflopHandCode = string;
 
@@ -28,7 +39,9 @@ export type PreflopRangeDocument = {
   player_names: Record<PreflopPlayerKey, string>;
   player_positions: Record<PreflopPlayerKey, PreflopPlayerPosition>;
   learned: boolean;
-  status: PreflopRangeStatus;
+  status: PreflopReviewStatus;
+  reviewStatus: PreflopReviewStatus;
+  runStatus: PreflopRunStatus;
   A: PreflopPlayerRange;
   B: PreflopPlayerRange;
   notes?: string;
@@ -44,6 +57,15 @@ export type PreflopRangeStats = {
   raise: number;
   call: number;
   fold: number;
+};
+
+export type PreflopRangeProgress = {
+  datasetName: string;
+  rows: number;
+  totalRows: number;
+  ratio: number;
+  checkedAt?: string;
+  error?: string;
 };
 
 export type PreflopPlayerSummary = {
@@ -66,7 +88,11 @@ export type PreflopRangeFileItem = {
   size: number;
   label: string;
   learned: boolean;
-  status: PreflopRangeStatus;
+  status: PreflopReviewStatus;
+  reviewStatus: PreflopReviewStatus;
+  runStatus: PreflopRunStatus;
+  datasetName?: string;
+  progress?: PreflopRangeProgress;
   rangePct: Record<PreflopPlayerKey, number>;
 };
 
@@ -118,6 +144,8 @@ export function createEmptyPreflopRangeDocument(): PreflopRangeDocument {
     player_positions: { ...DEFAULT_PLAYER_POSITIONS },
     learned: false,
     status: "under_review",
+    reviewStatus: "under_review",
+    runStatus: "idle",
     A: { raise: "", call: "" },
     B: { raise: "", call: "" }
   };
@@ -141,8 +169,12 @@ export function normalizePreflopRangeDocument(
     result.player_positions[player] = position;
   }
 
-  result.status = normalizeRangeStatus(value.status, Boolean(value.learned));
-  result.learned = learnedFromStatus(result.status);
+  result.reviewStatus = normalizeReviewStatus(value.reviewStatus ?? value.status, Boolean(value.learned));
+  result.status = result.reviewStatus;
+  result.runStatus = result.reviewStatus === "approved"
+    ? normalizeRunStatus(value.runStatus ?? value.status)
+    : "idle";
+  result.learned = learnedFromReviewStatus(result.reviewStatus);
 
   for (const player of PREFLOP_PLAYERS) {
     const rawPlayer = isRecord(value[player]) ? value[player] : {};
@@ -321,10 +353,14 @@ export function setPreflopLearned(
   document: PreflopRangeDocument,
   learned: boolean
 ): PreflopRangeDocument {
+  const normalized = normalizePreflopRangeDocument(document);
+  const reviewStatus: PreflopReviewStatus = learned ? "approved" : "under_review";
   return {
-    ...normalizePreflopRangeDocument(document),
+    ...normalized,
     learned,
-    status: learned ? "approved" : "under_review",
+    status: reviewStatus,
+    reviewStatus,
+    runStatus: learned ? normalized.runStatus : "idle",
     updatedAt: new Date().toISOString()
   };
 }
@@ -333,11 +369,27 @@ export function setPreflopStatus(
   document: PreflopRangeDocument,
   status: PreflopRangeStatus
 ): PreflopRangeDocument {
-  const normalizedStatus = normalizeRangeStatus(status, document.learned);
+  const normalized = normalizePreflopRangeDocument(document);
+  const reviewStatus = normalizeReviewStatus(status, normalized.learned);
   return {
-    ...normalizePreflopRangeDocument(document),
-    status: normalizedStatus,
-    learned: learnedFromStatus(normalizedStatus),
+    ...normalized,
+    status: reviewStatus,
+    reviewStatus,
+    runStatus: reviewStatus === "approved" ? normalized.runStatus : "idle",
+    learned: learnedFromReviewStatus(reviewStatus),
+    updatedAt: new Date().toISOString()
+  };
+}
+
+export function setPreflopRunStatus(
+  document: PreflopRangeDocument,
+  runStatus: PreflopRunStatus
+): PreflopRangeDocument {
+  const normalized = normalizePreflopRangeDocument(document);
+  const normalizedRunStatus = normalizeRunStatus(runStatus);
+  return {
+    ...normalized,
+    runStatus: normalized.reviewStatus === "approved" ? normalizedRunStatus : "idle",
     updatedAt: new Date().toISOString()
   };
 }
@@ -481,16 +533,35 @@ function normalizePosition(value: unknown): PreflopPlayerPosition {
   return "Unknown";
 }
 
-function normalizeRangeStatus(value: unknown, learnedFallback = false): PreflopRangeStatus {
+export function normalizePreflopReviewStatus(value: unknown, learnedFallback = false): PreflopReviewStatus {
+  return normalizeReviewStatus(value, learnedFallback);
+}
+
+export function normalizePreflopRunStatus(value: unknown): PreflopRunStatus {
+  return normalizeRunStatus(value);
+}
+
+function normalizeReviewStatus(value: unknown, learnedFallback = false): PreflopReviewStatus {
   const normalized = String(value ?? "").trim().toLowerCase().replace(/[\s-]+/g, "_");
-  if ((PREFLOP_RANGE_STATUSES as readonly string[]).includes(normalized)) {
-    return normalized as PreflopRangeStatus;
+  if ((PREFLOP_REVIEW_STATUSES as readonly string[]).includes(normalized)) {
+    return normalized as PreflopReviewStatus;
+  }
+  if (normalized === "queue" || normalized === "running" || normalized === "solved") {
+    return "approved";
   }
   return learnedFallback ? "approved" : "under_review";
 }
 
-function learnedFromStatus(status: PreflopRangeStatus): boolean {
-  return status === "approved" || status === "queue" || status === "running" || status === "solved";
+function normalizeRunStatus(value: unknown): PreflopRunStatus {
+  const normalized = String(value ?? "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+  if ((PREFLOP_RUN_STATUSES as readonly string[]).includes(normalized)) {
+    return normalized as PreflopRunStatus;
+  }
+  return "idle";
+}
+
+function learnedFromReviewStatus(status: PreflopReviewStatus): boolean {
+  return status === "approved";
 }
 
 function mergeModernHandsIntoPlayer(
