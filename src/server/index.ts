@@ -66,6 +66,9 @@ async function main(): Promise<void> {
     defaultPipelineStatusFilePath: config.pipelineStatusFilePath,
     repoNamespace: config.solverJobRepoNamespace,
     hfToken: config.hfToken,
+    hfProxyUrl: config.hfProxyUrl,
+    solverHfProxyUrl: config.solverHfProxyUrl,
+    getHfProxySettings: () => loadAlertSettings(config.alertSettingsPath),
     getScenarioLibrary: () => loadSolverScenarioLibrary(config.solverScenarioLibraryPath).scenarios
   });
   windowlessInterval(() => {
@@ -84,6 +87,8 @@ async function main(): Promise<void> {
     solverJobService,
     solverJobRepoNamespace: config.solverJobRepoNamespace,
     hfToken: config.hfToken,
+    hfProxyUrl: config.hfProxyUrl,
+    solverHfProxyUrl: config.solverHfProxyUrl,
     defaultRefreshIntervalMs: config.refreshIntervalMs,
     sendTestAlert: sendWeChatTarget,
     startAlertConnector: () => legacyNotifier.ensureStarted(),

@@ -16,6 +16,7 @@ import { useEffect, useMemo, useState } from "react";
 import type {
   AlertSettings,
   AlertStatus,
+  HfProxyRuntimeStatus,
   WeChatAccountConnectorStatus,
   WeChatAccountsStatus
 } from "../shared/types";
@@ -30,6 +31,7 @@ type SettingsTab = "recipients" | "connection" | "check" | "status";
 type SettingsWizardProps = {
   settings: AlertSettings;
   status: AlertStatus | null;
+  hfProxyStatus: HfProxyRuntimeStatus | null;
   saving: boolean;
   wechatAccountsStatus: WeChatAccountsStatus;
   onClose: () => void;
@@ -49,6 +51,7 @@ type SettingsWizardProps = {
 export function SettingsWizard({
   settings,
   status,
+  hfProxyStatus,
   saving,
   wechatAccountsStatus,
   onClose,
@@ -138,7 +141,6 @@ export function SettingsWizard({
     try {
       await onSave({
         ...draft,
-        enabled: true,
         cooldownMinutes: Math.max(1, draft.cooldownMinutes),
         sshCommandTimeoutSeconds: Math.max(1, draft.sshCommandTimeoutSeconds),
         sshConnectTimeoutSeconds: Math.max(1, draft.sshConnectTimeoutSeconds)
@@ -406,6 +408,29 @@ export function SettingsWizard({
             <div className="sw-global-settings">
               <h4>{copy.accounts.globalSettings}</h4>
               <div className="sw-settings-grid">
+                <div className="sw-field sw-toggle-field">
+                  <div>
+                    <label>{copy.accounts.globalAlertDelivery}</label>
+                    <span className="sw-field-hint">{copy.accounts.globalAlertDeliveryHelp}</span>
+                  </div>
+                  <label className="sw-toggle">
+                    <input
+                      type="checkbox"
+                      checked={draft.enabled}
+                      onChange={(event) => setDraft((current) => ({
+                        ...current,
+                        enabled: event.target.checked
+                      }))}
+                      disabled={saving}
+                    />
+                    <span className="sw-toggle-track">
+                      <span className="sw-toggle-thumb" />
+                    </span>
+                  </label>
+                  <strong className="sw-toggle-value">
+                    {draft.enabled ? copy.accounts.globalAlertEnabled : copy.accounts.globalAlertDisabled}
+                  </strong>
+                </div>
                 <div className="sw-field">
                   <label>{copy.accounts.language}</label>
                   <select
@@ -668,6 +693,43 @@ export function SettingsWizard({
                   <span className="sw-field-hint">{copy.check.commandTimeoutHelp}</span>
                 </div>
               </div>
+
+              <div className="sw-proxy-settings">
+                <div className="sw-proxy-header">
+                  <div>
+                    <h4>{copy.check.hfProxyTitle}</h4>
+                    <p className="sw-help">{copy.check.hfProxyDetail}</p>
+                  </div>
+                </div>
+                <div className="sw-proxy-grid">
+                  <ProxyToggle
+                    title={copy.check.serverMonitorProxy}
+                    detail={copy.check.serverMonitorProxyHelp}
+                    configured={hfProxyStatus?.serverMonitor.configured ?? false}
+                    enabled={draft.hfProxyEnabled}
+                    configuredLabel={copy.check.configured}
+                    missingLabel={copy.check.notConfigured}
+                    disabled={saving}
+                    onChange={(checked) => setDraft((current) => ({
+                      ...current,
+                      hfProxyEnabled: checked
+                    }))}
+                  />
+                  <ProxyToggle
+                    title={copy.check.solverProxy}
+                    detail={copy.check.solverProxyHelp}
+                    configured={hfProxyStatus?.solver.configured ?? false}
+                    enabled={draft.solverHfProxyEnabled}
+                    configuredLabel={copy.check.configured}
+                    missingLabel={copy.check.notConfigured}
+                    disabled={saving}
+                    onChange={(checked) => setDraft((current) => ({
+                      ...current,
+                      solverHfProxyEnabled: checked
+                    }))}
+                  />
+                </div>
+              </div>
               <div className="sw-actions">
                 <button className="sw-btn primary" disabled={saving} onClick={() => void handleSave()}>
                   <Timer size={14} />
@@ -764,6 +826,52 @@ export function SettingsWizard({
   );
 }
 
+function ProxyToggle({
+  title,
+  detail,
+  configured,
+  enabled,
+  configuredLabel,
+  missingLabel,
+  disabled,
+  onChange
+}: {
+  title: string;
+  detail: string;
+  configured: boolean;
+  enabled: boolean;
+  configuredLabel: string;
+  missingLabel: string;
+  disabled: boolean;
+  onChange: (checked: boolean) => void;
+}) {
+  const active = configured && enabled;
+  return (
+    <div className={`sw-proxy-card${active ? " active" : ""}${!configured ? " missing" : ""}`}>
+      <div className="sw-proxy-copy">
+        <strong>{title}</strong>
+        <span>{detail}</span>
+      </div>
+      <div className="sw-proxy-control">
+        <span className={`sw-proxy-state${configured ? " configured" : " missing"}`}>
+          {configured ? configuredLabel : missingLabel}
+        </span>
+        <label className="sw-toggle">
+          <input
+            type="checkbox"
+            checked={enabled}
+            disabled={disabled}
+            onChange={(event) => onChange(event.target.checked)}
+          />
+          <span className="sw-toggle-track">
+            <span className="sw-toggle-thumb" />
+          </span>
+        </label>
+      </div>
+    </div>
+  );
+}
+
 function accountStatusLabel(
   account: WeChatAccountConnectorStatus,
   copy: (typeof COPY)[keyof typeof COPY]
@@ -820,6 +928,10 @@ const COPY = {
       error: "Connection error",
       notConnected: "Not connected",
       globalSettings: "Alert Settings",
+      globalAlertDelivery: "Alert Delivery",
+      globalAlertDeliveryHelp: "Master switch for WeChat alert delivery.",
+      globalAlertEnabled: "Delivery enabled",
+      globalAlertDisabled: "Delivery disabled",
       language: "Alert Language",
       cooldown: "Alert Interval (min)",
       cooldownHelp: "Minimum interval between auto alerts. Manual refresh always sends.",
@@ -855,6 +967,14 @@ const COPY = {
       connectTimeoutHelp: "Maximum wait for the SSH handshake. Default: 10 seconds.",
       commandTimeout: "SSH Command Timeout (sec)",
       commandTimeoutHelp: "Maximum wait for metric collection commands. Default: 15 seconds.",
+      hfProxyTitle: "Hugging Face Proxy",
+      hfProxyDetail: "Proxy is used only when this switch is on and the matching .env URL is configured.",
+      serverMonitorProxy: "Server Monitor",
+      serverMonitorProxyHelp: "Dataset progress, repo checks, and repo creation.",
+      solverProxy: "Remote Solver Upload",
+      solverProxyHelp: "Exports proxy variables into solver tmux upload commands.",
+      configured: ".env configured",
+      notConfigured: ".env missing",
       saveSettings: "Save Settings"
     },
     status: {
@@ -910,6 +1030,10 @@ const COPY = {
       error: "连接异常",
       notConnected: "未连接",
       globalSettings: "告警设置",
+      globalAlertDelivery: "告警投递",
+      globalAlertDeliveryHelp: "微信告警投递的全局开关。",
+      globalAlertEnabled: "投递已启用",
+      globalAlertDisabled: "投递未启用",
       language: "告警语言",
       cooldown: "告警间隔（分钟）",
       cooldownHelp: "自动检查的最小间隔。手动刷新始终发送。",
@@ -945,6 +1069,14 @@ const COPY = {
       connectTimeoutHelp: "等待 SSH 握手的最大时间。默认 10 秒。",
       commandTimeout: "SSH 命令超时（秒）",
       commandTimeoutHelp: "等待指标采集命令完成的最大时间。默认 15 秒。",
+      hfProxyTitle: "Hugging Face 代理",
+      hfProxyDetail: "只有这里开启，且 .env 中配置了对应 URL 时，才会使用代理。",
+      serverMonitorProxy: "Server Monitor 后端",
+      serverMonitorProxyHelp: "用于数据集进度、仓库检查和创建仓库。",
+      solverProxy: "远端 Solver 上传",
+      solverProxyHelp: "把代理变量写入远端 solver tmux 上传命令。",
+      configured: ".env 已配置",
+      notConfigured: ".env 未配置",
       saveSettings: "保存设置"
     },
     status: {

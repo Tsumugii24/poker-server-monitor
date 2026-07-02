@@ -16,6 +16,7 @@ import {
   type SolverScenario,
   type SolverScenarioLibraryItem
 } from "../shared/solverJobs";
+import type { AlertSettings } from "../shared/types";
 import type { PipelineStatusSnapshot, ServerRow } from "../shared/types";
 import {
   PREFLOP_HAND_CODES,
@@ -32,6 +33,7 @@ import type { MonitorDatabase } from "./db";
 import { readPreflopRangeFile } from "./preflopRangeStore";
 import type { SshCredentials, SshExecutor } from "./sshCollector";
 import { Ssh2Executor } from "./sshCollector";
+import { huggingFaceFetch } from "./huggingFaceHttp";
 
 export { datasetNameFromRangePath, scenarioFromRangePath } from "../shared/preflopDataset";
 
@@ -43,12 +45,14 @@ type SolverJobServiceOptions = {
   defaultPipelineStatusFilePath?: string;
   repoNamespace?: string;
   hfToken?: string | null;
+  hfProxyUrl?: string | null;
+  solverHfProxyUrl?: string | null;
+  getHfProxySettings?: () => Pick<AlertSettings, "hfProxyEnabled" | "solverHfProxyEnabled">;
   getScenarioLibrary?: () => SolverScenarioLibraryItem[];
 };
 
 const ACTIVE_JOB_STATUSES = new Set<SolverJobStatus>(["deploying", "running", "stopping"]);
 const DEFAULT_SOLVER_ROOT = "~/solver";
-const HF_UPLOAD_PROXY = "http://127.0.0.1:7890";
 const ACTIVE_JOB_RECONCILE_GRACE_MS = 15_000;
 const HUGGING_FACE_ORIGIN = "https://huggingface.co";
 
@@ -57,6 +61,9 @@ export class SolverJobService {
   private readonly repoNamespace: string;
   private readonly defaultPipelineStatusFilePath: string;
   private readonly hfToken: string | null;
+  private readonly hfProxyUrl: string | null;
+  private readonly solverHfProxyUrl: string | null;
+  private readonly getHfProxySettings: () => Pick<AlertSettings, "hfProxyEnabled" | "solverHfProxyEnabled">;
   private readonly getScenarioLibrary: () => SolverScenarioLibraryItem[];
 
   constructor(private readonly options: SolverJobServiceOptions) {
@@ -64,6 +71,12 @@ export class SolverJobService {
     this.repoNamespace = (options.repoNamespace ?? "Tsumugii").trim() || "Tsumugii";
     this.defaultPipelineStatusFilePath = options.defaultPipelineStatusFilePath ?? "~/run/solver_running_status.json";
     this.hfToken = options.hfToken?.trim() || null;
+    this.hfProxyUrl = options.hfProxyUrl?.trim() || null;
+    this.solverHfProxyUrl = options.solverHfProxyUrl?.trim() || null;
+    this.getHfProxySettings = options.getHfProxySettings ?? (() => ({
+      hfProxyEnabled: false,
+      solverHfProxyEnabled: false
+    }));
     this.getScenarioLibrary = options.getScenarioLibrary ?? (() => DEFAULT_SOLVER_SCENARIO_LIBRARY);
   }
 
@@ -92,13 +105,14 @@ export class SolverJobService {
       defaultPipelineStatusFilePath: this.defaultPipelineStatusFilePath,
       repoNamespace: this.repoNamespace,
       hfToken: this.hfToken,
+      solverHfProxyUrl: this.effectiveSolverHfProxyUrl(),
       scenarioLibrary: this.getScenarioLibrary()
     });
   }
 
   async checkDatasetRepo(input: SolverJobPreviewRequest): Promise<SolverDatasetRepoStatus> {
     const preview = this.preview(input);
-    const exists = await huggingFaceDatasetRepoExists(preview.repoId, this.hfToken);
+    const exists = await huggingFaceDatasetRepoExists(preview.repoId, this.hfToken, this.effectiveHfProxyUrl());
     return {
       preview,
       datasetName: preview.datasetName,
@@ -125,7 +139,7 @@ export class SolverJobService {
     if (!this.hfToken) {
       throw new Error("HF_TOKEN is required to create a missing Hugging Face dataset repo.");
     }
-    await createHuggingFaceDatasetRepo(status.repoId, this.hfToken);
+    await createHuggingFaceDatasetRepo(status.repoId, this.hfToken, this.effectiveHfProxyUrl());
     return {
       ...status,
       exists: true,
@@ -157,6 +171,7 @@ export class SolverJobService {
       settings: preview.settings,
       statusFilePath: preview.pipelineStatusFilePath,
       hfToken: this.hfToken,
+      hfProxyUrl: this.effectiveSolverHfProxyUrl(),
       redactSecrets: true
     });
     const job: SolverJob = {
@@ -411,8 +426,17 @@ export class SolverJobService {
       rangePath: job.remoteRangePath,
       settings: job.settings,
       statusFilePath: statusFileFromJob(job),
-      hfToken: this.hfToken
+      hfToken: this.hfToken,
+      hfProxyUrl: this.effectiveSolverHfProxyUrl()
     });
+  }
+
+  private effectiveHfProxyUrl(): string | null {
+    return this.getHfProxySettings().hfProxyEnabled ? this.hfProxyUrl : null;
+  }
+
+  private effectiveSolverHfProxyUrl(): string | null {
+    return this.getHfProxySettings().solverHfProxyEnabled ? this.solverHfProxyUrl : null;
   }
 
   private recordEvent(jobId: string, type: string, message: string, commandPreview: string | null): void {
@@ -435,6 +459,7 @@ export function buildSolverJobPreview({
   defaultPipelineStatusFilePath,
   repoNamespace,
   hfToken,
+  solverHfProxyUrl,
   scenarioLibrary = DEFAULT_SOLVER_SCENARIO_LIBRARY
 }: {
   input: SolverJobPreviewRequest;
@@ -443,6 +468,7 @@ export function buildSolverJobPreview({
   defaultPipelineStatusFilePath: string;
   repoNamespace: string;
   hfToken?: string | null;
+  solverHfProxyUrl?: string | null;
   scenarioLibrary?: SolverScenarioLibraryItem[];
 }): SolverJobPreview {
   const solverRoot = effectiveSolverRoot();
@@ -464,6 +490,7 @@ export function buildSolverJobPreview({
     settings,
     statusFilePath: pipelineStatusFilePath,
     hfToken,
+    hfProxyUrl: solverHfProxyUrl,
     redactSecrets: true
   });
   const warnings: string[] = [];
@@ -562,9 +589,14 @@ function normalizeDatasetName(value: unknown): string | null {
   return normalized;
 }
 
-async function huggingFaceDatasetRepoExists(repoId: string, hfToken: string | null): Promise<boolean> {
-  const response = await fetch(`${HUGGING_FACE_ORIGIN}/api/datasets/${repoIdPath(repoId)}`, {
+async function huggingFaceDatasetRepoExists(
+  repoId: string,
+  hfToken: string | null,
+  hfProxyUrl: string | null
+): Promise<boolean> {
+  const response = await huggingFaceFetch(`${HUGGING_FACE_ORIGIN}/api/datasets/${repoIdPath(repoId)}`, {
     headers: huggingFaceHeaders(hfToken),
+    proxyUrl: hfProxyUrl,
     signal: AbortSignal.timeout(10_000)
   });
   if (response.status === 404) return false;
@@ -572,9 +604,13 @@ async function huggingFaceDatasetRepoExists(repoId: string, hfToken: string | nu
   throw new Error(`Hugging Face dataset repo check failed for ${repoId}: ${await huggingFaceErrorMessage(response)}`);
 }
 
-async function createHuggingFaceDatasetRepo(repoId: string, hfToken: string): Promise<void> {
+async function createHuggingFaceDatasetRepo(
+  repoId: string,
+  hfToken: string,
+  hfProxyUrl: string | null
+): Promise<void> {
   const { namespace, name } = splitRepoId(repoId);
-  const response = await fetch(`${HUGGING_FACE_ORIGIN}/api/repos/create`, {
+  const response = await huggingFaceFetch(`${HUGGING_FACE_ORIGIN}/api/repos/create`, {
     method: "POST",
     headers: {
       ...huggingFaceHeaders(hfToken),
@@ -586,10 +622,11 @@ async function createHuggingFaceDatasetRepo(repoId: string, hfToken: string): Pr
       type: "dataset",
       private: false
     }),
+    proxyUrl: hfProxyUrl,
     signal: AbortSignal.timeout(15_000)
   });
   if (response.ok || response.status === 409) return;
-  if (response.status === 400 && await huggingFaceDatasetRepoExists(repoId, hfToken)) return;
+  if (response.status === 400 && await huggingFaceDatasetRepoExists(repoId, hfToken, hfProxyUrl)) return;
   throw new Error(`Hugging Face dataset repo creation failed for ${repoId}: ${await huggingFaceErrorMessage(response)}`);
 }
 
@@ -646,6 +683,7 @@ export function buildRunPipelineCommand({
   settings,
   statusFilePath,
   hfToken,
+  hfProxyUrl,
   redactSecrets = false
 }: {
   solverRoot: string;
@@ -658,6 +696,7 @@ export function buildRunPipelineCommand({
   settings: SolverJobSettings;
   statusFilePath: string;
   hfToken?: string | null;
+  hfProxyUrl?: string | null;
   redactSecrets?: boolean;
 }): string {
   const args = [
@@ -694,9 +733,14 @@ export function buildRunPipelineCommand({
     if (!normalizedHfToken) {
       throw new Error("HF_TOKEN is required when Upload is enabled.");
     }
+    const normalizedHfProxyUrl = hfProxyUrl?.trim();
+    if (normalizedHfProxyUrl) {
+      environmentExports.push(
+        `export http_proxy=${shellQuote(normalizedHfProxyUrl)}`,
+        `export https_proxy=${shellQuote(normalizedHfProxyUrl)}`
+      );
+    }
     environmentExports.push(
-      `export http_proxy=${shellQuote(HF_UPLOAD_PROXY)}`,
-      `export https_proxy=${shellQuote(HF_UPLOAD_PROXY)}`,
       redactSecrets ? "export HF_TOKEN=$HF_TOKEN" : `export HF_TOKEN=${shellQuote(normalizedHfToken)}`
     );
     args.push(

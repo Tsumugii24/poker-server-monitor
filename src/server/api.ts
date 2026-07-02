@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import express, { type Express } from "express";
 import type {
   AlertSettings,
+  HfProxyRuntimeStatus,
   OverviewResponse,
   OverviewSummary,
   ServerDetailResponse,
@@ -77,6 +78,8 @@ export type AppDependencies = {
   solverJobService?: SolverJobService;
   solverJobRepoNamespace?: string;
   hfToken?: string | null;
+  hfProxyUrl?: string | null;
+  solverHfProxyUrl?: string | null;
   defaultRefreshIntervalMs?: number;
   sendTestAlert?: (message: string, roomId: string) => Promise<void> | void;
   startAlertConnector?: () => Promise<void> | void;
@@ -112,6 +115,8 @@ export function createApp({
   solverJobService: providedSolverJobService,
   solverJobRepoNamespace = "Tsumugii",
   hfToken = null,
+  hfProxyUrl = null,
+  solverHfProxyUrl = null,
   defaultRefreshIntervalMs = 3_600_000,
   sendTestAlert,
   startAlertConnector,
@@ -135,6 +140,9 @@ export function createApp({
     preflopRangesPath,
     repoNamespace: solverJobRepoNamespace,
     hfToken,
+    hfProxyUrl,
+    solverHfProxyUrl,
+    getHfProxySettings: () => loadAlertSettings(alertSettingsPath),
     getScenarioLibrary: () => loadSolverScenarioLibrary(solverScenarioLibraryPath).scenarios
   });
   const app = express();
@@ -283,9 +291,11 @@ export function createApp({
 
   app.post("/api/preflop-ranges/refresh-progress", async (_request, response) => {
     try {
+      const settings = loadAlertSettings(alertSettingsPath);
       const progress = await refreshPreflopRangeProgress(preflopRangesPath, {
         hfToken,
-        repoNamespace: solverJobRepoNamespace
+        repoNamespace: solverJobRepoNamespace,
+        hfProxyUrl: settings.hfProxyEnabled ? hfProxyUrl : null
       });
       response.json({
         ok: true,
@@ -647,7 +657,8 @@ export function createApp({
     const settings = loadAlertSettings(alertSettingsPath);
     response.json({
       settings,
-      status: alertStatus(settings)
+      status: alertStatus(settings),
+      hfProxy: hfProxyStatus(settings, hfProxyUrl, solverHfProxyUrl)
     });
   });
 
@@ -667,7 +678,8 @@ export function createApp({
       }
       response.json({
         settings,
-        status: alertStatus(settings)
+        status: alertStatus(settings),
+        hfProxy: hfProxyStatus(settings, hfProxyUrl, solverHfProxyUrl)
       });
     } catch (error) {
       response.status(400).json({
@@ -697,6 +709,7 @@ export function createApp({
         recipientCount: targets.length,
         targetCount: targets.length,
         status: alertStatus(settings),
+        hfProxy: hfProxyStatus(settings, hfProxyUrl, solverHfProxyUrl),
         wechat: getWeChatStatus?.() ?? defaultWeChatStatus(settings.wechatRoomId),
         wechatAccounts: getWeChatAccountsStatus?.() ?? defaultWeChatAccountsStatus(settings)
       });
@@ -1267,6 +1280,8 @@ function isAlertSettingsInput(value: unknown): value is AlertSettings {
   ) {
     return false;
   }
+  if (value.hfProxyEnabled != null && typeof value.hfProxyEnabled !== "boolean") return false;
+  if (value.solverHfProxyEnabled != null && typeof value.solverHfProxyEnabled !== "boolean") return false;
   // wechatRoomId is optional now (derived from recipients), but accept it for backward compat
   if (value.wechatRoomId != null && typeof value.wechatRoomId !== "string") return false;
   // wechatRecipients is optional in input (config normalizer handles it)
@@ -1322,6 +1337,25 @@ function alertStatus(settings: AlertSettings): { enabled: boolean; configured: b
   return {
     enabled: settings.enabled,
     configured: enabledAlertTargets(settings).length > 0
+  };
+}
+
+function hfProxyStatus(
+  settings: AlertSettings,
+  hfProxyUrl: string | null,
+  solverHfProxyUrl: string | null
+): HfProxyRuntimeStatus {
+  const serverMonitorConfigured = Boolean(hfProxyUrl?.trim());
+  const solverConfigured = Boolean(solverHfProxyUrl?.trim());
+  return {
+    serverMonitor: {
+      configured: serverMonitorConfigured,
+      enabled: serverMonitorConfigured && settings.hfProxyEnabled
+    },
+    solver: {
+      configured: solverConfigured,
+      enabled: solverConfigured && settings.solverHfProxyEnabled
+    }
   };
 }
 

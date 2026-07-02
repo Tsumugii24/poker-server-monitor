@@ -274,9 +274,15 @@ describe("monitor API", () => {
       cooldownMinutes: 60,
       language: "en",
       sshCommandTimeoutSeconds: 15,
-      sshConnectTimeoutSeconds: 10
+      sshConnectTimeoutSeconds: 10,
+      hfProxyEnabled: false,
+      solverHfProxyEnabled: false
     });
     expect(response.body.status).toEqual({ enabled: false, configured: false });
+    expect(response.body.hfProxy).toEqual({
+      serverMonitor: { configured: false, enabled: false },
+      solver: { configured: false, enabled: false }
+    });
   });
 
   it("updates alert settings", async () => {
@@ -294,6 +300,39 @@ describe("monitor API", () => {
       language: "zh"
     });
     expect(startAlertConnector).toHaveBeenCalledTimes(1);
+  });
+
+  it("requires configured proxy URLs and enabled settings for Hugging Face proxy", async () => {
+    const app = createApp({
+      db,
+      refreshService: service,
+      alertSettingsPath,
+      hfProxyUrl: "http://127.0.0.1:7890",
+      solverHfProxyUrl: "http://127.0.0.1:7890"
+    });
+
+    const initial = await request(app).get("/api/settings/alerts");
+    expect(initial.body.hfProxy).toEqual({
+      serverMonitor: { configured: true, enabled: false },
+      solver: { configured: true, enabled: false }
+    });
+
+    const updated = await request(app)
+      .patch("/api/settings/alerts")
+      .send({
+        enabled: true,
+        wechatRoomId: "",
+        cooldownMinutes: 15,
+        language: "en",
+        hfProxyEnabled: true,
+        solverHfProxyEnabled: true
+      });
+
+    expect(updated.status).toBe(200);
+    expect(updated.body.hfProxy).toEqual({
+      serverMonitor: { configured: true, enabled: true },
+      solver: { configured: true, enabled: true }
+    });
   });
 
   it("sends a test alert through the configured alert service", async () => {

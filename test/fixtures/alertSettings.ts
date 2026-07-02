@@ -8,7 +8,9 @@ export const defaultAlertSettingsFixture: AlertSettings = {
   cooldownMinutes: 60,
   language: "en",
   sshCommandTimeoutSeconds: 15,
-  sshConnectTimeoutSeconds: 10
+  sshConnectTimeoutSeconds: 10,
+  hfProxyEnabled: false,
+  solverHfProxyEnabled: false
 };
 
 export function alertSettingsFixture(overrides: Partial<AlertSettings> = {}): AlertSettings {

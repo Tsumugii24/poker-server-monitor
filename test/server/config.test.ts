@@ -214,10 +214,22 @@ describe("runtime config loading", () => {
     const config = loadRuntimeConfig({
       SSH_USERNAME: "root",
       SSH_PASSWORD: "secret",
-      HF_TOKEN: "hf_test_token"
+      HF_TOKEN: "hf_test_token",
+      SERVER_MONITOR_HF_PROXY_URL: "http://127.0.0.1:7890",
+      SOLVER_HF_PROXY_URL: "http://10.0.0.8:7890"
     });
 
     expect(config.hfToken).toBe("hf_test_token");
+    expect(config.hfProxyUrl).toBe("http://127.0.0.1:7890");
+    expect(config.solverHfProxyUrl).toBe("http://10.0.0.8:7890");
+  });
+
+  it("rejects invalid Hugging Face proxy URLs", () => {
+    expect(() => loadRuntimeConfig({
+      SSH_USERNAME: "root",
+      SSH_PASSWORD: "secret",
+      SERVER_MONITOR_HF_PROXY_URL: "socks5://127.0.0.1:7890"
+    })).toThrow("SERVER_MONITOR_HF_PROXY_URL must start with http:// or https://");
   });
 
   it("fails clearly when SSH credentials are missing", () => {
@@ -239,7 +251,9 @@ describe("alert settings loading", () => {
       cooldownMinutes: 60,
       language: "en",
       sshCommandTimeoutSeconds: 15,
-      sshConnectTimeoutSeconds: 10
+      sshConnectTimeoutSeconds: 10,
+      hfProxyEnabled: false,
+      solverHfProxyEnabled: false
     });
   });
 
@@ -254,7 +268,9 @@ describe("alert settings loading", () => {
       cooldownMinutes: 30,
       language: "zh",
       sshCommandTimeoutSeconds: 20,
-      sshConnectTimeoutSeconds: 8
+      sshConnectTimeoutSeconds: 8,
+      hfProxyEnabled: true,
+      solverHfProxyEnabled: false
     });
 
     expect(loadAlertSettings(file)).toMatchObject({
@@ -264,7 +280,9 @@ describe("alert settings loading", () => {
       cooldownMinutes: 30,
       language: "zh",
       sshCommandTimeoutSeconds: 20,
-      sshConnectTimeoutSeconds: 8
+      sshConnectTimeoutSeconds: 8,
+      hfProxyEnabled: true,
+      solverHfProxyEnabled: false
     });
   });
 
@@ -274,7 +292,9 @@ describe("alert settings loading", () => {
 
     expect(loadAlertSettings(file)).toMatchObject({
       sshCommandTimeoutSeconds: 15,
-      sshConnectTimeoutSeconds: 10
+      sshConnectTimeoutSeconds: 10,
+      hfProxyEnabled: false,
+      solverHfProxyEnabled: false
     });
   });
 

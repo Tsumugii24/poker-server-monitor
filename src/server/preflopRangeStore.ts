@@ -19,6 +19,7 @@ import {
 } from "../shared/preflopRange";
 import { datasetNameFromRangePath, scenarioFromRangePath } from "../shared/preflopDataset";
 import type { SolverJob, SolverJobStatus } from "../shared/solverJobs";
+import { huggingFaceFetch } from "./huggingFaceHttp";
 
 const ORDER_FILE = ".range_order.json";
 const STATUS_FILE = ".range_status.json";
@@ -120,7 +121,7 @@ export function savePreflopRangeFile(
 
 export async function refreshPreflopRangeProgress(
   rootPath: string,
-  options: { hfToken?: string | null; repoNamespace?: string; totalRows?: number } = {}
+  options: { hfToken?: string | null; hfProxyUrl?: string | null; repoNamespace?: string; totalRows?: number } = {}
 ): Promise<PreflopRangeProgressRefreshResult> {
   const root = ensureRoot(rootPath);
   const metadata = loadProgressMetadata(root);
@@ -143,7 +144,11 @@ export async function refreshPreflopRangeProgress(
     const checkedAt = new Date().toISOString();
     const previous = metadata.ranges[rangePath];
     try {
-      const rows = await fetchHuggingFaceDatasetRows(`${repoNamespace}/${datasetName}`, options.hfToken ?? null);
+      const rows = await fetchHuggingFaceDatasetRows(
+        `${repoNamespace}/${datasetName}`,
+        options.hfToken ?? null,
+        options.hfProxyUrl ?? null
+      );
       nextRanges[rangePath] = progressEntry(datasetName, rows, totalRows, checkedAt);
     } catch (error) {
       failed += 1;
@@ -869,13 +874,18 @@ function progressEntry(datasetName: string, rows: number, totalRows: number, che
   };
 }
 
-async function fetchHuggingFaceDatasetRows(repoId: string, hfToken: string | null): Promise<number> {
+async function fetchHuggingFaceDatasetRows(
+  repoId: string,
+  hfToken: string | null,
+  hfProxyUrl: string | null
+): Promise<number> {
   const url = `https://datasets-server.huggingface.co/size?dataset=${encodeURIComponent(repoId)}`;
   const headers: Record<string, string> = {};
   const token = hfToken?.trim();
   if (token) headers.Authorization = `Bearer ${token}`;
-  const response = await fetch(url, {
+  const response = await huggingFaceFetch(url, {
     headers,
+    proxyUrl: hfProxyUrl,
     signal: AbortSignal.timeout(10_000)
   });
   if (response.status === 404) return 0;

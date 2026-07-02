@@ -2557,6 +2557,104 @@ td .port-value {
   gap: 14px;
 }
 
+.sw-toggle-field {
+  min-height: 76px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: 12px;
+}
+
+.sw-toggle-field > div {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+}
+
+.sw-toggle-value {
+  grid-column: 1 / -1;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.sw-proxy-settings {
+  margin-top: 16px;
+  display: grid;
+  gap: 10px;
+}
+
+.sw-proxy-header h4 {
+  margin: 0 0 4px;
+}
+
+.sw-proxy-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.sw-proxy-card {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+}
+
+.sw-proxy-card.active {
+  border-color: color-mix(in srgb, var(--green) 34%, var(--border));
+  background: color-mix(in srgb, var(--green) 6%, var(--bg-elevated));
+}
+
+.sw-proxy-card.missing {
+  border-color: color-mix(in srgb, var(--yellow) 28%, var(--border));
+}
+
+.sw-proxy-copy {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.sw-proxy-copy strong {
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.sw-proxy-copy span {
+  color: var(--text-tertiary);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.sw-proxy-control {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.sw-proxy-state {
+  white-space: nowrap;
+  color: var(--text-tertiary);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.sw-proxy-state.configured {
+  color: var(--green);
+}
+
+.sw-proxy-state.missing {
+  color: var(--yellow-text);
+}
+
 /* ═══════════════════════════════════════════════════════════════
    Status Tab
    ═══════════════════════════════════════════════════════════════ */
@@ -5683,8 +5781,18 @@ td .port-value {
 
   .wechat-status-grid,
   .wechat-chat-options,
-  .wechat-checklist {
+  .wechat-checklist,
+  .sw-proxy-grid {
     grid-template-columns: 1fr;
+  }
+
+  .sw-proxy-card {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .sw-proxy-control {
+    justify-content: space-between;
   }
 
   .wizard-steps {

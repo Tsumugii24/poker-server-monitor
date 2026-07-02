@@ -33,6 +33,7 @@ import type {
   AlertStatus,
   ConnectionStatus,
   HealthLevel,
+  HfProxyRuntimeStatus,
   MetricSnapshot,
   OverviewResponse,
   PipelineDisplayStatus,
@@ -98,6 +99,7 @@ type ServerInventoryDraft = {
 type AlertSettingsResponse = {
   settings: AlertSettings;
   status: AlertStatus;
+  hfProxy: HfProxyRuntimeStatus;
 };
 
 type WeChatAccountMutationResponse = {
@@ -180,6 +182,7 @@ export default function App() {
   const [alertStatus, setAlertStatus] = useState<AlertStatus | null>(null);
   const [wechatStatus, setWeChatStatus] = useState<WeChatConnectorStatus>(EMPTY_WECHAT_STATUS);
   const [wechatAccountsStatus, setWeChatAccountsStatus] = useState<WeChatAccountsStatus>(EMPTY_WECHAT_ACCOUNTS_STATUS);
+  const [hfProxyStatus, setHfProxyStatus] = useState<HfProxyRuntimeStatus | null>(null);
   const [settingsSaving, setSettingsSaving] = useState(false);
 
   useEffect(() => {
@@ -202,6 +205,7 @@ export default function App() {
       ]);
       setAlertSettings(response.settings);
       setAlertStatus(response.status);
+      setHfProxyStatus(response.hfProxy);
       setWeChatStatus(legacyWeChat);
       setWeChatAccountsStatus(accountsWeChat);
     } catch (caught) {
@@ -220,6 +224,7 @@ export default function App() {
       });
       setAlertSettings(response.settings);
       setAlertStatus(response.status);
+      setHfProxyStatus(response.hfProxy);
       const [legacyWeChat, accountsWeChat] = await Promise.all([
         fetchJson<WeChatConnectorStatus>("/api/settings/wechat"),
         fetchJson<WeChatAccountsStatus>("/api/settings/wechat/accounts")
@@ -239,6 +244,7 @@ export default function App() {
     try {
       const response = await fetchJson<{
         status: AlertStatus;
+        hfProxy?: HfProxyRuntimeStatus;
         wechat?: WeChatConnectorStatus;
         wechatAccounts?: WeChatAccountsStatus;
       }>(
@@ -251,6 +257,9 @@ export default function App() {
       );
       setAlertSettings(settings);
       setAlertStatus(response.status);
+      if (response.hfProxy) {
+        setHfProxyStatus(response.hfProxy);
+      }
       if (response.wechat) {
         setWeChatStatus(response.wechat);
       } else {
@@ -769,6 +778,7 @@ export default function App() {
           <SettingsWizard
             settings={alertSettings}
             status={alertStatus}
+            hfProxyStatus={hfProxyStatus}
             saving={settingsSaving}
             onClose={() => setSettingsOpen(false)}
             onSave={saveAlertSettings}

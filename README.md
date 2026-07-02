@@ -24,6 +24,19 @@ SERVER_MONITOR_HOST=0.0.0.0
 
 Keep `SERVER_MONITOR_HOST=127.0.0.1` when running locally or behind Nginx/Caddy.
 
+For Hugging Face access through a Clash HTTP proxy, configure the backend and remote solver proxy
+separately:
+
+```env
+SERVER_MONITOR_HF_PROXY_URL=http://127.0.0.1:7890
+SOLVER_HF_PROXY_URL=http://127.0.0.1:7890
+```
+
+`SERVER_MONITOR_HF_PROXY_URL` is used by this app when checking dataset progress or creating
+repositories. `SOLVER_HF_PROXY_URL` is exported into remote solver tmux commands when Upload is
+enabled. After setting these values, enable the matching switches in Settings → Connection Check.
+If either the `.env` value is empty or the dashboard switch is off, that path connects directly.
+
 3. Create the local server inventory:
 
 ```bash

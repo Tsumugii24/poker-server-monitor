@@ -21,6 +21,8 @@ export type RuntimeConfig = {
   pipelineStatusFilePath: string;
   solverJobRepoNamespace: string;
   hfToken: string | null;
+  hfProxyUrl: string | null;
+  solverHfProxyUrl: string | null;
   ssh: {
     username: string;
     password: string;
@@ -69,6 +71,8 @@ export function loadRuntimeConfig(env: EnvSource = process.env): RuntimeConfig {
     pipelineStatusFilePath: env.PIPELINE_STATUS_FILE ?? "~/run/solver_running_status.json",
     solverJobRepoNamespace: env.HF_DEFAULT_NAMESPACE ?? "Tsumugii",
     hfToken: env.HF_TOKEN?.trim() || null,
+    hfProxyUrl: optionalProxyUrl(env.SERVER_MONITOR_HF_PROXY_URL, "SERVER_MONITOR_HF_PROXY_URL"),
+    solverHfProxyUrl: optionalProxyUrl(env.SOLVER_HF_PROXY_URL, "SOLVER_HF_PROXY_URL"),
     ssh: {
       username,
       password
@@ -370,6 +374,21 @@ function numberFromEnv(value: string | undefined, fallback: number): number {
   return parsed;
 }
 
+function optionalProxyUrl(value: string | undefined, name: string): string | null {
+  const trimmed = value?.trim();
+  if (!trimmed) return null;
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    throw new Error(`${name} must be a valid URL`);
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error(`${name} must start with http:// or https://`);
+  }
+  return trimmed;
+}
+
 function defaultAlertSettings(): AlertSettings {
   return {
     enabled: false,
@@ -379,7 +398,9 @@ function defaultAlertSettings(): AlertSettings {
     cooldownMinutes: 60,
     language: "en",
     sshCommandTimeoutSeconds: DEFAULT_SSH_COMMAND_TIMEOUT_SECONDS,
-    sshConnectTimeoutSeconds: DEFAULT_SSH_CONNECT_TIMEOUT_SECONDS
+    sshConnectTimeoutSeconds: DEFAULT_SSH_CONNECT_TIMEOUT_SECONDS,
+    hfProxyEnabled: false,
+    solverHfProxyEnabled: false
   };
 }
 
@@ -395,6 +416,12 @@ function normalizeAlertSettings(value: Record<string, unknown>): AlertSettings {
   const sshConnectTimeoutSeconds = value.sshConnectTimeoutSeconds == null
     ? DEFAULT_SSH_CONNECT_TIMEOUT_SECONDS
     : requiredPositiveNumber(value.sshConnectTimeoutSeconds, "alerts.sshConnectTimeoutSeconds");
+  const hfProxyEnabled = value.hfProxyEnabled == null
+    ? false
+    : requiredBoolean(value.hfProxyEnabled, "alerts.hfProxyEnabled");
+  const solverHfProxyEnabled = value.solverHfProxyEnabled == null
+    ? false
+    : requiredBoolean(value.solverHfProxyEnabled, "alerts.solverHfProxyEnabled");
 
   // Normalize recipients array
   let recipients: WeChatRecipient[] = [];
@@ -445,7 +472,9 @@ function normalizeAlertSettings(value: Record<string, unknown>): AlertSettings {
     cooldownMinutes,
     language,
     sshCommandTimeoutSeconds,
-    sshConnectTimeoutSeconds
+    sshConnectTimeoutSeconds,
+    hfProxyEnabled,
+    solverHfProxyEnabled
   };
 }
 

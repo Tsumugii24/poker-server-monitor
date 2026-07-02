@@ -25,7 +25,8 @@
     "react": "^19.2.3",
     "react-dom": "^19.2.3",
     "sql.js": "^1.13.0",
-    "ssh2": "^1.17.0"
+    "ssh2": "^1.17.0",
+    "undici": "^7.28.0"
   },
   "devDependencies": {
     "@testing-library/jest-dom": "^6.9.1",

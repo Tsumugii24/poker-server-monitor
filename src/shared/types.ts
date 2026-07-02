@@ -76,11 +76,26 @@ export type AlertSettings = {
   sshCommandTimeoutSeconds: number;
   /** SSH connection handshake timeout in seconds. */
   sshConnectTimeoutSeconds: number;
+  /** Enables Server Monitor backend Hugging Face requests through SERVER_MONITOR_HF_PROXY_URL when configured. */
+  hfProxyEnabled: boolean;
+  /** Enables remote solver Hugging Face uploads through SOLVER_HF_PROXY_URL when configured. */
+  solverHfProxyEnabled: boolean;
 };
 
 export type AlertStatus = {
   enabled: boolean;
   configured: boolean;
+};
+
+export type HfProxyRuntimeStatus = {
+  serverMonitor: {
+    configured: boolean;
+    enabled: boolean;
+  };
+  solver: {
+    configured: boolean;
+    enabled: boolean;
+  };
 };
 
 export type WeChatChatCandidate = {

@@ -83,7 +83,8 @@ describe("solver job helpers", () => {
       rangePath: "~/solver/job-ranges/job-1/3ia-4.2-3od-4.3.txt",
       statusFilePath: "~/run/status.json",
       settings: DEFAULT_SOLVER_JOB_SETTINGS,
-      hfToken: "hf_test_token"
+      hfToken: "hf_test_token",
+      hfProxyUrl: "http://127.0.0.1:7890"
     });
 
     expect(command).toContain("export http_proxy='http://127.0.0.1:7890'");
@@ -244,7 +245,9 @@ describe("solver job API", () => {
       executor,
       defaultPipelineStatusFilePath: "~/run/solver_running_status.json",
       repoNamespace: "Tsumugii",
-      hfToken: "hf_test_token"
+      hfToken: "hf_test_token",
+      solverHfProxyUrl: "http://127.0.0.1:7890",
+      getHfProxySettings: () => ({ hfProxyEnabled: false, solverHfProxyEnabled: true })
     });
     const app = createApp({ db, refreshService, preflopRangesPath, solverJobService });
     const rangePath = "3OD-EP/3OD-4.3 vs 3IA-4.2.json";
