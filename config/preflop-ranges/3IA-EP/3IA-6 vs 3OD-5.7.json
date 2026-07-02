@@ -7,7 +7,6 @@
     "A": "IP",
     "B": "OOP"
   },
-  "learned": false,
   "A": {
     "raise": "AA,AKs,AQs,AJs,ATs:0.890,AKo,KK,KQs,KJs:0.500,KTs:0.500,AQo:0.500,QQ,QJs:0.500,JJ,TT,99",
     "call": ""

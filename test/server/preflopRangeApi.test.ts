@@ -203,6 +203,7 @@ describe("preflop range API", () => {
             filename: "legacy.range",
             relativePath: "legacy.range",
             content: JSON.stringify({
+              status: "solved",
               A: { raise: "AA", call: "" },
               B: { raise: "", call: "" }
             })
@@ -212,7 +213,19 @@ describe("preflop range API", () => {
 
     expect(response.status).toBe(201);
     expect(response.body.saved[0]).toBe("3OD-EP/legacy.json");
-    expect(fs.existsSync(path.join(preflopRangesPath, "3OD-EP", "legacy.json"))).toBe(true);
+    const savedPath = path.join(preflopRangesPath, "3OD-EP", "legacy.json");
+    expect(fs.existsSync(savedPath)).toBe(true);
     expect(fs.existsSync(path.join(preflopRangesPath, "3OD-EP", "legacy.range"))).toBe(false);
+    const saved = JSON.parse(fs.readFileSync(savedPath, "utf8"));
+    expect(saved).not.toHaveProperty("learned");
+    expect(saved).not.toHaveProperty("status");
+    expect(saved).not.toHaveProperty("reviewStatus");
+    expect(saved).not.toHaveProperty("runStatus");
+
+    const metadata = JSON.parse(fs.readFileSync(path.join(preflopRangesPath, ".range_status.json"), "utf8"));
+    expect(metadata.ranges["3OD-EP/legacy.json"]).toMatchObject({
+      reviewStatus: "approved",
+      runStatus: "solved"
+    });
   });
 });

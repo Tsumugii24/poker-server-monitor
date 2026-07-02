@@ -7,8 +7,6 @@
     "A": "IP",
     "B": "OOP"
   },
-  "learned": false,
-  "status": "under_review",
   "A": {
     "raise": "AA,AKs,AQs,AJs,ATs,A9s,A8s,A7s,A6s,A5s,A4s,A3s,A2s,AKo,KK,KQs,KJs,KTs,K9s,AQo,KQo,QQ,QJs,QTs,Q9s,AJo,JJ,JTs,J9s,ATo:0.013,TT,T9s,99,98s:0.500,88,87s:0.500,77,76s:0.500,66,65s:0.500,54s:0.500",
     "call": ""

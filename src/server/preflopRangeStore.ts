@@ -111,7 +111,9 @@ export function savePreflopRangeFile(
   const target = safePath(root, relativePath);
   assertJsonFilePath(target);
   fs.mkdirSync(path.dirname(target), { recursive: true });
-  writeRangeDocument(target, document);
+  const normalized = normalizePreflopRangeDocument(document, path.basename(target));
+  writeRangeDocument(target, normalized);
+  setStoredStatusFromDocument(root, target, normalized);
   appendToOrder(root, path.dirname(target), path.basename(target));
   return readPreflopRangeFile(root, relativeString(root, target));
 }
@@ -343,8 +345,10 @@ export function saveUploadedPreflopRangeFiles(
     const targetRelative = normalizedUploadRelative(filename, uploadRelative);
     const target = uniquePath(safePath(root, path.join(folderRelative, targetRelative)));
     const parsed = JSON.parse(String(file.content ?? "{}")) as unknown;
+    const normalized = normalizePreflopRangeDocument(parsed, filename);
     fs.mkdirSync(path.dirname(target), { recursive: true });
-    writeRangeDocument(target, normalizePreflopRangeDocument(parsed, filename));
+    writeRangeDocument(target, normalized);
+    setStoredStatusFromDocument(root, target, normalized);
     appendToOrder(root, path.dirname(target), path.basename(target));
     return relativeString(root, target);
   });
@@ -729,6 +733,16 @@ function setStoredRunStatus(root: string, file: string, runStatus: PreflopRunSta
   metadata.ranges[key] = {
     reviewStatus,
     runStatus: normalizedRunStatus,
+    updatedAt: new Date().toISOString()
+  };
+  saveStatusMetadata(root, metadata);
+}
+
+function setStoredStatusFromDocument(root: string, file: string, document: PreflopRangeDocument): void {
+  const metadata = loadStatusMetadata(root);
+  metadata.ranges[relativeString(root, file)] = {
+    reviewStatus: document.reviewStatus,
+    runStatus: document.reviewStatus === "approved" ? document.runStatus : "idle",
     updatedAt: new Date().toISOString()
   };
   saveStatusMetadata(root, metadata);

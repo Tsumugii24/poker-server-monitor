@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   normalizePreflopRangeDocument,
   parseRangeText,
+  serializePreflopRangeDocument,
   setPreflopHandFrequency,
   summarizePreflopRange
 } from "../../src/shared/preflopRange";
@@ -32,6 +33,25 @@ describe("preflop range helpers", () => {
     expect(document.reviewStatus).toBe("approved");
     expect(document.runStatus).toBe("running");
     expect(document.learned).toBe(true);
+  });
+
+  it("serializes only range content and leaves status out of range files", () => {
+    const serialized = serializePreflopRangeDocument(normalizePreflopRangeDocument({
+      learned: true,
+      status: "solved",
+      reviewStatus: "approved",
+      runStatus: "solved",
+      A: { raise: "AA", call: "" },
+      B: { raise: "", call: "KK" }
+    }));
+    const saved = JSON.parse(serialized) as Record<string, unknown>;
+
+    expect(saved).not.toHaveProperty("learned");
+    expect(saved).not.toHaveProperty("status");
+    expect(saved).not.toHaveProperty("reviewStatus");
+    expect(saved).not.toHaveProperty("runStatus");
+    expect(saved.A).toEqual({ raise: "AA", call: "" });
+    expect(saved.B).toEqual({ raise: "", call: "KK" });
   });
 
   it("summarizes raise, call, and fold percentages for both players", () => {

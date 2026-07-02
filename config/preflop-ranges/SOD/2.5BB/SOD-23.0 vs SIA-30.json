@@ -7,8 +7,6 @@
     "A": "OOP",
     "B": "IP"
   },
-  "learned": false,
-  "status": "has_problem",
   "A": {
     "raise": "",
     "call": "AQs:0.250,AJs:0.250,ATs:0.250,A9s:0.750,A8s,A7s,A6s,A5s:0.500,A4s:0.500,A3s,A2s,KQs:0.250,KJs:0.250,KTs:0.500,K9s:0.750,K8s,K7s,K6s,K5s,K4s,K3s,K2s,AQo:0.250,KQo:0.750,Q9s:0.750,Q8s,Q7s,Q6s,Q5s,Q4s,AJo,KJo,QJo,J9s:0.250,J8s,J7s,ATo,KTo,QTo,JTo,TT:0.250,T9s:0.250,T8s,T7s,99:0.750,98s:0.500,97s,96s,88:0.750,87s:0.500,86s,77,76s:0.500,75s,66,65s:0.500,64s,63s:0.500,62s:0.500,55,54s:0.500,53s,52s,44,43s,42s,33,32s,22"

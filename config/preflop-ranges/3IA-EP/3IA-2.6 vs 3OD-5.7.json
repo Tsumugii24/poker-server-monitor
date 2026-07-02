@@ -7,8 +7,6 @@
     "A": "IP",
     "B": "OOP"
   },
-  "learned": false,
-  "status": "under_review",
   "A": {
     "raise": "AA,AKs,AKo,KK,QQ",
     "call": ""

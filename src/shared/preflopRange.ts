@@ -207,11 +207,26 @@ export function parsePreflopRangeInput(input: string, fallbackFilename = ""): Pr
 }
 
 export function serializePreflopRangeDocument(document: PreflopRangeDocument): string {
+  const normalized = normalizePreflopRangeDocument(document);
+  const payload: {
+    player_names: PreflopRangeDocument["player_names"];
+    player_positions: PreflopRangeDocument["player_positions"];
+    A: PreflopPlayerRange;
+    B: PreflopPlayerRange;
+    notes?: string;
+    updatedAt: string;
+  } = {
+    player_names: normalized.player_names,
+    player_positions: normalized.player_positions,
+    A: normalized.A,
+    B: normalized.B,
+    updatedAt: new Date().toISOString()
+  };
+  if (normalized.notes) {
+    payload.notes = normalized.notes;
+  }
   return `${JSON.stringify(
-    {
-      ...normalizePreflopRangeDocument(document),
-      updatedAt: new Date().toISOString()
-    },
+    payload,
     null,
     2
   )}\n`;
