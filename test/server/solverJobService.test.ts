@@ -263,15 +263,15 @@ describe("solver job API", () => {
     expect(preview.status).toBe(200);
     expect(preview.body.repoId).toBe("Tsumugii/3ia-4.2-3od-4.3");
     expect(preview.body.scenario).toBe("3ia-3od");
-    expect(preview.body.remoteRangePath).toBe("~/solver/job-ranges/<job-id>/3ia-4.2-3od-4.3.txt");
-    expect(preview.body.remoteResultPath).toBe("~/solver/results/3ia-4.2-3od-4.3/<job-id>");
+    expect(preview.body.remoteRangePath).toBe("/srv/solver/job-ranges/<job-id>/3ia-4.2-3od-4.3.txt");
+    expect(preview.body.remoteResultPath).toBe("/srv/solver/results/3ia-4.2-3od-4.3/<job-id>");
     expect(preview.body.requiresConfirmation).toBe(true);
     expect(preview.body.commandPreview).toContain("export HF_TOKEN=$HF_TOKEN");
     expect(preview.body.commandPreview).not.toContain("hf_test_token");
     expect(preview.body.commandPreview).toContain("export http_proxy='http://127.0.0.1:7890'");
     expect(preview.body.commandPreview).toContain("'--scenario' '3ia-3od'");
-    expect(preview.body.commandPreview).toContain("'--range-path' '~/solver/job-ranges/<job-id>/3ia-4.2-3od-4.3.txt'");
-    expect(preview.body.commandPreview).toContain("'--result-path' '~/solver/results/3ia-4.2-3od-4.3/<job-id>'");
+    expect(preview.body.commandPreview).toContain("'--range-path' '/srv/solver/job-ranges/<job-id>/3ia-4.2-3od-4.3.txt'");
+    expect(preview.body.commandPreview).toContain("'--result-path' '/srv/solver/results/3ia-4.2-3od-4.3/<job-id>'");
 
     const noUploadPreview = await request(app)
       .post("/api/jobs/preview")
@@ -282,8 +282,8 @@ describe("solver job API", () => {
     expect(noUploadPreview.body.settings.estimateMemory).toBe(false);
     expect(noUploadPreview.body.commandPreview).toContain("'--no-upload'");
     expect(noUploadPreview.body.commandPreview).toContain("'--scenario' '3ia-3od'");
-    expect(noUploadPreview.body.commandPreview).toContain("'--range-path' '~/solver/job-ranges/<job-id>/3ia-4.2-3od-4.3.txt'");
-    expect(noUploadPreview.body.commandPreview).toContain("'--result-path' '~/solver/results/3ia-4.2-3od-4.3/<job-id>'");
+    expect(noUploadPreview.body.commandPreview).toContain("'--range-path' '/srv/solver/job-ranges/<job-id>/3ia-4.2-3od-4.3.txt'");
+    expect(noUploadPreview.body.commandPreview).toContain("'--result-path' '/srv/solver/results/3ia-4.2-3od-4.3/<job-id>'");
     expect(noUploadPreview.body.commandPreview).not.toContain("'--repo-id'");
     expect(noUploadPreview.body.commandPreview).not.toContain("'--upload-format'");
     expect(noUploadPreview.body.commandPreview).not.toContain("'--upload-attempt-timeout'");
@@ -310,7 +310,7 @@ describe("solver job API", () => {
 
     expect(created.status).toBe(201);
     expect(created.body.job.status).toBe("queued");
-    expect(created.body.job.remoteResultPath).toBe(`~/solver/results/3ia-4.2-3od-4.3/${created.body.job.id}`);
+    expect(created.body.job.remoteResultPath).toBe(`/srv/solver/results/3ia-4.2-3od-4.3/${created.body.job.id}`);
     expect(created.body.job.command).toContain("export HF_TOKEN=$HF_TOKEN");
     expect(created.body.job.command).not.toContain("hf_test_token");
 
@@ -329,9 +329,9 @@ describe("solver job API", () => {
     expect(runningRange.body.summary.data.runStatus).toBe("running");
     expect(commands).toHaveLength(2);
     expect(commands[0]).toContain("OOP_RANGE");
-    expect(commands[0]).toContain(`RANGE_PATH="$HOME/solver/job-ranges/${created.body.job.id}/3ia-4.2-3od-4.3.txt"`);
+    expect(commands[0]).toContain(`RANGE_PATH='/srv/solver/job-ranges/${created.body.job.id}/3ia-4.2-3od-4.3.txt'`);
     expect(commands[0]).not.toContain(".bak.");
-    expect(commands[1]).toContain('-c "$HOME/solver"');
+    expect(commands[1]).toContain("-c '/srv/solver'");
     expect(commands[1]).toContain("tmux send-keys");
     expect(commands[1]).toContain("run_pipeline.py");
     expect(commands[1]).toContain("--scenario");
@@ -348,7 +348,7 @@ describe("solver job API", () => {
       id: created.body.job.id,
       status: "running",
       repoId: "Tsumugii/3ia-4.2-3od-4.3",
-      remoteResultPath: `~/solver/results/3ia-4.2-3od-4.3/${created.body.job.id}`
+      remoteResultPath: `/srv/solver/results/3ia-4.2-3od-4.3/${created.body.job.id}`
     });
     expect(list.body.jobs[0].command).toContain("export HF_TOKEN=$HF_TOKEN");
     expect(list.body.jobs[0].command).not.toContain("hf_test_token");
@@ -428,12 +428,12 @@ describe("solver job API", () => {
     expect(preview.body.datasetName).toBe("sia-45-sod-40");
     expect(preview.body.repoId).toBe("Tsumugii/sia-45-sod-40");
     expect(preview.body.scenario).toBe("sia-sod-open2.5");
-    expect(preview.body.remoteRangePath).toBe("~/solver/job-ranges/<job-id>/sia-45-sod-40.txt");
-    expect(preview.body.remoteResultPath).toBe("~/solver/results/sia-45-sod-40/<job-id>");
+    expect(preview.body.remoteRangePath).toBe("/srv/solver/job-ranges/<job-id>/sia-45-sod-40.txt");
+    expect(preview.body.remoteResultPath).toBe("/srv/solver/results/sia-45-sod-40/<job-id>");
     expect(preview.body.commandPreview).toContain("'--repo-id' 'Tsumugii/sia-45-sod-40'");
     expect(preview.body.commandPreview).toContain("'--scenario' 'sia-sod-open2.5'");
-    expect(preview.body.commandPreview).toContain("'--range-path' '~/solver/job-ranges/<job-id>/sia-45-sod-40.txt'");
-    expect(preview.body.commandPreview).toContain("'--result-path' '~/solver/results/sia-45-sod-40/<job-id>'");
+    expect(preview.body.commandPreview).toContain("'--range-path' '/srv/solver/job-ranges/<job-id>/sia-45-sod-40.txt'");
+    expect(preview.body.commandPreview).toContain("'--result-path' '/srv/solver/results/sia-45-sod-40/<job-id>'");
 
     const overridden = await request(app)
       .post("/api/jobs/preview")
@@ -447,7 +447,7 @@ describe("solver job API", () => {
     expect(overridden.body.datasetName).toBe("sia-45-sod-40");
     expect(overridden.body.repoId).toBe("Tsumugii/sia-45-sod-40");
     expect(overridden.body.scenario).toBe("sia-sod-open3");
-    expect(overridden.body.remoteRangePath).toBe("~/solver/job-ranges/<job-id>/sia-45-sod-40.txt");
+    expect(overridden.body.remoteRangePath).toBe("/srv/solver/job-ranges/<job-id>/sia-45-sod-40.txt");
     expect(overridden.body.commandPreview).toContain("'--scenario' 'sia-sod-open3'");
   });
 

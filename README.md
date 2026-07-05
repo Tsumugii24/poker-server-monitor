@@ -37,6 +37,14 @@ repositories. `SOLVER_HF_PROXY_URL` is exported into remote solver tmux commands
 enabled. After setting these values, enable the matching switches in Settings → Connection Check.
 If either the `.env` value is empty or the dashboard switch is off, that path connects directly.
 
+Parallel solver allocation uses the solver board list from `cards/cards.txt`. By default the
+backend looks under the configured server `solverRoot` values, such as `~/solver/cards/cards.txt`.
+If the monitor host keeps that file somewhere else, set:
+
+```env
+SERVER_MONITOR_SOLVER_CARDS_PATH=/home/user/solver/cards/cards.txt
+```
+
 3. Create the local server inventory:
 
 ```bash

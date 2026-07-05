@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import {
   DEFAULT_SOLVER_JOB_SETTINGS,
@@ -59,6 +60,7 @@ type SolverJobServiceOptions = {
   hfToken?: string | null;
   hfProxyUrl?: string | null;
   solverHfProxyUrl?: string | null;
+  solverCardsPath?: string | null;
   getHfProxySettings?: () => Pick<AlertSettings, "hfProxyEnabled" | "solverHfProxyEnabled">;
   getScenarioLibrary?: () => SolverScenarioLibraryItem[];
 };
@@ -75,6 +77,7 @@ export class SolverJobService {
   private readonly hfToken: string | null;
   private readonly hfProxyUrl: string | null;
   private readonly solverHfProxyUrl: string | null;
+  private readonly solverCardsPath: string | null;
   private readonly getHfProxySettings: () => Pick<AlertSettings, "hfProxyEnabled" | "solverHfProxyEnabled">;
   private readonly getScenarioLibrary: () => SolverScenarioLibraryItem[];
 
@@ -85,6 +88,7 @@ export class SolverJobService {
     this.hfToken = options.hfToken?.trim() || null;
     this.hfProxyUrl = options.hfProxyUrl?.trim() || null;
     this.solverHfProxyUrl = options.solverHfProxyUrl?.trim() || null;
+    this.solverCardsPath = options.solverCardsPath?.trim() || process.env.SERVER_MONITOR_SOLVER_CARDS_PATH?.trim() || null;
     this.getHfProxySettings = options.getHfProxySettings ?? (() => ({
       hfProxyEnabled: false,
       solverHfProxyEnabled: false
@@ -291,10 +295,11 @@ export class SolverJobService {
 
     const now = new Date().toISOString();
     const jobId = randomUUID();
-    const remoteRangePath = jobScopedRemoteRangePath(jobId, preview.datasetName);
-    const remoteResultPath = jobScopedRemoteResultPath(jobId, preview.datasetName);
+    const solverRoot = effectiveSolverRoot(preview.server);
+    const remoteRangePath = jobScopedRemoteRangePath(jobId, preview.datasetName, solverRoot);
+    const remoteResultPath = jobScopedRemoteResultPath(jobId, preview.datasetName, solverRoot);
     const command = buildRunPipelineCommand({
-      solverRoot: effectiveSolverRoot(),
+      solverRoot,
       repoId: preview.repoId,
       scenario: preview.scenario,
       rangePath: remoteRangePath,
@@ -348,14 +353,14 @@ export class SolverJobService {
     this.ensureServerOnline(server);
     this.ensureNoActiveJob(server.id, job.id);
     this.ensureCredentials();
-    const executionCommand = this.buildExecutionCommand(job);
+    const executionCommand = this.buildExecutionCommand(job, server);
 
     this.options.db.updateSolverJob(job.id, { status: "deploying", lastError: null });
     this.recordEvent(job.id, "deploying", `Submitting selected range to ${job.remoteRangePath}.`, null);
     try {
       await this.executor.run(server, this.options.credentials!, buildDeployRangeCommand(job));
       this.recordEvent(job.id, "deployed", "Selected range submitted.", null);
-      await this.executor.run(server, this.options.credentials!, buildTmuxStartCommand(job, effectiveSolverRoot(), executionCommand));
+      await this.executor.run(server, this.options.credentials!, buildTmuxStartCommand(job, effectiveSolverRoot(server), executionCommand));
       const now = new Date().toISOString();
       this.recordEvent(job.id, "started", `Started tmux session ${job.tmuxSession}.`, job.command);
       return this.options.db.updateSolverJob(job.id, {
@@ -537,7 +542,7 @@ export class SolverJobService {
       repoExists = true;
     }
 
-    const allBoards = readSolverCards();
+    const allBoards = this.readSolverCards();
     const indices = options.explicitIndices
       ? normalizeBoardIndices(options.explicitIndices, allBoards.length)
       : repoExists
@@ -545,12 +550,13 @@ export class SolverJobService {
         : [];
     const allocations = allocateRoundRobin(indices, selectedServers).map((allocation) => {
       const settings = { ...basePreview.settings, rangeExpr: allocation.rangeExpr };
+      const solverRoot = effectiveSolverRoot(allocation.server);
       const commandPreview = buildRunPipelineCommand({
-        solverRoot: effectiveSolverRoot(),
+        solverRoot,
         repoId: basePreview.repoId,
         scenario: basePreview.scenario,
-        rangePath: jobScopedRemoteRangePath("<job-id>", basePreview.datasetName),
-        resultPath: jobScopedRemoteResultPath("<job-id>", basePreview.datasetName),
+        rangePath: jobScopedRemoteRangePath("<job-id>", basePreview.datasetName, solverRoot),
+        resultPath: jobScopedRemoteResultPath("<job-id>", basePreview.datasetName, solverRoot),
         settings,
         statusFilePath: allocation.server.pipelineStatusFilePath?.trim() || this.defaultPipelineStatusFilePath,
         hfToken: this.hfToken,
@@ -636,11 +642,12 @@ export class SolverJobService {
       const sliceId = randomUUID();
       const jobId = randomUUID();
       const settings = { ...preview.settings, rangeExpr: allocation.rangeExpr };
-      const remoteRangePath = jobScopedRemoteRangePath(jobId, preview.datasetName);
-      const remoteResultPath = jobScopedRemoteResultPath(jobId, preview.datasetName);
+      const solverRoot = effectiveSolverRoot(allocation.server);
+      const remoteRangePath = jobScopedRemoteRangePath(jobId, preview.datasetName, solverRoot);
+      const remoteResultPath = jobScopedRemoteResultPath(jobId, preview.datasetName, solverRoot);
       const statusFilePath = allocation.server.pipelineStatusFilePath?.trim() || this.defaultPipelineStatusFilePath;
       const command = buildRunPipelineCommand({
-        solverRoot: effectiveSolverRoot(),
+        solverRoot,
         repoId: preview.repoId,
         scenario: preview.scenario,
         rangePath: remoteRangePath,
@@ -721,8 +728,9 @@ export class SolverJobService {
   }
 
   private reconcileParallelRuns(): void {
-    const allBoards = readSolverCards();
-    for (const run of this.options.db.getParallelSolverRuns()) {
+    const runs = this.options.db.getParallelSolverRuns();
+    let allBoards: string[] | null = null;
+    for (const run of runs) {
       for (const slice of run.slices) {
         if (!slice.job) continue;
         const next = sliceStateFromJob(slice, slice.job);
@@ -746,6 +754,7 @@ export class SolverJobService {
           this.options.db.updateParallelFailurePoolEntries(run.rangePath, run.datasetName, slice.assignedIndices, "solved");
         }
         if (becameFailed) {
+          allBoards ??= this.readSolverCards();
           const failedIndices = failedIndicesForSlice(slice, slice.job);
           for (const index of failedIndices) {
             const boardName = allBoards[index - 1] ?? String(index);
@@ -790,7 +799,7 @@ export class SolverJobService {
     const entries = this.options.db.getParallelFailurePoolEntries(input.rangePath, datasetName)
       .filter((entry) => entry.status === "pending" || entry.status === "failed");
     const selected = input.indices?.length
-      ? new Set(normalizeBoardIndices(input.indices, readSolverCards().length))
+      ? new Set(normalizeBoardIndices(input.indices, this.readSolverCards().length))
       : null;
     return entries
       .map((entry) => entry.boardIndex)
@@ -854,9 +863,9 @@ export class SolverJobService {
     }
   }
 
-  private buildExecutionCommand(job: SolverJob): string {
+  private buildExecutionCommand(job: SolverJob, server: ServerRow = this.requireServer(job.serverId)): string {
     return buildRunPipelineCommand({
-      solverRoot: effectiveSolverRoot(),
+      solverRoot: effectiveSolverRoot(server),
       repoId: job.repoId,
       scenario: job.scenario,
       rangePath: job.remoteRangePath,
@@ -874,6 +883,13 @@ export class SolverJobService {
 
   private effectiveSolverHfProxyUrl(): string | null {
     return this.getHfProxySettings().solverHfProxyEnabled ? this.solverHfProxyUrl : null;
+  }
+
+  private readSolverCards(): string[] {
+    return readSolverCards({
+      explicitPath: this.solverCardsPath,
+      solverRoots: this.options.db.getServerRows().map((server) => server.solverRoot)
+    });
   }
 
   private recordEvent(jobId: string, type: string, message: string, commandPreview: string | null): void {
@@ -908,7 +924,7 @@ export function buildSolverJobPreview({
   solverHfProxyUrl?: string | null;
   scenarioLibrary?: SolverScenarioLibraryItem[];
 }): SolverJobPreview {
-  const solverRoot = effectiveSolverRoot();
+  const solverRoot = effectiveSolverRoot(server);
 
   const file = readPreflopRangeFile(preflopRangesPath, input.rangePath);
   const settings = normalizeSolverJobSettings(input.settings);
@@ -918,8 +934,8 @@ export function buildSolverJobPreview({
   const solverRangeText = solverRangeTextFromDocument(file.summary.data);
   const tmuxSession = server.tmuxSession?.trim() || "solver";
   const pipelineStatusFilePath = server.pipelineStatusFilePath?.trim() || defaultPipelineStatusFilePath;
-  const remoteRangePath = jobScopedRemoteRangePath("<job-id>", datasetName);
-  const remoteResultPath = jobScopedRemoteResultPath("<job-id>", datasetName);
+  const remoteRangePath = jobScopedRemoteRangePath("<job-id>", datasetName, solverRoot);
+  const remoteResultPath = jobScopedRemoteResultPath("<job-id>", datasetName, solverRoot);
   const commandPreview = buildRunPipelineCommand({
     solverRoot,
     repoId,
@@ -1410,14 +1426,28 @@ function normalizeSelectedServerIds(serverIds: string[] | undefined, availableSe
   return unique;
 }
 
-function readSolverCards(): string[] {
-  const candidates = [
+function readSolverCards({
+  explicitPath,
+  solverRoots
+}: {
+  explicitPath?: string | null;
+  solverRoots?: Array<string | null | undefined>;
+} = {}): string[] {
+  const candidates = uniqueStrings([
+    explicitPath ? resolveLocalPath(explicitPath) : null,
+    ...[...(solverRoots ?? []), DEFAULT_SOLVER_ROOT]
+      .map((root) => root?.trim())
+      .filter((root): root is string => Boolean(root))
+      .map((root) => path.join(resolveLocalPath(root), "cards", "cards.txt")),
     path.resolve(process.cwd(), "tmp/solver/cards/cards.txt"),
     path.resolve(process.cwd(), "cards/cards.txt")
-  ];
+  ]);
   const cardsPath = candidates.find((candidate) => fs.existsSync(candidate));
   if (!cardsPath) {
-    throw new Error("Unable to locate solver cards.txt for parallel allocation.");
+    throw new Error(
+      `Unable to locate solver cards.txt for parallel allocation. Checked: ${candidates.join(", ")}. ` +
+      "Set SERVER_MONITOR_SOLVER_CARDS_PATH or make sure the configured solverRoot contains cards/cards.txt on this host."
+    );
   }
   return fs.readFileSync(cardsPath, "utf8")
     .split(/\r?\n/)
@@ -1647,16 +1677,35 @@ function joinRemotePath(...parts: string[]): string {
     .join("/");
 }
 
-function effectiveSolverRoot(): string {
-  return DEFAULT_SOLVER_ROOT;
+function effectiveSolverRoot(server?: Pick<ServerRow, "solverRoot"> | null): string {
+  return server?.solverRoot?.trim() || DEFAULT_SOLVER_ROOT;
 }
 
-function jobScopedRemoteRangePath(jobId: string, datasetName: string): string {
-  return joinRemotePath(effectiveSolverRoot(), "job-ranges", jobId, `${datasetName}.txt`);
+function jobScopedRemoteRangePath(jobId: string, datasetName: string, solverRoot = DEFAULT_SOLVER_ROOT): string {
+  return joinRemotePath(solverRoot, "job-ranges", jobId, `${datasetName}.txt`);
 }
 
-function jobScopedRemoteResultPath(jobId: string, datasetName: string): string {
-  return joinRemotePath(effectiveSolverRoot(), "results", datasetName, jobId);
+function jobScopedRemoteResultPath(jobId: string, datasetName: string, solverRoot = DEFAULT_SOLVER_ROOT): string {
+  return joinRemotePath(solverRoot, "results", datasetName, jobId);
+}
+
+function resolveLocalPath(rawPath: string): string {
+  const trimmed = rawPath.trim();
+  if (trimmed === "~") return os.homedir();
+  if (trimmed.startsWith("~/")) return path.join(os.homedir(), trimmed.slice(2));
+  if (path.isAbsolute(trimmed)) return trimmed;
+  return path.resolve(process.cwd(), trimmed);
+}
+
+function uniqueStrings(values: Array<string | null | undefined>): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const value of values) {
+    if (!value || seen.has(value)) continue;
+    seen.add(value);
+    result.push(value);
+  }
+  return result;
 }
 
 function dirnameRemote(remotePath: string): string {
