@@ -7,6 +7,7 @@ import type {
   WeChatAccountsStatus
 } from "../shared/types";
 import { loadAlertSettings, saveAlertSettings } from "./config";
+import { formatWeChatContextRefreshReminderMessage } from "./wechatContextReminder";
 import { WeChatNotifier } from "./wechatNotifier";
 
 export type WeChatAccountManagerOptions = {
@@ -29,8 +30,14 @@ type ManagedWeChatNotifier = Pick<
   | "startInBackground"
   | "ensureStarted"
   | "send"
+  | "sendContextRefreshReminderIfDue"
   | "getStatus"
 >;
+
+export type WeChatContextRefreshReminderSummary = {
+  sent: string[];
+  failed: Array<{ accountId: string; label: string; message: string }>;
+};
 
 export class WeChatAccountManager {
   private readonly storageRoot: string;
@@ -177,6 +184,50 @@ export class WeChatAccountManager {
       throw new Error(status.lastError ?? `WeChat account ${account.label} is not logged in`);
     }
     await notifier.send(message, account.alertTargetUserId);
+  }
+
+  async sendContextRefreshReminders(now = Date.now()): Promise<WeChatContextRefreshReminderSummary> {
+    const settings = this.loadSettings();
+    const summary: WeChatContextRefreshReminderSummary = {
+      sent: [],
+      failed: []
+    };
+
+    if (!settings.enabled) {
+      return summary;
+    }
+
+    const message = formatWeChatContextRefreshReminderMessage(settings.language, new Date(now));
+    for (const account of settings.wechatAccounts) {
+      if (!account.enabled || !account.alertTargetUserId) {
+        continue;
+      }
+
+      const notifier = this.getNotifier(account.id);
+      const status = notifier.getStatus(account.alertTargetUserId);
+      if (!status.loggedIn || !status.ready || !status.target?.lastInboundAt) {
+        continue;
+      }
+
+      try {
+        const sent = await notifier.sendContextRefreshReminderIfDue(
+          account.alertTargetUserId,
+          message,
+          now
+        );
+        if (sent) {
+          summary.sent.push(account.id);
+        }
+      } catch (error) {
+        summary.failed.push({
+          accountId: account.id,
+          label: account.label,
+          message: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
+
+    return summary;
   }
 
   getAccountStatus(accountId: string): WeChatAccountConnectorStatus {

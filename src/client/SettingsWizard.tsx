@@ -1,4 +1,5 @@
 import {
+  AlertTriangle,
   Check,
   LogIn,
   LogOut,
@@ -93,6 +94,7 @@ export function SettingsWizard({
   const selectedChecklist = selectedConnector ? buildWeChatChecklist(selectedConnector, language) : [];
   const selectedNeedsVerification = Boolean(selectedAccount && selectedConnector?.loggedIn && !selectedAccount.verified);
   const latestVerificationChat = selectedConnector?.recentChats[0] ?? null;
+  const selectedContextRefreshTarget = selectedAccount ? getContextRefreshTarget(selectedAccount) : null;
 
   useEffect(() => {
     setDraft(settings);
@@ -335,65 +337,73 @@ export function SettingsWizard({
 
             {accounts.length > 0 ? (
               <div className="sw-recipient-list">
-                {accounts.map((account) => (
-                  <div
-                    key={account.id}
-                    className={`sw-recipient-card${account.enabled ? " enabled" : " disabled"}${account.verified ? " verified" : ""}`}
-                  >
-                    {editingAccountId === account.id ? (
-                      <div className="sw-recipient-edit">
-                        <div className="sw-recipient-edit-fields one">
-                          <div className="sw-field">
-                            <label>{copy.accounts.labelField}</label>
-                            <input value={editLabel} onChange={(event) => setEditLabel(event.target.value)} autoFocus />
+                {accounts.map((account) => {
+                  const contextRefreshTarget = getContextRefreshTarget(account);
+                  return (
+                    <div
+                      key={account.id}
+                      className={`sw-recipient-card${account.enabled ? " enabled" : " disabled"}${account.verified ? " verified" : ""}${contextRefreshTarget ? " context-stale" : ""}`}
+                    >
+                      {editingAccountId === account.id ? (
+                        <div className="sw-recipient-edit">
+                          <div className="sw-recipient-edit-fields one">
+                            <div className="sw-field">
+                              <label>{copy.accounts.labelField}</label>
+                              <input value={editLabel} onChange={(event) => setEditLabel(event.target.value)} autoFocus />
+                            </div>
+                          </div>
+                          <div className="sw-recipient-edit-actions">
+                            <button
+                              className="sw-btn primary compact"
+                              disabled={saving || busyAccountId === account.id || !editLabel.trim()}
+                              onClick={() => void saveAccountLabel(account)}
+                            >
+                              <Check size={14} />
+                              {copy.accounts.saveAccount}
+                            </button>
+                            <button
+                              className="sw-btn ghost compact"
+                              disabled={busyAccountId === account.id}
+                              onClick={() => {
+                                setEditingAccountId(null);
+                                setEditLabel("");
+                              }}
+                            >
+                              {copy.common.cancel}
+                            </button>
                           </div>
                         </div>
-                        <div className="sw-recipient-edit-actions">
-                          <button
-                            className="sw-btn primary compact"
-                            disabled={saving || busyAccountId === account.id || !editLabel.trim()}
-                            onClick={() => void saveAccountLabel(account)}
-                          >
-                            <Check size={14} />
-                            {copy.accounts.saveAccount}
-                          </button>
-                          <button
-                            className="sw-btn ghost compact"
-                            disabled={busyAccountId === account.id}
-                            onClick={() => {
-                              setEditingAccountId(null);
-                              setEditLabel("");
-                            }}
-                          >
-                            {copy.common.cancel}
-                          </button>
+                      ) : (
+                        <div className="sw-recipient-main">
+                          <div className="sw-recipient-info">
+                            <strong className="sw-recipient-label">{account.label}</strong>
+                            <span className="sw-recipient-contact">
+                              {account.botUserId ?? account.connector.botUserId ?? copy.accounts.pendingBotId}
+                            </span>
+                            <span className="sw-recipient-date">
+                              {accountStatusLabel(account, copy)} · {copy.accounts.added} {formatDate(account.addedAt)}
+                            </span>
+                            {account.alertTargetUserId ? (
+                              <span className="sw-recipient-contact muted">{copy.accounts.target}: {account.alertTargetUserId}</span>
+                            ) : null}
+                          </div>
+                          {renderAccountControls(account)}
                         </div>
-                      </div>
-                    ) : (
-                      <div className="sw-recipient-main">
-                        <div className="sw-recipient-info">
-                          <strong className="sw-recipient-label">{account.label}</strong>
-                          <span className="sw-recipient-contact">
-                            {account.botUserId ?? account.connector.botUserId ?? copy.accounts.pendingBotId}
-                          </span>
-                          <span className="sw-recipient-date">
-                            {accountStatusLabel(account, copy)} · {copy.accounts.added} {formatDate(account.addedAt)}
-                          </span>
-                          {account.alertTargetUserId ? (
-                            <span className="sw-recipient-contact muted">{copy.accounts.target}: {account.alertTargetUserId}</span>
-                          ) : null}
+                      )}
+                      {testingAccountId === account.id ? (
+                        <div className="sw-recipient-testing">{copy.accounts.testing}</div>
+                      ) : null}
+                      {!account.verified && account.connector.loggedIn ? (
+                        <div className="sw-recipient-testing warning">{copy.accounts.needsVerification}</div>
+                      ) : null}
+                      {contextRefreshTarget ? (
+                        <div className="sw-recipient-testing error">
+                          {copy.accounts.contextRefreshRequired}: <code>{contextRefreshTarget}</code>
                         </div>
-                        {renderAccountControls(account)}
-                      </div>
-                    )}
-                    {testingAccountId === account.id ? (
-                      <div className="sw-recipient-testing">{copy.accounts.testing}</div>
-                    ) : null}
-                    {!account.verified && account.connector.loggedIn ? (
-                      <div className="sw-recipient-testing warning">{copy.accounts.needsVerification}</div>
-                    ) : null}
-                  </div>
-                ))}
+                      ) : null}
+                    </div>
+                  );
+                })}
               </div>
             ) : (
               <div className="sw-empty-state">
@@ -642,6 +652,19 @@ export function SettingsWizard({
                   </div>
                 ) : null}
 
+                {selectedContextRefreshTarget ? (
+                  <div className="wechat-context-refresh-alert" role="alert">
+                    <AlertTriangle size={18} />
+                    <div>
+                      <strong>{copy.connection.contextRefreshTitle}</strong>
+                      <p>{copy.connection.contextRefreshAction}</p>
+                      <span className="wechat-context-refresh-target">
+                        {copy.connection.contextRefreshTarget}: <code>{selectedContextRefreshTarget}</code>
+                      </span>
+                    </div>
+                  </div>
+                ) : null}
+
                 {selectedAccount.verified ? (
                   <div className="sw-inline-success">
                     {copy.connection.verified} {selectedAccount.alertTargetUserId}
@@ -883,6 +906,16 @@ function accountStatusLabel(
   return copy.accounts.notConnected;
 }
 
+function getContextRefreshTarget(account: WeChatAccountConnectorStatus): string | null {
+  if (account.connector.delivery.phase !== "context_stale") return null;
+  return (
+    account.connector.target?.userId ??
+    account.alertTargetUserId ??
+    account.connector.storedSession.contextUserIds[0] ??
+    null
+  );
+}
+
 function formatDate(value: string | null | undefined): string {
   return value ? new Date(value).toLocaleString() : "-";
 }
@@ -922,6 +955,7 @@ const COPY = {
       target: "Verified target",
       pendingBotId: "WeChat account pending",
       needsVerification: "Logged in, waiting for verification message.",
+      contextRefreshRequired: "Refresh context_token for",
       verified: "Verified",
       loggedIn: "Logged in",
       waitingScan: "Waiting for scan",
@@ -957,6 +991,9 @@ const COPY = {
       latestMessage: "Latest detected message",
       verify: "Verify recipient",
       verified: "Verified delivery target:",
+      contextRefreshTitle: "Manual context_token refresh required",
+      contextRefreshAction: "Ask this WeChat user to send any message to ClawBot, then run Send test alert again.",
+      contextRefreshTarget: "User to refresh",
       noPreview: "No text preview",
       empty: "Choose or add a recipient before connecting."
     },
@@ -1024,6 +1061,7 @@ const COPY = {
       target: "验证目标",
       pendingBotId: "微信账号待同步",
       needsVerification: "已登录，等待验证消息。",
+      contextRefreshRequired: "需要刷新 context_token",
       verified: "已验证",
       loggedIn: "已登录",
       waitingScan: "等待扫码",
@@ -1059,6 +1097,9 @@ const COPY = {
       latestMessage: "最近检测到的消息",
       verify: "验证接收人",
       verified: "已验证投递目标：",
+      contextRefreshTitle: "需要手动刷新 context_token",
+      contextRefreshAction: "请让这个微信用户给 ClawBot 发任意一条消息，然后重新发送测试告警。",
+      contextRefreshTarget: "需要操作的用户",
       noPreview: "无文本预览",
       empty: "请先选择或添加接收人。"
     },

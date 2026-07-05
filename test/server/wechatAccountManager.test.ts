@@ -99,16 +99,85 @@ describe("WeChatAccountManager", () => {
       "Selected WeChat contact has no cached context token."
     );
   });
+
+  it("sends context refresh reminders to enabled verified accounts", async () => {
+    fs.writeFileSync(alertSettingsPath, JSON.stringify({
+      enabled: true,
+      wechatRoomId: "",
+      wechatRecipients: [],
+      wechatAccounts: [
+        {
+          id: "account-1",
+          label: "Ops owner",
+          enabled: true,
+          addedAt: "2026-05-20T10:00:00.000Z",
+          botUserId: "bot-one@im.wechat",
+          alertTargetUserId: "owner@im.wechat"
+        },
+        {
+          id: "account-2",
+          label: "Paused",
+          enabled: false,
+          addedAt: "2026-05-20T10:01:00.000Z",
+          botUserId: "bot-two@im.wechat",
+          alertTargetUserId: "paused@im.wechat"
+        }
+      ],
+      cooldownMinutes: 60,
+      language: "zh",
+      sshCommandTimeoutSeconds: 15,
+      sshConnectTimeoutSeconds: 10
+    }));
+
+    const now = Date.parse("2026-06-25T12:00:00.000Z");
+    const sent: Array<{ userId: string; message: string; now: number }> = [];
+    const manager = new WeChatAccountManager({
+      alertSettingsPath,
+      notifierFactory: (storageDir) => {
+        const accountId = path.basename(storageDir);
+        return fakeNotifier(
+          loggedInStatus({
+            botUserId: `${accountId}@bot.im.wechat`,
+            recentChats: [],
+            contextUserIds: [accountId === "account-1" ? "owner@im.wechat" : "paused@im.wechat"],
+            target: {
+              userId: accountId === "account-1" ? "owner@im.wechat" : "paused@im.wechat",
+              lastInboundAt: new Date(now - 23.5 * 60 * 60_000).toISOString(),
+              lastSendSuccessAt: null,
+              lastSendFailureAt: null,
+              lastSendFailureCode: null
+            }
+          }),
+          async (userId, message, reminderNow) => {
+            sent.push({ userId, message, now: reminderNow ?? 0 });
+            return true;
+          }
+        );
+      }
+    });
+
+    const summary = await manager.sendContextRefreshReminders(now);
+
+    expect(summary.sent).toEqual(["account-1"]);
+    expect(summary.failed).toEqual([]);
+    expect(sent).toEqual([{
+      userId: "owner@im.wechat",
+      message: expect.stringContaining("请向我发送任意消息来再次激活连接"),
+      now
+    }]);
+  });
 });
 
 function loggedInStatus({
   botUserId,
   recentChats,
-  contextUserIds
+  contextUserIds,
+  target = null
 }: {
   botUserId: string;
   recentChats: WeChatConnectorStatus["recentChats"];
   contextUserIds: string[];
+  target?: WeChatConnectorStatus["target"];
 }): WeChatConnectorStatus {
   return {
     started: true,
@@ -129,7 +198,7 @@ function loggedInStatus({
     messageCount: recentChats.length,
     lastMessageAt: recentChats[0]?.receivedAt ?? null,
     recentChats,
-    target: null,
+    target,
     delivery: buildWeChatDelivery({
       alertsConfigured: false,
       started: true,
@@ -144,7 +213,14 @@ function loggedInStatus({
   };
 }
 
-function fakeNotifier(status: WeChatConnectorStatus) {
+function fakeNotifier(
+  status: WeChatConnectorStatus,
+  sendContextRefreshReminderIfDue: (
+    userId: string,
+    message: string,
+    now?: number
+  ) => Promise<boolean> = async () => false
+) {
   return {
     getStatus: () => status,
     restartLogin: async () => undefined,
@@ -154,6 +230,7 @@ function fakeNotifier(status: WeChatConnectorStatus) {
     startInBackground: () => undefined,
     ensureStarted: async () => undefined,
     send: async () => undefined,
+    sendContextRefreshReminderIfDue,
     getStorageDir: () => undefined
   };
 }

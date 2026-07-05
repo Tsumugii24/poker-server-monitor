@@ -1,3 +1,6 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import type { WeChatChatCandidate, WeChatConnectorStatus } from "../shared/types";
 import {
   buildWeChatDelivery,
@@ -5,6 +8,9 @@ import {
   classifyWeChatStartupError,
   type WeChatTargetActivity
 } from "../shared/wechatDelivery";
+import {
+  shouldSendWeChatContextRefreshReminder
+} from "./wechatContextReminder";
 import { readStoredWeChatSession } from "./wechatStorage";
 
 type WeChatBotInstance = {
@@ -47,6 +53,10 @@ type IncomingWeChatMessage = {
   timestamp?: Date;
 };
 
+type InternalWeChatTargetActivity = WeChatTargetActivity & {
+  lastContextRefreshReminderAt: string | null;
+};
+
 export type WeChatNotifierOptions = {
   storageDir?: string;
 };
@@ -70,9 +80,11 @@ export class WeChatNotifier {
   private lastMessageAt: string | null = null;
   private suppressAutoRelogin = false;
   private readonly recentChats: WeChatChatCandidate[] = [];
-  private readonly targetActivity = new Map<string, WeChatTargetActivity>();
+  private readonly targetActivity = new Map<string, InternalWeChatTargetActivity>();
 
-  constructor(private readonly options: WeChatNotifierOptions = {}) {}
+  constructor(private readonly options: WeChatNotifierOptions = {}) {
+    this.loadPersistedTargetActivity();
+  }
 
   getStorageDir(): string | undefined {
     return this.options.storageDir;
@@ -157,6 +169,24 @@ export class WeChatNotifier {
       this.lastError = classified.message;
       this.noteTargetFailure(roomId, classified.code);
       throw error;
+    }
+  }
+
+  async sendContextRefreshReminderIfDue(
+    userId: string,
+    message: string,
+    now = Date.now()
+  ): Promise<boolean> {
+    const current = this.getInternalTargetActivity(userId);
+    if (!shouldSendWeChatContextRefreshReminder(current, now)) {
+      return false;
+    }
+
+    try {
+      await this.send(message, userId);
+      return true;
+    } finally {
+      this.noteContextRefreshReminder(userId, new Date(now).toISOString());
     }
   }
 
@@ -382,6 +412,7 @@ export class WeChatNotifier {
   private async deleteStorageKeys(storage: { delete: (key: string) => Promise<void> }): Promise<void> {
     const keys = ["credentials", "cursor", "context_tokens", "typing_tickets"];
     await Promise.all(keys.map((key) => storage.delete(key).catch(() => undefined)));
+    this.deletePersistedTargetActivity();
   }
 
   private clearRuntimeSession(): void {
@@ -475,6 +506,17 @@ export class WeChatNotifier {
   }
 
   private getTargetActivity(userId: string): WeChatTargetActivity {
+    const existing = this.getInternalTargetActivity(userId);
+    return {
+      userId: existing.userId,
+      lastInboundAt: existing.lastInboundAt,
+      lastSendSuccessAt: existing.lastSendSuccessAt,
+      lastSendFailureAt: existing.lastSendFailureAt,
+      lastSendFailureCode: existing.lastSendFailureCode
+    };
+  }
+
+  private getInternalTargetActivity(userId: string): InternalWeChatTargetActivity {
     const existing = this.targetActivity.get(userId);
     if (existing) {
       return { ...existing };
@@ -486,37 +528,93 @@ export class WeChatNotifier {
       lastInboundAt: inbound?.receivedAt ?? null,
       lastSendSuccessAt: null,
       lastSendFailureAt: null,
-      lastSendFailureCode: null
+      lastSendFailureCode: null,
+      lastContextRefreshReminderAt: null
     };
   }
 
   private noteTargetInbound(userId: string, receivedAt: string): void {
-    const current = this.getTargetActivity(userId);
+    const current = this.getInternalTargetActivity(userId);
     this.targetActivity.set(userId, {
       ...current,
       lastInboundAt: receivedAt,
       lastSendFailureAt: null,
-      lastSendFailureCode: null
+      lastSendFailureCode: null,
+      lastContextRefreshReminderAt: null
     });
+    this.persistTargetActivity();
   }
 
   private noteTargetSuccess(userId: string): void {
-    const current = this.getTargetActivity(userId);
+    const current = this.getInternalTargetActivity(userId);
     this.targetActivity.set(userId, {
       ...current,
       lastSendSuccessAt: new Date().toISOString(),
       lastSendFailureAt: null,
       lastSendFailureCode: null
     });
+    this.persistTargetActivity();
   }
 
   private noteTargetFailure(userId: string, code: string): void {
-    const current = this.getTargetActivity(userId);
+    const current = this.getInternalTargetActivity(userId);
     this.targetActivity.set(userId, {
       ...current,
       lastSendFailureAt: new Date().toISOString(),
       lastSendFailureCode: code
     });
+    this.persistTargetActivity();
+  }
+
+  private noteContextRefreshReminder(userId: string, remindedAt: string): void {
+    const current = this.getInternalTargetActivity(userId);
+    this.targetActivity.set(userId, {
+      ...current,
+      lastContextRefreshReminderAt: remindedAt
+    });
+    this.persistTargetActivity();
+  }
+
+  private loadPersistedTargetActivity(): void {
+    try {
+      const data = JSON.parse(fs.readFileSync(this.targetActivityFilePath(), "utf8")) as unknown;
+      if (!isRecord(data)) return;
+      for (const [userId, rawActivity] of Object.entries(data)) {
+        if (!isRecord(rawActivity)) continue;
+        this.targetActivity.set(userId, {
+          userId,
+          lastInboundAt: stringOrNull(rawActivity.lastInboundAt),
+          lastSendSuccessAt: stringOrNull(rawActivity.lastSendSuccessAt),
+          lastSendFailureAt: stringOrNull(rawActivity.lastSendFailureAt),
+          lastSendFailureCode: stringOrNull(rawActivity.lastSendFailureCode),
+          lastContextRefreshReminderAt: stringOrNull(rawActivity.lastContextRefreshReminderAt)
+        });
+      }
+    } catch {
+      /* No persisted activity yet. */
+    }
+  }
+
+  private persistTargetActivity(): void {
+    try {
+      const filePath = this.targetActivityFilePath();
+      fs.mkdirSync(path.dirname(filePath), { recursive: true });
+      fs.writeFileSync(filePath, JSON.stringify(Object.fromEntries(this.targetActivity), null, 2));
+    } catch (error) {
+      console.error(`Failed to persist WeChat target activity: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  private deletePersistedTargetActivity(): void {
+    try {
+      fs.rmSync(this.targetActivityFilePath(), { force: true });
+    } catch {
+      /* ignore cleanup errors */
+    }
+  }
+
+  private targetActivityFilePath(): string {
+    return path.join(this.options.storageDir ?? path.join(os.homedir(), ".wechatbot"), "target_activity.json");
   }
 }
 
@@ -532,6 +630,10 @@ function isMissingWeChatBotModuleError(error: unknown): boolean {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+function stringOrNull(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value : null;
 }
 
 async function importEsm<T>(specifier: string): Promise<T> {

@@ -179,6 +179,29 @@ The detail page shows one server:
 - A link or button to return to the overview.
 - Manual refresh remains all-server refresh in the first version.
 
+### Settings / WeChat Alerts
+
+The current implementation includes a settings workflow for WeChat ClawBot alert delivery:
+
+- `Recipients` is the first tab. It lists configured recipients and exposes add, enable or pause, edit label, remove, and test actions.
+- `Add` starts a new QR login flow instead of asking for a manual contact ID. Each recipient must complete its own ClawBot login and verification.
+- The connection tab renders the QR code, supports QR refresh, shows detected inbound WeChat messages, and verifies the selected target user after that user sends a message.
+- The same WeChat contact cannot be configured as duplicate recipients.
+- Delivery status is surfaced as explicit phases such as awaiting context, ready, stale context, send error, and session expired.
+- When a send fails with `ret=-2`, the UI marks the specific verified target user that must send any message to ClawBot again.
+
+WeChat delivery relies on a per-user `context_token`. The token is issued by the iLink / ClawBot message stream when the user sends an inbound message to the bot. The app cannot make this token permanent; it stores token activity locally and treats `ret=-2` as a stale token signal.
+
+Context refresh reminder behavior:
+
+- Target activity is persisted per WeChat account in `target_activity.json` under `data/wechat-accounts/<accountId>/`.
+- `lastInboundAt` is reset whenever the target user sends ClawBot a message.
+- The backend checks 30 seconds after startup and then every 15 minutes.
+- A reminder is sent only when `23h <= now - lastInboundAt < 24h`.
+- Each token lifecycle receives at most one reminder. A new inbound message clears the reminder marker.
+- The reminder message asks the user to send any message to ClawBot to reactivate alert delivery.
+- If the reminder send is already too late and returns `ret=-2`, the stale-token frontend prompt remains the recovery path.
+
 ## API Shape
 
 Representative backend endpoints:
@@ -189,8 +212,14 @@ Representative backend endpoints:
 - `GET /api/servers/:id/history?hours=24`: per-server historical series.
 - `POST /api/refresh`: trigger all-server refresh.
 - `GET /api/refresh/current`: report whether a refresh is active.
+- `GET /api/settings/alerts`: alert settings and runtime status.
+- `PATCH /api/settings/alerts`: update alert settings.
+- `POST /api/settings/alerts/test`: send a test alert.
+- `GET /api/settings/wechat/accounts`: list WeChat ClawBot recipient accounts and delivery state.
+- `POST /api/settings/wechat/accounts`: create a recipient and start QR login.
+- `POST /api/settings/wechat/accounts/:accountId/verify`: verify a target user from detected inbound messages.
 
-The first version does not need API routes for editing server inventory. Users edit `config/servers.json`, then restart the backend. Credentials stay out of the inventory and out of the frontend.
+The first version did not need API routes for editing server inventory. The current app includes a visual server inventory manager that syncs supported editable fields back to `config/servers.json`. Credentials stay out of the inventory and out of the frontend.
 
 ## Error Handling
 
@@ -211,7 +240,7 @@ Implementation should include focused tests for:
 - API response shape.
 - Overview and detail page rendering with online, warning, offline, and unknown states.
 
-## Out Of Scope For First Version
+## Original Out Of Scope For First Version
 
 - Importing Termius data directly.
 - Public or LAN access.
@@ -224,3 +253,5 @@ Implementation should include focused tests for:
 - Alert notifications.
 - Server inventory editor UI.
 - Per-server manual refresh.
+
+Several original out-of-scope items are now implemented as product extensions, including WeChat alert notifications and a server inventory editor UI.

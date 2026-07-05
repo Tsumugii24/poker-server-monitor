@@ -63,17 +63,26 @@ Offline WeChat alerts are disabled by default. You can also configure them from 
 
 ## WeChat Alerts
 
-The dashboard can send a WeChat message to every enabled recipient when an enabled server is detected as `offline`.
+The dashboard can send a WeChat message to every enabled, verified recipient when an enabled server is detected as `offline`.
 
 1. Open the Settings button in the top bar.
-2. Click `Start WeChat login`, then scan the QR code rendered in the dashboard. The QR status auto-refreshes while login is pending; use `Refresh QR` if the code expires.
-3. Ask each alert recipient, or the target group, to send a normal message to the logged-in bot account.
-4. Open the `Recipients` tab and add the detected contact from `Recent contacts`, or enter the WeChat contact ID manually.
-5. Enable or pause recipients as needed. Edit or remove stale recipients from the same list.
-6. Choose English or Chinese alert language, set the cooldown minutes, and save.
-7. Use the per-recipient test button or the global `Send test alert` action to verify delivery.
+2. The first tab is `Recipients`. Click `Add` to create a new recipient login flow.
+3. The dashboard switches to the connection tab and renders a WeChat ClawBot QR code. The QR status auto-refreshes while login is pending; use `Refresh QR` if the code expires.
+4. After QR login, ask that WeChat user to send any normal message to ClawBot.
+5. The connection tab shows detected inbound messages. Select the latest message and verify the recipient.
+6. Enable or pause recipients as needed. Edit recipient labels or remove stale recipients from the same list.
+7. Choose English or Chinese alert language, set the cooldown minutes, and save.
+8. Use the per-recipient test button or the global `Send test alert` action to verify delivery.
 
-The WeChat bot needs message context before it can proactively send to a contact or group. The Settings panel exposes the recent chat IDs that the bot has seen, so you do not need to manually inspect terminal logs for IDs. The `@wechatbot/wechatbot` SDK stores its login state locally, so do not commit generated WeChat credential files.
+The WeChat ClawBot channel needs a per-user `context_token` before it can proactively send to a contact. That token is issued only after the user sends a message to ClawBot. The app stores the SDK login state plus token metadata under `data/wechat-accounts/`, which is ignored by Git.
+
+Context token behavior:
+
+- The token appears to expire after about 24 hours without an inbound message from that user.
+- If send fails with `ret=-2`, the Settings UI marks the exact recipient that must send any message to ClawBot again.
+- The backend records target activity in `target_activity.json` beside the SDK storage so reminder state survives restarts.
+- A background reminder check runs 30 seconds after startup and then every 15 minutes. It only sends when a verified recipient is in the `23h <= last inbound age < 24h` window, and only once for that token lifecycle.
+- If the reminder itself hits `ret=-2`, the normal stale-token UI path applies.
 
 Alert behavior:
 

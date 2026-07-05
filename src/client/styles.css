@@ -2381,6 +2381,11 @@ td .port-value {
   background: color-mix(in srgb, var(--green) 3%, var(--bg-elevated));
 }
 
+.sw-recipient-card.context-stale {
+  border-left-color: var(--red);
+  background: color-mix(in srgb, var(--red) 5%, var(--bg-elevated));
+}
+
 .sw-recipient-card.disabled {
   border-left: 3px solid var(--text-disabled);
   opacity: 0.7;
@@ -2392,6 +2397,11 @@ td .port-value {
 
 .sw-recipient-card.enabled:hover {
   border-left-color: var(--green);
+}
+
+.sw-recipient-card.context-stale,
+.sw-recipient-card.context-stale:hover {
+  border-left-color: var(--red);
 }
 
 .sw-recipient-main {
@@ -2448,6 +2458,23 @@ td .port-value {
 
 .sw-recipient-testing.warning {
   color: var(--yellow);
+}
+
+.sw-recipient-testing.error {
+  color: var(--red);
+}
+
+.sw-recipient-testing code {
+  display: inline-block;
+  max-width: 100%;
+  padding: 1px 5px;
+  border-radius: 5px;
+  border: 1px solid color-mix(in srgb, currentColor 28%, transparent);
+  background: color-mix(in srgb, currentColor 8%, transparent);
+  color: inherit;
+  font-size: 10px;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .sw-recipient-edit {
@@ -3491,6 +3518,59 @@ td .port-value {
 .wechat-delivery-banner.severity-error {
   border-color: color-mix(in srgb, var(--red) 45%, var(--border));
   background: color-mix(in srgb, var(--red) 8%, var(--bg-elevated));
+}
+
+.wechat-context-refresh-alert {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  gap: 10px;
+  margin: 14px 0;
+  padding: 14px 16px;
+  border: 1px solid color-mix(in srgb, var(--red) 48%, var(--border));
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--red) 7%, var(--bg-elevated));
+}
+
+.wechat-context-refresh-alert > svg {
+  align-self: start;
+  margin-top: 1px;
+  color: var(--red);
+}
+
+.wechat-context-refresh-alert strong {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.wechat-context-refresh-alert p {
+  margin: 0 0 10px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.wechat-context-refresh-target {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  max-width: 100%;
+  color: var(--red);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.wechat-context-refresh-target code {
+  min-width: 0;
+  padding: 3px 7px;
+  border: 1px solid color-mix(in srgb, var(--red) 35%, var(--border));
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--red) 8%, transparent);
+  color: var(--text-primary);
+  font-size: 11px;
+  overflow-wrap: anywhere;
 }
 
 .wechat-phase-badge {

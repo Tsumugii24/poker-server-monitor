@@ -1228,6 +1228,79 @@ describe("App", () => {
     });
   });
 
+  it("shows the exact WeChat user that must refresh context_token after ret=-2", async () => {
+    const staleAccount = weChatAccountStatus({
+      id: "account-1",
+      label: "Owner WeChat",
+      alertTargetUserId: "owner@im.wechat",
+      verified: true,
+      connector: {
+        started: true,
+        loggedIn: true,
+        polling: true,
+        ready: true,
+        botUserId: "bot-one@im.wechat",
+        storedSession: {
+          available: true,
+          botUserId: "bot-one@im.wechat",
+          savedAt: "2026-05-20T10:00:00.000Z",
+          contextUserIds: ["owner@im.wechat"],
+          verifiedForTarget: true
+        },
+        messageCount: 1,
+        lastMessageAt: "2026-05-20T10:02:00.000Z",
+        recentChats: [
+          { userId: "owner@im.wechat", text: "refresh", receivedAt: "2026-05-20T10:02:00.000Z" }
+        ],
+        target: {
+          userId: "owner@im.wechat",
+          lastInboundAt: "2026-05-20T10:02:00.000Z",
+          lastSendSuccessAt: null,
+          lastSendFailureAt: "2026-05-20T10:03:00.000Z",
+          lastSendFailureCode: "context_stale"
+        },
+        delivery: { phase: "context_stale", severity: "error" }
+      }
+    });
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url === "/api/overview") return json(overview);
+        if (url === "/api/settings/alerts") {
+          return json({
+            settings: enabledRecipientSettings({ language: "zh", wechatAccounts: [staleAccount] }),
+            status: { enabled: true, configured: true },
+            hfProxy: {
+              serverMonitor: { configured: false, enabled: false },
+              solver: { configured: false, enabled: false }
+            }
+          });
+        }
+        if (url === "/api/settings/wechat") {
+          return json(staleAccount.connector);
+        }
+        if (url === "/api/settings/wechat/accounts") {
+          return json(weChatAccountsStatus([staleAccount]));
+        }
+        return json({}, 404);
+      })
+    );
+
+    render(<App />);
+    await userEvent.click(await screen.findByRole("button", { name: "Open settings" }));
+
+    expect(await screen.findByText("Owner WeChat")).toBeInTheDocument();
+    expect(screen.getByText(/需要刷新 context_token/)).toBeInTheDocument();
+    expect(screen.getAllByText("owner@im.wechat").length).toBeGreaterThanOrEqual(1);
+
+    await userEvent.click(screen.getByRole("button", { name: "打开连接: Owner WeChat" }));
+
+    expect(await screen.findByText("需要手动刷新 context_token")).toBeInTheDocument();
+    expect(screen.getByText("请让这个微信用户给 ClawBot 发任意一条消息，然后重新发送测试告警。")).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("owner@im.wechat");
+  });
+
   it("starts a new QR login when adding recipients from a disconnected state", async () => {
     const qrAccount = weChatAccountStatus({
       connector: {

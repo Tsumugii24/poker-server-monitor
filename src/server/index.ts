@@ -46,6 +46,23 @@ async function main(): Promise<void> {
       legacyNotifier.startInBackground();
     }
   }
+  const remindWeChatContextRefresh = () => {
+    void weChatAccounts.sendContextRefreshReminders().then((summary) => {
+      if (summary.sent.length > 0) {
+        console.log(`Sent WeChat context refresh reminder to ${summary.sent.length} account(s).`);
+      }
+      if (summary.failed.length > 0) {
+        console.error(
+          `WeChat context refresh reminder failed for ${summary.failed.length} account(s):\n` +
+          summary.failed.map((failure) => `${failure.label}: ${failure.message}`).join("\n")
+        );
+      }
+    }).catch((error: unknown) => {
+      console.error("WeChat context refresh reminder check failed", error);
+    });
+  };
+  windowlessTimeout(remindWeChatContextRefresh, 30_000);
+  windowlessInterval(remindWeChatContextRefresh, 15 * 60_000);
 
   const refreshService = new RefreshService({
     db,
@@ -131,6 +148,12 @@ main().catch((error) => {
 
 function windowlessInterval(callback: () => void, intervalMs: number): NodeJS.Timeout {
   const timer = setInterval(callback, intervalMs);
+  timer.unref?.();
+  return timer;
+}
+
+function windowlessTimeout(callback: () => void, delayMs: number): NodeJS.Timeout {
+  const timer = setTimeout(callback, delayMs);
   timer.unref?.();
   return timer;
 }
