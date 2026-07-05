@@ -3946,17 +3946,51 @@ td .port-value {
   padding: 10px 12px;
 }
 
-.preflop-current-folder strong {
+.preflop-current-folder-main {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.preflop-current-folder-actions {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.preflop-current-folder strong,
+.preflop-current-folder-name-button {
   overflow: hidden;
   color: var(--text-primary);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.preflop-current-folder span {
+.preflop-current-folder-main > span:not(.preflop-rename-inline) {
   color: var(--text-tertiary);
   font-size: 11px;
   white-space: nowrap;
+}
+
+.preflop-current-folder-name-button {
+  min-width: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  padding: 2px 5px;
+  background: transparent;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 800;
+  text-align: left;
+  cursor: text;
+}
+
+.preflop-current-folder-name-button:hover,
+.preflop-current-folder-name-button:focus {
+  border-color: var(--accent);
+  background: var(--accent-subtle);
+  outline: none;
 }
 
 .preflop-folder-row,
@@ -4049,9 +4083,17 @@ td .port-value {
   background: var(--bg-elevated);
 }
 
+.preflop-file-row.managed {
+  grid-template-columns: auto minmax(0, 1fr) auto auto auto;
+}
+
 .preflop-file-row.folder {
   grid-template-columns: auto minmax(0, 1fr);
   min-height: 56px;
+}
+
+.preflop-file-row.folder.managed {
+  grid-template-columns: auto minmax(0, 1fr) auto;
 }
 
 .preflop-file-row.drop-before::before,
@@ -4259,6 +4301,10 @@ td .port-value {
 
 .preflop-row-action {
   flex-shrink: 0;
+}
+
+.preflop-row-delete-button {
+  justify-self: end;
 }
 
 .preflop-file-row.status-idle {

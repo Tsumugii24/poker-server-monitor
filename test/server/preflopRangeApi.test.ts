@@ -228,4 +228,72 @@ describe("preflop range API", () => {
       runStatus: "solved"
     });
   });
+
+  it("renames folders and moves nested range metadata", async () => {
+    fs.mkdirSync(path.join(preflopRangesPath, "3OD-EP", "Nested"), { recursive: true });
+    fs.writeFileSync(
+      path.join(preflopRangesPath, "3OD-EP", "Nested", "nested.json"),
+      JSON.stringify({
+        A: { raise: "AA", call: "" },
+        B: { raise: "", call: "KK" }
+      })
+    );
+    const app = createApp({ db, refreshService: service, preflopRangesPath });
+
+    await request(app)
+      .post("/api/preflop-ranges/status")
+      .send({ path: "3OD-EP/Nested/nested.json", status: "approved" });
+
+    const response = await request(app)
+      .post("/api/preflop-ranges/rename")
+      .send({ path: "3OD-EP/Nested", newName: "Renamed" });
+
+    expect(response.status).toBe(200);
+    expect(response.body.path).toBe("3OD-EP/Renamed");
+    expect(fs.existsSync(path.join(preflopRangesPath, "3OD-EP", "Nested"))).toBe(false);
+    expect(fs.existsSync(path.join(preflopRangesPath, "3OD-EP", "Renamed", "nested.json"))).toBe(true);
+
+    const metadata = JSON.parse(fs.readFileSync(path.join(preflopRangesPath, ".range_status.json"), "utf8"));
+    expect(metadata.ranges["3OD-EP/Nested/nested.json"]).toBeUndefined();
+    expect(metadata.ranges["3OD-EP/Renamed/nested.json"]).toMatchObject({
+      reviewStatus: "approved",
+      runStatus: "idle"
+    });
+
+    const listResponse = await request(app).get("/api/preflop-ranges");
+    expect(listResponse.body.tree[0].children).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: "folder", name: "Renamed", path: "3OD-EP/Renamed" })
+      ])
+    );
+  });
+
+  it("deletes folders recursively and removes nested range metadata", async () => {
+    fs.mkdirSync(path.join(preflopRangesPath, "3OD-EP", "Delete Me"), { recursive: true });
+    fs.writeFileSync(
+      path.join(preflopRangesPath, "3OD-EP", "Delete Me", "delete-me.json"),
+      JSON.stringify({
+        A: { raise: "AA", call: "" },
+        B: { raise: "", call: "KK" }
+      })
+    );
+    const app = createApp({ db, refreshService: service, preflopRangesPath });
+
+    await request(app)
+      .post("/api/preflop-ranges/status")
+      .send({ path: "3OD-EP/Delete Me/delete-me.json", status: "approved" });
+
+    const response = await request(app)
+      .delete("/api/preflop-ranges/path")
+      .query({ path: "3OD-EP/Delete Me" });
+
+    expect(response.status).toBe(200);
+    expect(fs.existsSync(path.join(preflopRangesPath, "3OD-EP", "Delete Me"))).toBe(false);
+
+    const metadata = JSON.parse(fs.readFileSync(path.join(preflopRangesPath, ".range_status.json"), "utf8"));
+    expect(metadata.ranges["3OD-EP/Delete Me/delete-me.json"]).toBeUndefined();
+
+    const listResponse = await request(app).get("/api/preflop-ranges");
+    expect(JSON.stringify(listResponse.body.tree)).not.toContain("Delete Me");
+  });
 });

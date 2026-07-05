@@ -550,12 +550,18 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ path: pathToRename, newName: normalizedName })
       });
-      if (selectedPath?.path === pathToRename && selectedPath.type === "folder") {
-        setCurrentFolderPath(response.path);
+      if (currentFolderPath === pathToRename || currentFolderPath.startsWith(`${pathToRename}/`)) {
+        setCurrentFolderPath(replacePathPrefix(currentFolderPath, pathToRename, response.path));
       }
       if (selectedPath?.path === pathToRename) {
         setSelectedPath({ ...selectedPath, path: response.path, name: normalizedName });
+      } else if (selectedPath?.path.startsWith(`${pathToRename}/`)) {
+        setSelectedPath({
+          ...selectedPath,
+          path: replacePathPrefix(selectedPath.path, pathToRename, response.path)
+        });
       }
+      setExpandedFolders((current) => renameExpandedFolderPaths(current, pathToRename, response.path));
       cancelRenaming();
       await loadTree();
     } catch (caught) {
@@ -570,6 +576,11 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
     setDeleteTarget(selectedPath);
   };
 
+  const requestDeletePath = (target: SelectedRangePath) => {
+    if (target.path === "") return;
+    setDeleteTarget(target);
+  };
+
   const confirmDeleteSelected = async () => {
     if (!deleteTarget || deleteTarget.path === "") return;
     setError(null);
@@ -578,11 +589,15 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
       await fetchPreflopJson<{ ok: boolean }>(`/api/preflop-ranges/path?path=${encodeURIComponent(deleteTarget.path)}`, {
         method: "DELETE"
       });
-      if (selectedPath?.path === deleteTarget.path) {
+      if (selectedPath && pathIsSameOrInside(selectedPath.path, deleteTarget.path)) {
         setSelectedPath(null);
         setSelectedFile(null);
         setDraft(null);
       }
+      if (pathIsSameOrInside(currentFolderPath, deleteTarget.path)) {
+        setCurrentFolderPath(parentPath(deleteTarget.path));
+      }
+      setExpandedFolders((current) => deleteExpandedFolderPaths(current, deleteTarget.path));
       setDeleteTarget(null);
       await loadTree();
     } catch (caught) {
@@ -1221,8 +1236,52 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
 
             <section className="preflop-file-pane">
               <div className="preflop-current-folder">
-                <strong>{folderName(currentFolderPath)}</strong>
-                <span>{currentItems.length} items</span>
+                <div className="preflop-current-folder-main">
+                  {rangeManageMode && currentFolderPath && renamingPath === currentFolderPath ? (
+                    <span className="preflop-rename-inline" onClick={(event) => event.stopPropagation()}>
+                      <input
+                        value={renamingName}
+                        autoFocus
+                        disabled={saving}
+                        onChange={(event) => setRenamingName(event.target.value)}
+                        onBlur={() => void submitRename(currentFolderPath, renamingName)}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter") {
+                            event.currentTarget.blur();
+                          }
+                          if (event.key === "Escape") {
+                            event.stopPropagation();
+                            cancelRenaming();
+                          }
+                        }}
+                      />
+                    </span>
+                  ) : rangeManageMode && currentFolderPath ? (
+                    <button
+                      className="preflop-current-folder-name-button"
+                      aria-label={`Rename folder ${folderName(currentFolderPath)}`}
+                      onClick={() => startRenaming({ type: "folder", path: currentFolderPath, name: folderName(currentFolderPath) })}
+                    >
+                      {folderName(currentFolderPath)}
+                    </button>
+                  ) : (
+                    <strong>{folderName(currentFolderPath)}</strong>
+                  )}
+                  <span>{currentItems.length} items</span>
+                </div>
+                {rangeManageMode && currentFolderPath ? (
+                  <div className="preflop-current-folder-actions">
+                    <button
+                      className="inventory-action-button danger"
+                      aria-label={`Delete folder ${folderName(currentFolderPath)}`}
+                      title="Delete folder"
+                      onClick={() => requestDeletePath({ type: "folder", path: currentFolderPath, name: folderName(currentFolderPath) })}
+                      disabled={saving}
+                    >
+                      <Trash2 size={15} />
+                    </button>
+                  </div>
+                ) : null}
               </div>
               <div className="preflop-file-list">
                 {loading ? <div className="preflop-empty">Loading ranges...</div> : null}
@@ -1235,6 +1294,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
                     className={[
                       "preflop-file-row",
                       item.type === "folder" ? "folder" : "file",
+                      rangeManageMode ? "managed" : "",
                       selectedPath?.path === item.path ? "active" : "",
                       item.type === "file" ? `status-${rangeDisplayStatus(item, rangeStatusView)}` : "",
                       dropTarget?.path === item.path ? `drop-${dropTarget.mode}` : ""
@@ -1245,7 +1305,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
                     onClick={() => activateRangeItem(item)}
                     onKeyDown={(event) => {
                       if (event.key !== "Enter") return;
-                      if (item.type === "file" && rangeManageMode) {
+                      if (rangeManageMode) {
                         startRenaming(item);
                         return;
                       }
@@ -1275,7 +1335,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
                       {item.type === "folder" ? <Folder size={15} /> : <FileJson size={15} />}
                     </span>
                     <span className="preflop-row-main">
-                      {item.type === "file" && renamingPath === item.path ? (
+                      {renamingPath === item.path ? (
                         <span className="preflop-rename-inline" onClick={(event) => event.stopPropagation()}>
                           <input
                             value={renamingName}
@@ -1312,7 +1372,20 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
                           )
                         ) : (
                           <>
-                            <strong>{item.name}</strong>
+                            {rangeManageMode ? (
+                              <button
+                                className="preflop-file-name-button"
+                                aria-label={`Rename folder ${item.name}`}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  startRenaming(item);
+                                }}
+                              >
+                                {item.name}
+                              </button>
+                            ) : (
+                              <strong>{item.name}</strong>
+                            )}
                             <span>{countFolderFiles(item)} items</span>
                           </>
                         )
@@ -1335,6 +1408,24 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
                         {rangeDisplayStatusInitial(item, rangeStatusView)}
                       </span>
                     )}
+                    {rangeManageMode && item.path ? (
+                      <button
+                        className="inventory-action-button danger preflop-row-delete-button"
+                        aria-label={`Delete ${item.type === "folder" ? "folder" : "range"} ${item.type === "file" ? displayRangeName(item.name) : item.name}`}
+                        title={item.type === "folder" ? "Delete folder" : "Delete range"}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          requestDeletePath({
+                            type: item.type,
+                            path: item.path,
+                            name: item.name
+                          });
+                        }}
+                        disabled={saving}
+                      >
+                        <Trash2 size={15} />
+                      </button>
+                    ) : null}
                   </div>
                 ))}
               </div>
@@ -1742,11 +1833,12 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
               <Trash2 size={18} />
             </div>
             <div>
-              <h3 id="preflop-delete-title">Confirm delete?</h3>
+              <h3 id="preflop-delete-title">
+                Delete {deleteTarget.type === "folder" ? "folder" : "range"}?
+              </h3>
               <p>
-                {deleteTarget.type === "file"
-                  ? displayRangeName(deleteTarget.name)
-                  : deleteTarget.name}
+                <strong>{deleteTarget.type === "file" ? displayRangeName(deleteTarget.name) : deleteTarget.name}</strong>
+                {deleteTarget.type === "folder" ? " and everything inside will be removed." : " will be removed."}
               </p>
             </div>
             <div className="preflop-delete-actions">
@@ -3044,6 +3136,33 @@ function parentPath(path: string): string {
   const parts = path.split("/").filter(Boolean);
   parts.pop();
   return parts.join("/");
+}
+
+function pathIsSameOrInside(pathValue: string, parent: string): boolean {
+  if (!pathValue || !parent) return pathValue === parent;
+  return pathValue === parent || pathValue.startsWith(`${parent}/`);
+}
+
+function replacePathPrefix(pathValue: string, oldPrefix: string, newPrefix: string): string {
+  if (pathValue === oldPrefix) return newPrefix;
+  if (pathValue.startsWith(`${oldPrefix}/`)) return `${newPrefix}${pathValue.slice(oldPrefix.length)}`;
+  return pathValue;
+}
+
+function renameExpandedFolderPaths(paths: Set<string>, oldPrefix: string, newPrefix: string): Set<string> {
+  const next = new Set<string>();
+  for (const pathValue of paths) {
+    next.add(replacePathPrefix(pathValue, oldPrefix, newPrefix));
+  }
+  return next;
+}
+
+function deleteExpandedFolderPaths(paths: Set<string>, deletedPath: string): Set<string> {
+  const next = new Set<string>();
+  for (const pathValue of paths) {
+    if (!pathIsSameOrInside(pathValue, deletedPath)) next.add(pathValue);
+  }
+  return next;
 }
 
 function toggleFolder(path: string, setExpandedFolders: (updater: (current: Set<string>) => Set<string>) => void): void {
