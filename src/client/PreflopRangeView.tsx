@@ -53,6 +53,7 @@ import {
   type ParallelSolverJobPreview,
   type ParallelSolverJobPreviewRequest,
   type ParallelSolverJobsResponse,
+  type ParallelSolverReportsClearResponse,
   type ParallelSolverRun,
   type SolverExportFormat,
   type SolverDatasetRepoStatus,
@@ -120,6 +121,12 @@ type PendingScenarioLibraryAction = {
   previousId?: string;
 };
 
+type PendingParallelReportsAction = {
+  action: "download" | "clear";
+  runCount: number;
+  clearableCount: number;
+};
+
 const EXPANDED_FOLDERS_KEY = "preflop-range-expanded-folders";
 const DEFAULT_SELECTED_HAND = "AA";
 const REVIEW_STATUS_LABELS: Record<PreflopReviewStatus, string> = {
@@ -173,6 +180,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
   const [parallelPreview, setParallelPreview] = useState<ParallelSolverJobPreview | null>(null);
   const [selectedParallelServerIds, setSelectedParallelServerIds] = useState<string[]>([]);
   const [parallelQueueDragId, setParallelQueueDragId] = useState<string | null>(null);
+  const [parallelServerTab, setParallelServerTab] = useState<"available" | "unavailable">("available");
   const [activeSolverJobTab, setActiveSolverJobTab] = useState<"single" | "parallel">("single");
   const [selectedServerId, setSelectedServerId] = useState("");
   const [jobSettings, setJobSettings] = useState<SolverJobSettings>(DEFAULT_SOLVER_JOB_SETTINGS);
@@ -192,6 +200,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
   );
   const [scenarioCopied, setScenarioCopied] = useState(false);
   const [pendingScenarioAction, setPendingScenarioAction] = useState<PendingScenarioLibraryAction | null>(null);
+  const [pendingParallelReportsAction, setPendingParallelReportsAction] = useState<PendingParallelReportsAction | null>(null);
   const [offlineServerNotice, setOfflineServerNotice] = useState<OfflineServerNotice | null>(null);
   const [datasetRepoStatus, setDatasetRepoStatus] = useState<SolverDatasetRepoStatus | null>(null);
   const [datasetRepoDialog, setDatasetRepoDialog] = useState<SolverDatasetRepoStatus | null>(null);
@@ -256,7 +265,9 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
       setFailurePool(parallelResponse.failurePool);
       setSelectedParallelServerIds((current) => {
         const availableIds = overviewResponse.servers
-          .filter((server) => server.enabled && serverIsOnlineForJob(server))
+          .slice()
+          .sort(compareServersByNaturalId)
+          .filter(parallelServerIsAvailable)
           .map((server) => server.id);
         const retained = current.filter((id) => availableIds.includes(id));
         return retained.length > 0 ? retained : availableIds;
@@ -931,6 +942,51 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
       });
       await loadJobContext();
       await loadTree();
+    } catch (caught) {
+      setJobError(caught instanceof Error ? caught.message : String(caught));
+      await loadJobContext();
+    } finally {
+      setJobBusy(null);
+    }
+  };
+
+  const requestDownloadParallelReports = () => {
+    if (parallelRuns.length === 0) return;
+    setPendingParallelReportsAction({
+      action: "download",
+      runCount: parallelRuns.length,
+      clearableCount: terminalParallelReportRuns(parallelRuns).length
+    });
+  };
+
+  const requestClearParallelReports = () => {
+    const clearableCount = terminalParallelReportRuns(parallelRuns).length;
+    if (clearableCount === 0) return;
+    setPendingParallelReportsAction({
+      action: "clear",
+      runCount: parallelRuns.length,
+      clearableCount
+    });
+  };
+
+  const confirmParallelReportsAction = async () => {
+    if (!pendingParallelReportsAction) return;
+    if (pendingParallelReportsAction.action === "download") {
+      const markdown = buildParallelReportsMarkdown(parallelRuns, failurePool);
+      downloadTextFile(`parallel-reports-${new Date().toISOString().slice(0, 10)}.md`, markdown);
+      setPendingParallelReportsAction(null);
+      return;
+    }
+
+    setJobBusy("parallel-clear-reports");
+    setJobError(null);
+    try {
+      const response = await fetchPreflopJson<ParallelSolverReportsClearResponse>("/api/parallel-jobs/reports", {
+        method: "DELETE"
+      });
+      setParallelRuns(response.runs);
+      setFailurePool(response.failurePool);
+      setPendingParallelReportsAction(null);
     } catch (caught) {
       setJobError(caught instanceof Error ? caught.message : String(caught));
       await loadJobContext();
@@ -1801,6 +1857,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
           failurePool={failurePool}
           parallelPreview={parallelPreview}
           selectedParallelServerIds={selectedParallelServerIds}
+          parallelServerTab={parallelServerTab}
           activeTab={activeSolverJobTab}
           selectedServerId={selectedServerId}
           selectedRangePath={selectedRangePathForJob}
@@ -1835,6 +1892,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
             setParallelPreview(null);
             clearDatasetRepoGate();
           }}
+          onParallelServerTabChange={setParallelServerTab}
           onTabChange={setActiveSolverJobTab}
           onDatasetNameChange={(datasetName) => {
             setJobDatasetName(datasetName);
@@ -1873,6 +1931,8 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
           onParallelQueueNext={() => void createParallelJob("queue_next")}
           onFailurePoolSubmit={() => void submitFailurePool("queue_next")}
           onParallelCancel={(run) => void cancelParallelRun(run)}
+          onParallelReportsDownload={requestDownloadParallelReports}
+          onParallelReportsClear={requestClearParallelReports}
           parallelQueueDragId={parallelQueueDragId}
           onParallelQueueDragStart={setParallelQueueDragId}
           onParallelQueueDragEnd={() => setParallelQueueDragId(null)}
@@ -2014,6 +2074,51 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
         </div>
       ) : null}
 
+      {pendingParallelReportsAction ? (
+        <div className="modal-backdrop preflop-confirm-backdrop" role="presentation" onClick={() => setPendingParallelReportsAction(null)}>
+          <section
+            className="preflop-confirm-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="parallel-reports-confirm-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="preflop-confirm-icon">
+              {pendingParallelReportsAction.action === "clear" ? <Trash2 size={18} /> : <Download size={18} />}
+            </div>
+            <div>
+              <h3 id="parallel-reports-confirm-title">
+                {pendingParallelReportsAction.action === "clear" ? "Clear parallel reports?" : "Download parallel reports?"}
+              </h3>
+              {pendingParallelReportsAction.action === "clear" ? (
+                <p>
+                  This will remove <strong>{pendingParallelReportsAction.clearableCount}</strong> completed, failed, or canceled
+                  parallel report{pendingParallelReportsAction.clearableCount === 1 ? "" : "s"}. Active and queued runs stay in the queue.
+                </p>
+              ) : (
+                <p>
+                  This will export <strong>{pendingParallelReportsAction.runCount}</strong> parallel report
+                  {pendingParallelReportsAction.runCount === 1 ? "" : "s"} as a Markdown file.
+                </p>
+              )}
+            </div>
+            <div className="preflop-confirm-actions">
+              <button className="icon-button compact" onClick={() => setPendingParallelReportsAction(null)} disabled={jobBusy === "parallel-clear-reports"}>
+                Cancel
+              </button>
+              <button
+                className={`icon-button compact ${pendingParallelReportsAction.action === "clear" ? "danger" : "primary"}`}
+                onClick={() => void confirmParallelReportsAction()}
+                disabled={jobBusy === "parallel-clear-reports"}
+              >
+                {pendingParallelReportsAction.action === "clear" ? <Trash2 size={15} /> : <Download size={15} />}
+                Confirm
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
       {pendingStatusChange ? (
         <div className="modal-backdrop preflop-confirm-backdrop" role="presentation" onClick={() => setPendingStatusChange(null)}>
           <section
@@ -2134,6 +2239,33 @@ function serverIsOnlineForJob(server: ServerRow | null | undefined): boolean {
   return server?.latest?.connectionStatus === "online";
 }
 
+function compareServersByNaturalId(left: ServerRow, right: ServerRow): number {
+  return left.id.localeCompare(right.id, undefined, { numeric: true, sensitivity: "base" });
+}
+
+function parallelServerIsAvailable(server: ServerRow): boolean {
+  return server.enabled && serverIsOnlineForJob(server) && !pipelineIsActiveForClient(server.pipeline);
+}
+
+function parallelServerUnavailableReason(server: ServerRow): string {
+  if (!server.enabled) return "Disabled";
+  const status = server.latest?.connectionStatus ?? "unknown";
+  if (status !== "online") return status;
+  if (pipelineIsActiveForClient(server.pipeline)) return server.pipeline?.displayStatus ?? "Busy";
+  return "Not idle";
+}
+
+function pipelineIsActiveForClient(pipeline: PipelineStatusSnapshot | null): boolean {
+  return Boolean(
+    pipeline &&
+      pipeline.processAlive !== false &&
+      (pipeline.displayStatus === "running" ||
+        pipeline.displayStatus === "solving" ||
+        pipeline.displayStatus === "uploading" ||
+        pipeline.displayStatus === "cleanup")
+  );
+}
+
 function SolverJobPanel({
   servers,
   jobs,
@@ -2142,6 +2274,7 @@ function SolverJobPanel({
   failurePool,
   parallelPreview,
   selectedParallelServerIds,
+  parallelServerTab,
   activeTab,
   selectedServerId,
   selectedRangePath,
@@ -2164,6 +2297,7 @@ function SolverJobPanel({
   onRefresh,
   onServerChange,
   onParallelServerToggle,
+  onParallelServerTabChange,
   onTabChange,
   onDatasetNameChange,
   onSettingsChange,
@@ -2184,6 +2318,8 @@ function SolverJobPanel({
   onParallelQueueNext,
   onFailurePoolSubmit,
   onParallelCancel,
+  onParallelReportsDownload,
+  onParallelReportsClear,
   parallelQueueDragId,
   onParallelQueueDragStart,
   onParallelQueueDragEnd,
@@ -2197,6 +2333,7 @@ function SolverJobPanel({
   failurePool: ParallelFailurePoolEntry[];
   parallelPreview: ParallelSolverJobPreview | null;
   selectedParallelServerIds: string[];
+  parallelServerTab: "available" | "unavailable";
   activeTab: "single" | "parallel";
   selectedServerId: string;
   selectedRangePath: string;
@@ -2219,6 +2356,7 @@ function SolverJobPanel({
   onRefresh: () => void;
   onServerChange: (serverId: string) => void;
   onParallelServerToggle: (serverId: string) => void;
+  onParallelServerTabChange: (tab: "available" | "unavailable") => void;
   onTabChange: (tab: "single" | "parallel") => void;
   onDatasetNameChange: (datasetName: string) => void;
   onSettingsChange: (patch: Partial<SolverJobSettings>) => void;
@@ -2239,6 +2377,8 @@ function SolverJobPanel({
   onParallelQueueNext: () => void;
   onFailurePoolSubmit: () => void;
   onParallelCancel: (run: ParallelSolverRun) => void;
+  onParallelReportsDownload: () => void;
+  onParallelReportsClear: () => void;
   parallelQueueDragId: string | null;
   onParallelQueueDragStart: (runId: string) => void;
   onParallelQueueDragEnd: () => void;
@@ -2567,6 +2707,7 @@ function SolverJobPanel({
         <ParallelSolverJobPanel
           servers={servers}
           selectedServerIds={selectedParallelServerIds}
+          serverTab={parallelServerTab}
           selectedRangePath={selectedRangePath}
           selectedRangeName={selectedRangeName}
           selectedRangeLearned={selectedRangeLearned}
@@ -2579,6 +2720,7 @@ function SolverJobPanel({
           failurePool={failurePool}
           busy={busy}
           onServerToggle={onParallelServerToggle}
+          onServerTabChange={onParallelServerTabChange}
           onDatasetNameChange={onDatasetNameChange}
           onSettingsChange={onSettingsChange}
           onScenarioChange={onScenarioChange}
@@ -2587,6 +2729,8 @@ function SolverJobPanel({
           onQueueNext={onParallelQueueNext}
           onFailurePoolSubmit={onFailurePoolSubmit}
           onCancelRun={onParallelCancel}
+          onReportsDownload={onParallelReportsDownload}
+          onReportsClear={onParallelReportsClear}
           queueDragId={parallelQueueDragId}
           onQueueDragStart={onParallelQueueDragStart}
           onQueueDragEnd={onParallelQueueDragEnd}
@@ -2748,6 +2892,7 @@ function ScenarioLibraryPanel({
 function ParallelSolverJobPanel({
   servers,
   selectedServerIds,
+  serverTab,
   selectedRangePath,
   selectedRangeName,
   selectedRangeLearned,
@@ -2760,6 +2905,7 @@ function ParallelSolverJobPanel({
   failurePool,
   busy,
   onServerToggle,
+  onServerTabChange,
   onDatasetNameChange,
   onSettingsChange,
   onScenarioChange,
@@ -2768,6 +2914,8 @@ function ParallelSolverJobPanel({
   onQueueNext,
   onFailurePoolSubmit,
   onCancelRun,
+  onReportsDownload,
+  onReportsClear,
   queueDragId,
   onQueueDragStart,
   onQueueDragEnd,
@@ -2775,6 +2923,7 @@ function ParallelSolverJobPanel({
 }: {
   servers: ServerRow[];
   selectedServerIds: string[];
+  serverTab: "available" | "unavailable";
   selectedRangePath: string;
   selectedRangeName: string;
   selectedRangeLearned: boolean;
@@ -2787,6 +2936,7 @@ function ParallelSolverJobPanel({
   failurePool: ParallelFailurePoolEntry[];
   busy: string | null;
   onServerToggle: (serverId: string) => void;
+  onServerTabChange: (tab: "available" | "unavailable") => void;
   onDatasetNameChange: (datasetName: string) => void;
   onSettingsChange: (patch: Partial<SolverJobSettings>) => void;
   onScenarioChange: (scenario: SolverScenario | "") => void;
@@ -2795,12 +2945,17 @@ function ParallelSolverJobPanel({
   onQueueNext: () => void;
   onFailurePoolSubmit: () => void;
   onCancelRun: (run: ParallelSolverRun) => void;
+  onReportsDownload: () => void;
+  onReportsClear: () => void;
   queueDragId: string | null;
   onQueueDragStart: (runId: string) => void;
   onQueueDragEnd: () => void;
   onQueueDrop: (runId: string) => void;
 }) {
-  const availableServers = servers.filter((server) => server.enabled && serverIsOnlineForJob(server));
+  const orderedServers = servers.slice().sort(compareServersByNaturalId);
+  const availableServers = orderedServers.filter(parallelServerIsAvailable);
+  const unavailableServers = orderedServers.filter((server) => !parallelServerIsAvailable(server));
+  const visibleServers = serverTab === "available" ? availableServers : unavailableServers;
   const selectedServers = availableServers.filter((server) => selectedServerIds.includes(server.id));
   const activeDatasetName = preview?.datasetName ?? datasetName.trim();
   const visibleFailurePool = failurePool.filter((entry) =>
@@ -2813,6 +2968,8 @@ function ParallelSolverJobPanel({
     .slice()
     .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))
     .slice(0, 6);
+  const clearableRuns = terminalParallelReportRuns(runs);
+  const failurePoolDatasets = summarizeFailurePoolDatasets(visibleFailurePool);
 
   return (
     <div className="parallel-job-shell">
@@ -2837,22 +2994,52 @@ function ParallelSolverJobPanel({
 
         <div className="parallel-server-strip">
           <div className="parallel-section-title">
-            <strong>Available Servers</strong>
-            <span>{selectedServers.length}/{availableServers.length} selected</span>
+            <strong>Servers</strong>
+            <span>{selectedServers.length}/{availableServers.length} available selected</span>
+          </div>
+          <div className="parallel-server-tabs" role="tablist" aria-label="Parallel server availability">
+            <button
+              type="button"
+              className={serverTab === "available" ? "active" : ""}
+              onClick={() => onServerTabChange("available")}
+            >
+              Available
+              <em>{availableServers.length}</em>
+            </button>
+            <button
+              type="button"
+              className={serverTab === "unavailable" ? "active" : ""}
+              onClick={() => onServerTabChange("unavailable")}
+            >
+              Unavailable
+              <em>{unavailableServers.length}</em>
+            </button>
           </div>
           <div className="parallel-server-tags">
-            {availableServers.length === 0 ? <span className="text-muted">No online enabled servers.</span> : null}
-            {availableServers.map((server) => {
+            {visibleServers.length === 0 ? (
+              <span className="text-muted">
+                {serverTab === "available" ? "No online idle enabled servers." : "No unavailable servers."}
+              </span>
+            ) : null}
+            {visibleServers.map((server) => {
               const selected = selectedServerIds.includes(server.id);
+              const available = parallelServerIsAvailable(server);
+              const displayIndex = orderedServers.findIndex((candidate) => candidate.id === server.id) + 1;
               return (
                 <button
                   key={server.id}
-                  className={`parallel-server-tag ${selected ? "selected" : ""}`}
-                  onClick={() => onServerToggle(server.id)}
-                  disabled={busy != null}
+                  className={[
+                    "parallel-server-tag",
+                    selected ? "selected" : "",
+                    available ? "available" : "unavailable"
+                  ].filter(Boolean).join(" ")}
+                  onClick={() => available && onServerToggle(server.id)}
+                  disabled={busy != null || !available}
                 >
+                  <strong className="parallel-server-index">{displayIndex}</strong>
                   <span>{server.id}</span>
                   <ConnectionBadge status={server.latest?.connectionStatus ?? "unknown"} />
+                  <em>{available ? "Idle" : parallelServerUnavailableReason(server)}</em>
                 </button>
               );
             })}
@@ -2961,12 +3148,23 @@ function ParallelSolverJobPanel({
             <strong>Failure Pool</strong>
             <span>{visibleFailurePool.length}</span>
           </div>
+          {failurePoolDatasets.length > 0 ? (
+            <div className="failure-pool-dataset-list">
+              {failurePoolDatasets.map((item) => (
+                <span key={item.datasetName} className="failure-pool-dataset-chip">
+                  <strong>{item.datasetName}</strong>
+                  <em>{item.count}</em>
+                </span>
+              ))}
+            </div>
+          ) : null}
           {visibleFailurePool.length === 0 ? (
             <p className="solver-job-empty">No pending failed boards for this range.</p>
           ) : (
             <div className="failure-pool-list">
               {visibleFailurePool.slice(0, 24).map((entry) => (
                 <span key={entry.id} className={`failure-pool-chip ${entry.status}`}>
+                  <em>{entry.datasetName}</em>
                   {entry.boardIndex}. {entry.boardName}
                 </span>
               ))}
@@ -2975,22 +3173,44 @@ function ParallelSolverJobPanel({
         </div>
 
         <div className="parallel-report-block">
-          <div className="parallel-section-title">
-            <strong>Parallel Reports</strong>
-            <span>{runs.length}</span>
+          <div className="parallel-section-title parallel-section-title-with-actions">
+            <div>
+              <strong>Parallel Reports</strong>
+              <span>{runs.length} total · {clearableRuns.length} clearable</span>
+            </div>
+            <div className="parallel-report-actions">
+              <button className="icon-button compact" type="button" onClick={onReportsDownload} disabled={runs.length === 0 || busy != null}>
+                <Download size={14} />
+                Download
+              </button>
+              <button
+                className="icon-button compact danger"
+                type="button"
+                onClick={onReportsClear}
+                disabled={clearableRuns.length === 0 || busy != null}
+              >
+                <Trash2 size={14} />
+                Clear
+              </button>
+            </div>
           </div>
           {latestRuns.length === 0 ? <p className="solver-job-empty">No parallel runs yet.</p> : null}
-          {latestRuns.map((run) => (
-            <article key={run.id} className={`parallel-run-card ${run.status}`}>
+          {latestRuns.map((run) => {
+            const dispatch = parallelDispatchState(run);
+            return (
+            <article key={run.id} className={`parallel-run-card ${run.status} ${dispatch.className}`}>
               <div className="parallel-run-head">
                 <div>
                   <strong>{run.datasetName}</strong>
-                  <span>{run.sourceType === "failure_pool" ? "Failure pool retry" : "Parallel run"} · {formatShortDateTime(run.createdAt)}</span>
+                  <span>
+                    {run.sourceType === "failure_pool" ? "Failure pool retry" : "Parallel run"} · {formatShortDateTime(run.createdAt)} · {dispatch.summary}
+                  </span>
                 </div>
-                <em className={`solver-job-status ${run.status}`}>{formatParallelRunStatus(run.status)}</em>
+                <em className={`solver-job-status ${dispatch.className || run.status}`}>{dispatch.label}</em>
               </div>
               <div className="parallel-run-metrics">
                 <div><span>Total</span><strong>{run.report.totalBoards}</strong></div>
+                <div><span>Dispatch</span><strong>{dispatch.metric}</strong></div>
                 <div><span>Done</span><strong>{run.report.completedBoards}</strong></div>
                 <div><span>Failed</span><strong>{run.report.failedBoards}</strong></div>
                 <div><span>Success</span><strong>{formatRatio(run.report.successRate)}</strong></div>
@@ -3002,7 +3222,7 @@ function ParallelSolverJobPanel({
                     <span>{slice.serverId}</span>
                     <strong>{slice.assignedIndices.length}</strong>
                     <em>{slice.status}</em>
-                    <small>{slice.rangeExpr}</small>
+                    <small>{slice.status === "queued" ? slice.lastError ?? slice.job?.lastError ?? "Pending dispatch" : slice.rangeExpr}</small>
                   </div>
                 ))}
               </div>
@@ -3013,7 +3233,8 @@ function ParallelSolverJobPanel({
                 </button>
               ) : null}
             </article>
-          ))}
+          );
+          })}
         </div>
       </div>
     </div>
@@ -3054,6 +3275,7 @@ function ParallelQueueBoard({
             const movable = run.status === "queued" && !locked && busy == null;
             const isDragging = dragId === run.id;
             const canDrop = movable && dragId != null && dragId !== run.id;
+            const dispatch = parallelDispatchState(run);
             const runningServers = run.slices.filter((slice) => slice.status === "running").map((slice) => slice.serverId);
             const serverText = runningServers.length > 0
               ? `${runningServers.length} running: ${runningServers.join(", ")}`
@@ -3093,11 +3315,11 @@ function ParallelQueueBoard({
                 <div className="parallel-queue-copy">
                   <strong>{run.datasetName}</strong>
                   <span>
-                    {run.sourceType === "failure_pool" ? "Pool retry" : "Parallel run"} · {run.report.totalBoards} boards · {serverText}
+                    {run.sourceType === "failure_pool" ? "Pool retry" : "Parallel run"} · {run.report.totalBoards} boards · {serverText} · {dispatch.summary}
                   </span>
                 </div>
                 <div className="parallel-queue-state">
-                  <em className={`solver-job-status ${run.status}`}>{formatParallelRunStatus(run.status)}</em>
+                  <em className={`solver-job-status ${dispatch.className || run.status}`}>{dispatch.label}</em>
                   {locked ? (
                     <span className="parallel-queue-lock" title="Locked while any server is running this run">
                       <Lock size={12} />
@@ -3529,10 +3751,61 @@ function formatParallelRunStatus(status: ParallelSolverRun["status"]): string {
   return status.replace(/_/g, " ");
 }
 
+function parallelDispatchState(run: ParallelSolverRun): {
+  label: string;
+  className: string;
+  summary: string;
+  metric: string;
+} {
+  const total = Math.max(1, run.slices.length);
+  const queued = run.slices.filter((slice) => slice.status === "queued").length;
+  const running = run.slices.filter((slice) => slice.status === "running").length;
+  const dispatched = total - queued;
+  if (run.status === "queued") {
+    return {
+      label: "Pending dispatch",
+      className: "dispatch-pending",
+      summary: `${queued}/${total} pending`,
+      metric: `${dispatched}/${total}`
+    };
+  }
+  if (run.status === "running") {
+    if (queued > 0) {
+      return {
+        label: "Partially successful",
+        className: "dispatch-partial",
+        summary: `${running}/${total} running, ${queued} pending`,
+        metric: `${dispatched}/${total}`
+      };
+    }
+    return {
+      label: "All running",
+      className: "dispatch-all-running",
+      summary: `${dispatched}/${total} dispatched`,
+      metric: `${dispatched}/${total}`
+    };
+  }
+  return {
+    label: formatParallelRunStatus(run.status),
+    className: run.status,
+    summary: `${dispatched}/${total} dispatched`,
+    metric: `${dispatched}/${total}`
+  };
+}
+
 function parallelQueueRuns(runs: ParallelSolverRun[]): ParallelSolverRun[] {
   return runs
     .filter((run) => run.status === "queued" || run.status === "running")
     .sort(compareParallelRunQueue);
+}
+
+function terminalParallelReportRuns(runs: ParallelSolverRun[]): ParallelSolverRun[] {
+  return runs.filter((run) =>
+    run.status === "completed" ||
+    run.status === "completed_with_failures" ||
+    run.status === "failed" ||
+    run.status === "canceled"
+  );
 }
 
 function compareParallelRunQueue(left: ParallelSolverRun, right: ParallelSolverRun): number {
@@ -3553,6 +3826,102 @@ function parallelRunIsLocked(run: ParallelSolverRun): boolean {
 function formatRatio(value: number): string {
   if (!Number.isFinite(value)) return "-";
   return `${Math.round(value * 100)}%`;
+}
+
+function summarizeFailurePoolDatasets(entries: ParallelFailurePoolEntry[]): Array<{ datasetName: string; count: number }> {
+  const counts = new Map<string, number>();
+  for (const entry of entries) {
+    counts.set(entry.datasetName, (counts.get(entry.datasetName) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .map(([datasetName, count]) => ({ datasetName, count }))
+    .sort((left, right) => left.datasetName.localeCompare(right.datasetName));
+}
+
+function buildParallelReportsMarkdown(
+  runs: ParallelSolverRun[],
+  failurePool: ParallelFailurePoolEntry[]
+): string {
+  const sortedRuns = runs
+    .slice()
+    .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt));
+  const lines = [
+    "# Parallel Solver Reports",
+    "",
+    `Generated: ${new Date().toISOString()}`,
+    `Runs: ${sortedRuns.length}`,
+    `Failure Pool Entries: ${failurePool.length}`,
+    ""
+  ];
+
+  if (sortedRuns.length === 0) {
+    lines.push("No parallel reports.", "");
+  }
+
+  for (const run of sortedRuns) {
+    lines.push(
+      `## ${run.datasetName}`,
+      "",
+      `- Run ID: ${run.id}`,
+      `- Source: ${run.sourceType === "failure_pool" ? "Failure pool retry" : "Parallel run"}`,
+      `- Status: ${formatParallelRunStatus(run.status)}`,
+      `- Repo: ${run.repoId}`,
+      `- Scenario: ${run.scenario}`,
+      `- Range: ${run.rangeName}`,
+      `- Created: ${run.createdAt}`,
+      `- Started: ${run.startedAt ?? "-"}`,
+      `- Finished: ${run.finishedAt ?? "-"}`,
+      `- Total Boards: ${run.report.totalBoards}`,
+      `- Completed Boards: ${run.report.completedBoards}`,
+      `- Failed Boards: ${run.report.failedBoards}`,
+      `- Queued Boards: ${run.report.queuedBoards}`,
+      `- Running Boards: ${run.report.runningBoards}`,
+      `- Success Rate: ${formatRatio(run.report.successRate)}`,
+      `- Duration: ${formatDuration(run.report.durationSeconds)}`,
+      "",
+      "| Server | Status | Boards | Completed | Failed | Range Expr |",
+      "| --- | --- | ---: | ---: | ---: | --- |"
+    );
+    for (const slice of run.slices) {
+      lines.push(
+        `| ${markdownCell(slice.serverId)} | ${markdownCell(slice.status)} | ${slice.assignedIndices.length} | ${slice.completedCount} | ${slice.failedCount} | ${markdownCell(slice.rangeExpr || "-")} |`
+      );
+    }
+    if (run.lastError) {
+      lines.push("", `Last Error: ${run.lastError}`);
+    }
+    lines.push("");
+  }
+
+  const failureByDataset = summarizeFailurePoolDatasets(failurePool);
+  lines.push("## Failure Pool Snapshot", "");
+  if (failureByDataset.length === 0) {
+    lines.push("No failure pool entries.", "");
+  } else {
+    lines.push("| Dataset | Entries |", "| --- | ---: |");
+    for (const item of failureByDataset) {
+      lines.push(`| ${markdownCell(item.datasetName)} | ${item.count} |`);
+    }
+    lines.push("");
+  }
+
+  return `${lines.join("\n").trimEnd()}\n`;
+}
+
+function markdownCell(value: string): string {
+  return value.replace(/\|/g, "\\|").replace(/\r?\n/g, " ");
+}
+
+function downloadTextFile(filename: string, content: string): void {
+  const blob = new Blob([content], { type: "text/markdown;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
 }
 
 function formatDuration(value: number | null): string {

@@ -609,6 +609,30 @@ export class MonitorDatabase {
     );
   }
 
+  deleteParallelSolverRuns(ids: string[]): void {
+    const uniqueIds = [...new Set(ids.map((id) => id.trim()).filter(Boolean))];
+    if (uniqueIds.length === 0) return;
+    const placeholders = uniqueIds.map(() => "?").join(", ");
+    this.database.run(
+      `DELETE FROM solver_job_events
+       WHERE job_id IN (SELECT id FROM solver_jobs WHERE parallel_run_id IN (${placeholders}))`,
+      uniqueIds
+    );
+    this.database.run(
+      `DELETE FROM solver_jobs WHERE parallel_run_id IN (${placeholders})`,
+      uniqueIds
+    );
+    this.database.run(
+      `DELETE FROM parallel_solver_slices WHERE run_id IN (${placeholders})`,
+      uniqueIds
+    );
+    this.database.run(
+      `DELETE FROM parallel_solver_runs WHERE id IN (${placeholders})`,
+      uniqueIds
+    );
+    this.persist();
+  }
+
   getNextParallelSolverQueueOrder(): number {
     return (
       this.query<number>(

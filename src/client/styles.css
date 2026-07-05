@@ -5578,6 +5578,21 @@ td .port-value {
   background: var(--neutral-bg);
 }
 
+.solver-job-status.dispatch-all-running {
+  color: var(--green-text);
+  background: var(--green-bg);
+}
+
+.solver-job-status.dispatch-partial {
+  color: var(--yellow-text);
+  background: var(--yellow-bg);
+}
+
+.solver-job-status.dispatch-pending {
+  color: var(--accent);
+  background: var(--accent-subtle);
+}
+
 .solver-job-event,
 .solver-job-error {
   margin: 0;
@@ -5801,6 +5816,16 @@ td .port-value {
   gap: 10px;
 }
 
+.parallel-section-title-with-actions {
+  align-items: flex-start;
+}
+
+.parallel-section-title-with-actions > div:first-child {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
 .parallel-section-title strong {
   color: var(--text-primary);
   font-size: 13px;
@@ -5813,10 +5838,61 @@ td .port-value {
   font-weight: 800;
 }
 
+.parallel-report-actions {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .parallel-server-tags {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.parallel-server-tabs {
+  display: inline-flex;
+  width: fit-content;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 3px;
+  background: var(--bg-base);
+}
+
+.parallel-server-tabs button {
+  min-height: 28px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  border: 0;
+  border-radius: calc(var(--radius-sm) - 2px);
+  padding: 0 10px;
+  color: var(--text-tertiary);
+  background: transparent;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 850;
+  cursor: pointer;
+}
+
+.parallel-server-tabs button.active {
+  color: var(--accent);
+  background: var(--accent-subtle);
+}
+
+.parallel-server-tabs em {
+  min-width: 20px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  background: var(--bg-elevated);
+  font-size: 10px;
+  font-style: normal;
 }
 
 .parallel-server-tag {
@@ -5835,10 +5911,34 @@ td .port-value {
   cursor: pointer;
 }
 
+.parallel-server-tag.unavailable {
+  cursor: default;
+  opacity: 0.72;
+}
+
 .parallel-server-tag.selected {
   border-color: color-mix(in srgb, var(--accent) 42%, var(--border));
   color: var(--accent);
   background: var(--accent-subtle);
+}
+
+.parallel-server-index {
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  background: var(--bg-elevated);
+  font-size: 11px;
+}
+
+.parallel-server-tag em {
+  color: var(--text-tertiary);
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 800;
 }
 
 .parallel-config-grid {
@@ -5848,7 +5948,7 @@ td .port-value {
 .parallel-preview-summary,
 .parallel-run-metrics {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
 }
 
@@ -5928,9 +6028,53 @@ td .port-value {
   flex-wrap: wrap;
 }
 
+.failure-pool-dataset-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.failure-pool-dataset-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  max-width: 100%;
+  min-height: 28px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0 8px;
+  color: var(--text-secondary);
+  background: var(--bg-base);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.failure-pool-dataset-chip strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-primary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.failure-pool-dataset-chip em {
+  min-width: 22px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  color: var(--red-text);
+  background: var(--red-bg);
+  font-style: normal;
+  font-size: 10px;
+}
+
 .failure-pool-chip {
   display: inline-flex;
   align-items: center;
+  gap: 6px;
   min-height: 26px;
   border: 1px solid color-mix(in srgb, var(--red) 28%, var(--border));
   border-radius: var(--radius-pill);
@@ -5939,6 +6083,15 @@ td .port-value {
   background: var(--red-bg);
   font-size: 11px;
   font-weight: 800;
+}
+
+.failure-pool-chip em {
+  max-width: 150px;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-style: normal;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .parallel-run-card {
@@ -5953,6 +6106,18 @@ td .port-value {
 .parallel-run-card.running,
 .parallel-run-card.queued {
   border-color: color-mix(in srgb, var(--accent) 36%, var(--border));
+}
+
+.parallel-run-card.dispatch-all-running {
+  border-color: color-mix(in srgb, var(--green) 38%, var(--border));
+}
+
+.parallel-run-card.dispatch-partial {
+  border-color: color-mix(in srgb, var(--yellow) 40%, var(--border));
+}
+
+.parallel-run-card.dispatch-pending {
+  border-color: color-mix(in srgb, var(--accent) 34%, var(--border));
 }
 
 .parallel-run-card.completed {

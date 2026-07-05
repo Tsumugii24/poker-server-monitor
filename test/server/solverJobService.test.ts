@@ -671,6 +671,7 @@ describe("solver job API", () => {
     const executor: SshExecutor = {
       run: vi.fn(async (_server, _credentials, command) => {
         if (command.includes("cards/cards.txt")) return solverCardsText();
+        if (command.includes("DISPATCH_READY")) return "DISPATCH_READY=1\n";
         commands.push(command);
         return "ok";
       })
@@ -734,6 +735,75 @@ describe("solver job API", () => {
     });
   });
 
+  it("keeps failed parallel dispatches queued until the server passes SSH preflight", async () => {
+    db.syncServers([
+      ...servers,
+      {
+        id: "solver-02",
+        name: "Solver 02",
+        host: "10.0.0.2",
+        port: 22,
+        enabled: true,
+        note: "TBD",
+        solverRoot: "/srv/solver",
+        tmuxSession: "solver",
+        pipelineStatusFilePath: "~/run/status.json"
+      }
+    ]);
+    db.insertSnapshot(metricSnapshot("solver-02", "online"));
+    let solver02Ready = false;
+    const executor: SshExecutor = {
+      run: vi.fn(async (server, _credentials, command) => {
+        if (command.includes("cards/cards.txt")) return solverCardsText();
+        if (command.includes("DISPATCH_READY")) {
+          if (server.id === "solver-02" && !solver02Ready) {
+            throw new Error("ssh connect failed");
+          }
+          return "DISPATCH_READY=1\n";
+        }
+        commands.push(`${server.id}:${command}`);
+        return "ok";
+      })
+    };
+    const solverJobService = new SolverJobService({
+      db,
+      preflopRangesPath,
+      credentials: { username: "root", password: "secret" },
+      executor,
+      defaultPipelineStatusFilePath: "~/run/solver_running_status.json",
+      repoNamespace: "Tsumugii",
+      hfToken: "hf_test_token"
+    });
+    const app = createApp({ db, refreshService, preflopRangesPath, solverJobService });
+    const rangePath = "3OD-EP/3OD-4.3 vs 3IA-4.2.json";
+    await approveRange(app, rangePath);
+
+    const created = await request(app)
+      .post("/api/parallel-jobs")
+      .send({ rangePath, serverIds: ["solver-01", "solver-02"], settings: { uploadEnabled: false }, confirmDatasetName: true });
+
+    expect(created.status).toBe(201);
+    expect(created.body.run.status).toBe("running");
+    expect(created.body.run.slices.map((slice: { serverId: string; status: string }) => [slice.serverId, slice.status])).toEqual([
+      ["solver-01", "running"],
+      ["solver-02", "queued"]
+    ]);
+    const pendingSlice = created.body.run.slices.find((slice: { serverId: string }) => slice.serverId === "solver-02");
+    expect(pendingSlice.job.lastError).toContain("SSH preflight failed");
+    expect(commands.filter((command) => command.includes("run_pipeline.py"))).toHaveLength(1);
+
+    solver02Ready = true;
+    await solverJobService.reconcileAndStartQueuedJobs();
+
+    const afterRetry = await request(app).get("/api/parallel-jobs");
+    const run = afterRetry.body.runs.find((candidate: { id: string }) => candidate.id === created.body.run.id);
+    expect(run.slices.map((slice: { serverId: string; status: string }) => [slice.serverId, slice.status])).toEqual([
+      ["solver-01", "running"],
+      ["solver-02", "running"]
+    ]);
+    expect(commands.filter((command) => command.includes("run_pipeline.py"))).toHaveLength(2);
+  });
+
   it("queues parallel runs, reorders movable runs, and starts servers in queue order", async () => {
     db.syncServers([
       ...servers,
@@ -753,6 +823,7 @@ describe("solver job API", () => {
     const executor: SshExecutor = {
       run: vi.fn(async (_server, _credentials, command) => {
         if (command.includes("cards/cards.txt")) return solverCardsText();
+        if (command.includes("DISPATCH_READY")) return "DISPATCH_READY=1\n";
         commands.push(command);
         return "ok";
       })
@@ -810,6 +881,88 @@ describe("solver job API", () => {
     expect(commands.filter((command) => command.includes("run_pipeline.py"))).toHaveLength(2);
     expect(db.getActiveSolverJobForServer("solver-01")?.datasetName).toBe("parallel-b");
     expect(db.getActiveSolverJobForServer("solver-02")?.datasetName).toBe("parallel-b");
+  });
+
+  it("clears only terminal parallel reports", async () => {
+    db.syncServers([
+      ...servers,
+      {
+        id: "solver-02",
+        name: "Solver 02",
+        host: "10.0.0.2",
+        port: 22,
+        enabled: true,
+        note: "TBD",
+        solverRoot: "/srv/solver",
+        tmuxSession: "solver",
+        pipelineStatusFilePath: "~/run/status.json"
+      }
+    ]);
+    db.insertSnapshot(metricSnapshot("solver-02", "online"));
+    const executor: SshExecutor = {
+      run: vi.fn(async (_server, _credentials, command) => {
+        if (command.includes("cards/cards.txt")) return solverCardsText();
+        if (command.includes("DISPATCH_READY")) return "DISPATCH_READY=1\n";
+        commands.push(command);
+        return "ok";
+      })
+    };
+    const solverJobService = new SolverJobService({
+      db,
+      preflopRangesPath,
+      credentials: { username: "root", password: "secret" },
+      executor,
+      defaultPipelineStatusFilePath: "~/run/solver_running_status.json",
+      repoNamespace: "Tsumugii",
+      hfToken: "hf_test_token"
+    });
+    const app = createApp({ db, refreshService, preflopRangesPath, solverJobService });
+    const rangePath = "3OD-EP/3OD-4.3 vs 3IA-4.2.json";
+    await approveRange(app, rangePath);
+
+    const completed = await request(app)
+      .post("/api/parallel-jobs")
+      .send({
+        rangePath,
+        datasetName: "parallel-completed",
+        serverIds: ["solver-01", "solver-02"],
+        settings: { uploadEnabled: false },
+        confirmDatasetName: true
+      });
+    const queued = await request(app)
+      .post("/api/parallel-jobs")
+      .send({
+        rangePath,
+        datasetName: "parallel-queued",
+        serverIds: ["solver-01", "solver-02"],
+        settings: { uploadEnabled: false },
+        confirmDatasetName: true,
+        queueMode: "queue_next"
+      });
+
+    expect(completed.status).toBe(201);
+    expect(queued.status).toBe(201);
+    for (const slice of completed.body.run.slices as Array<{ jobId: string }>) {
+      db.updateSolverJob(slice.jobId, {
+        status: "completed",
+        finishedAt: new Date().toISOString(),
+        lastError: null
+      });
+    }
+
+    const beforeClear = await request(app).get("/api/parallel-jobs");
+    expect(beforeClear.body.runs.some((run: { id: string; status: string }) =>
+      run.id === completed.body.run.id && run.status === "completed"
+    )).toBe(true);
+
+    const cleared = await request(app).delete("/api/parallel-jobs/reports");
+
+    expect(cleared.status).toBe(200);
+    expect(cleared.body.deletedRunIds).toEqual([completed.body.run.id]);
+    expect(cleared.body.deletedCount).toBe(1);
+    expect(cleared.body.runs.map((run: { id: string }) => run.id)).toEqual([queued.body.run.id]);
+    expect(cleared.body.runs[0].status).toBe("queued");
+    expect(db.getSolverJobs().some((job) => job.parallelRunId === completed.body.run.id)).toBe(false);
   });
 
   it("rejects job operations while the server is offline", async () => {

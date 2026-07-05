@@ -61,7 +61,18 @@ type SolverJobServiceOptions = {
   getScenarioLibrary?: () => SolverScenarioLibraryItem[];
 };
 
+type DispatchPreflightResult = {
+  ready: boolean;
+  reason: string | null;
+};
+
 const ACTIVE_JOB_STATUSES = new Set<SolverJobStatus>(["deploying", "running", "stopping"]);
+const TERMINAL_PARALLEL_RUN_STATUSES = new Set<ParallelSolverRunStatus>([
+  "completed",
+  "completed_with_failures",
+  "failed",
+  "canceled"
+]);
 const DEFAULT_SOLVER_ROOT = "~/solver";
 const ACTIVE_JOB_RECONCILE_GRACE_MS = 15_000;
 const HUGGING_FACE_ORIGIN = "https://huggingface.co";
@@ -171,6 +182,19 @@ export class SolverJobService {
       this.options.db.updateParallelSolverRunQueueOrder(id, index + 1);
     });
     return this.options.db.getParallelSolverRuns();
+  }
+
+  clearParallelReports(): { deletedCount: number; deletedRunIds: string[] } {
+    this.reconcileCompletedJobs();
+    this.reconcileParallelRuns();
+    const deletedRunIds = this.options.db.getParallelSolverRuns()
+      .filter((run) => TERMINAL_PARALLEL_RUN_STATUSES.has(run.status) && !parallelRunLocked(run))
+      .map((run) => run.id);
+    this.options.db.deleteParallelSolverRuns(deletedRunIds);
+    return {
+      deletedCount: deletedRunIds.length,
+      deletedRunIds
+    };
   }
 
   async cancelParallelRun(id: string): Promise<ParallelSolverRun> {
@@ -341,7 +365,7 @@ export class SolverJobService {
     return this.requireJob(job.id);
   }
 
-  async start(id: string): Promise<SolverJob> {
+  async start(id: string, options: { deferOnDispatchFailure?: boolean } = {}): Promise<SolverJob> {
     const job = this.requireJob(id);
     const server = this.requireServer(job.serverId);
     this.ensureServerOnline(server);
@@ -366,6 +390,9 @@ export class SolverJobService {
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      if (options.deferOnDispatchFailure) {
+        return this.markJobDispatchPending(job, `Dispatch failed before solver command was confirmed: ${message}`);
+      }
       this.recordEvent(job.id, "failed", message, null);
       return this.options.db.updateSolverJob(job.id, {
         status: "failed",
@@ -490,10 +517,7 @@ export class SolverJobService {
     for (const server of servers) {
       const queued = this.options.db.getQueuedSolverJobForServer(server.id);
       if (!queued) continue;
-      if (!serverIsOnline(server)) continue;
-      if (this.options.db.getActiveSolverJobForServer(server.id)) continue;
-      if (isPipelineActive(server.pipeline)) continue;
-      await this.start(queued.id);
+      await this.startQueuedJobIfDispatchReady(queued);
     }
     this.reconcileCompletedJobs();
     this.reconcileParallelRuns();
@@ -503,15 +527,18 @@ export class SolverJobService {
     input: ParallelSolverJobPreviewRequest,
     options: { explicitIndices?: number[]; createRepoIfConfirmed?: boolean } = {}
   ): Promise<ParallelSolverJobPreview> {
-    const servers = this.options.db.getServerRows();
-    const availableServers = servers.filter((server) => server.enabled && serverIsOnline(server));
-    const selectedServerIds = normalizeSelectedServerIds(input.serverIds, availableServers);
+    const servers = sortServersByNaturalId(this.options.db.getServerRows());
+    const enabledServers = servers.filter((server) => server.enabled);
+    const availableServers = enabledServers.filter((server) =>
+      serverIsReadyForParallelSelection(server, this.options.db.getActiveSolverJobForServer(server.id))
+    );
+    const selectedServerIds = normalizeSelectedServerIds(input.serverIds, availableServers, enabledServers);
     if (selectedServerIds.length === 0) {
-      throw new Error("At least one online enabled server is required for parallel solver jobs.");
+      throw new Error("At least one online idle enabled server is required for parallel solver jobs.");
     }
     const selectedServers = selectedServerIds.map((serverId) => {
-      const server = availableServers.find((candidate) => candidate.id === serverId);
-      if (!server) throw new Error(`Server ${serverId} is not online and available.`);
+      const server = enabledServers.find((candidate) => candidate.id === serverId);
+      if (!server) throw new Error(`Server ${serverId} is not enabled or does not exist.`);
       return server;
     });
 
@@ -536,7 +563,11 @@ export class SolverJobService {
       repoExists = true;
     }
 
-    const allBoards = await this.readSolverCardsForServers(selectedServers);
+    const allBoards = await this.readSolverCardsForServers(uniqueServersById([
+      ...selectedServers,
+      ...availableServers,
+      ...enabledServers
+    ]));
     const indices = options.explicitIndices
       ? normalizeBoardIndices(options.explicitIndices, allBoards.length)
       : repoExists
@@ -707,12 +738,8 @@ export class SolverJobService {
       const inserted = this.options.db.getParallelSolverRun(runId);
       if (!inserted) throw new Error(`Parallel solver run ${runId} not found`);
       for (const slice of inserted.slices) {
-        const server = this.requireServer(slice.serverId);
-        if (!serverIsOnline(server)) continue;
-        if (this.options.db.getActiveSolverJobForServer(server.id)) continue;
-        if (isPipelineActive(server.pipeline)) continue;
         if (slice.jobId) {
-          await this.start(slice.jobId);
+          await this.startQueuedJobIfDispatchReady(this.requireJob(slice.jobId));
         }
       }
     }
@@ -869,6 +896,69 @@ export class SolverJobService {
       statusFilePath: statusFileFromJob(job),
       hfToken: this.hfToken,
       hfProxyUrl: this.effectiveSolverHfProxyUrl()
+    });
+  }
+
+  private async startQueuedJobIfDispatchReady(job: SolverJob): Promise<boolean> {
+    if (job.status !== "queued") return false;
+    const server = this.requireServer(job.serverId);
+    if (!server.enabled) {
+      this.markJobDispatchPending(job, `Dispatch pending: server ${server.id} is disabled.`);
+      return false;
+    }
+    if (!serverIsOnline(server)) {
+      const status = server.latest?.connectionStatus ?? "unknown";
+      this.markJobDispatchPending(job, `Dispatch pending: server ${server.id} is ${status}.`);
+      return false;
+    }
+
+    const active = this.options.db.getActiveSolverJobForServer(server.id, job.id);
+    if (active) {
+      this.markJobDispatchPending(job, `Dispatch pending: server ${server.id} is running ${active.datasetName}.`);
+      return false;
+    }
+
+    this.ensureCredentials();
+    try {
+      const output = await this.executor.run(
+        server,
+        this.options.credentials!,
+        buildDispatchPreflightCommand(statusFileFromJob(job))
+      );
+      const preflight = parseDispatchPreflightOutput(output);
+      if (!preflight.ready) {
+        this.markJobDispatchPending(
+          job,
+          `Dispatch pending: server ${server.id} is not idle${preflight.reason ? ` (${preflight.reason})` : ""}.`
+        );
+        return false;
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.markJobDispatchPending(job, `Dispatch pending: SSH preflight failed for ${server.id}: ${message}`);
+      return false;
+    }
+
+    try {
+      const started = await this.start(job.id, { deferOnDispatchFailure: true });
+      return started.status === "running";
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.markJobDispatchPending(job, `Dispatch pending: ${message}`);
+      return false;
+    }
+  }
+
+  private markJobDispatchPending(job: SolverJob, message: string): SolverJob {
+    const current = this.options.db.getSolverJob(job.id) ?? job;
+    if (current.lastError !== message || current.status !== "queued") {
+      this.recordEvent(job.id, "dispatch_pending", message, null);
+    }
+    return this.options.db.updateSolverJob(job.id, {
+      status: "queued",
+      startedAt: null,
+      finishedAt: null,
+      lastError: message
     });
   }
 
@@ -1260,6 +1350,21 @@ export function buildTmuxStartCommand(job: SolverJob, solverRoot: string, comman
   ].join("\n");
 }
 
+export function buildDispatchPreflightCommand(statusFilePath: string): string {
+  return String.raw`set -e
+STATUS_FILE=${shellQuoteRemotePath(statusFilePath)}
+PID=""
+if [ -f "$STATUS_FILE" ]; then
+  PID=$(grep -Eo '"pid"[[:space:]]*:[[:space:]]*[0-9]+' "$STATUS_FILE" | tail -1 | grep -Eo '[0-9]+$' || true)
+fi
+if [ -n "$PID" ] && ps -p "$PID" > /dev/null 2>&1; then
+  echo "DISPATCH_READY=0"
+  echo "DISPATCH_REASON=active pid $PID"
+else
+  echo "DISPATCH_READY=1"
+fi`;
+}
+
 export function buildGracefulStopPipelineCommand(job: SolverJob): string {
   return String.raw`set -u
 SESSION=${shellQuote(job.tmuxSession)}
@@ -1377,6 +1482,20 @@ function serverIsOnline(server: ServerRow): boolean {
   return server.latest?.connectionStatus === "online";
 }
 
+function serverIsReadyForParallelSelection(server: ServerRow, activeJob: SolverJob | null): boolean {
+  return server.enabled && serverIsOnline(server) && !activeJob && !isPipelineActive(server.pipeline);
+}
+
+function parseDispatchPreflightOutput(output: string): DispatchPreflightResult {
+  const lines = output.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const readyLine = lines.find((line) => line.startsWith("DISPATCH_READY="));
+  const reasonLine = lines.find((line) => line.startsWith("DISPATCH_REASON="));
+  return {
+    ready: readyLine === "DISPATCH_READY=1",
+    reason: reasonLine ? reasonLine.slice("DISPATCH_REASON=".length).trim() || null : null
+  };
+}
+
 function pipelineIsNewEnoughForJob(pipeline: PipelineStatusSnapshot, job: SolverJob): boolean {
   const reference = Date.parse(job.startedAt ?? job.updatedAt ?? job.createdAt);
   const collected = Date.parse(pipeline.collectedAt);
@@ -1426,18 +1545,41 @@ function isPipelineActive(pipeline: PipelineStatusSnapshot | null): boolean {
   );
 }
 
-function normalizeSelectedServerIds(serverIds: string[] | undefined, availableServers: ServerRow[]): string[] {
-  const availableIds = availableServers.map((server) => server.id);
+function normalizeSelectedServerIds(
+  serverIds: string[] | undefined,
+  defaultServers: ServerRow[],
+  allowedServers = defaultServers
+): string[] {
+  const defaultIds = defaultServers.map((server) => server.id);
+  const allowedIds = allowedServers.map((server) => server.id);
   const requested = serverIds?.map((id) => id.trim()).filter(Boolean) ?? [];
-  const selected = requested.length > 0 ? requested : availableIds;
+  const selected = requested.length > 0 ? requested : defaultIds;
   const unique: string[] = [];
   for (const id of selected) {
-    if (!availableIds.includes(id)) {
-      throw new Error(`Server ${id} is not online and available.`);
+    if (!allowedIds.includes(id)) {
+      throw new Error(`Server ${id} is not enabled or available for parallel jobs.`);
     }
     if (!unique.includes(id)) unique.push(id);
   }
   return unique;
+}
+
+function sortServersByNaturalId<T extends Pick<ServerRow, "id">>(servers: T[]): T[] {
+  return [...servers].sort((left, right) => left.id.localeCompare(right.id, undefined, {
+    numeric: true,
+    sensitivity: "base"
+  }));
+}
+
+function uniqueServersById(servers: ServerRow[]): ServerRow[] {
+  const seen = new Set<string>();
+  const result: ServerRow[] = [];
+  for (const server of servers) {
+    if (seen.has(server.id)) continue;
+    seen.add(server.id);
+    result.push(server);
+  }
+  return result;
 }
 
 function buildReadSolverCardsCommand(solverRoot: string): string {
