@@ -1,9 +1,21 @@
 import { randomUUID } from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
 import {
   DEFAULT_SOLVER_JOB_SETTINGS,
   SOLVER_EXPORT_FORMATS,
   DEFAULT_SOLVER_SCENARIO_LIBRARY,
   SOLVER_UPLOAD_FORMATS,
+  type ParallelFailurePoolEntry,
+  type ParallelFailurePoolPreviewRequest,
+  type ParallelFailurePoolSubmitRequest,
+  type ParallelSolverJobCreateRequest,
+  type ParallelSolverJobPreview,
+  type ParallelSolverJobPreviewRequest,
+  type ParallelSolverRun,
+  type ParallelSolverRunStatus,
+  type ParallelSolverSlice,
+  type ParallelSolverSliceStatus,
   type SolverJob,
   type SolverJobCreateRequest,
   type SolverDatasetRepoEnsureRequest,
@@ -97,6 +109,123 @@ export class SolverJobService {
     };
   }
 
+  listParallelJobs() {
+    this.reconcileCompletedJobs();
+    this.reconcileParallelRuns();
+    return {
+      runs: this.options.db.getParallelSolverRuns(),
+      failurePool: this.options.db.getParallelFailurePoolEntries()
+    };
+  }
+
+  getParallelRun(id: string): ParallelSolverRun {
+    this.reconcileCompletedJobs();
+    this.reconcileParallelRuns();
+    const run = this.options.db.getParallelSolverRun(id);
+    if (!run) throw new Error(`Parallel solver run ${id} not found`);
+    return run;
+  }
+
+  async previewParallel(input: ParallelSolverJobPreviewRequest): Promise<ParallelSolverJobPreview> {
+    return this.buildParallelPreview(input);
+  }
+
+  async createParallel(input: ParallelSolverJobCreateRequest): Promise<ParallelSolverRun> {
+    const preview = await this.buildParallelPreview(input, { createRepoIfConfirmed: Boolean(input.confirmDatasetName) });
+    if (!preview.learned) {
+      throw new Error("Range must be approved before submitting parallel solver jobs.");
+    }
+    if (!preview.repoExists) {
+      throw new Error("Dataset repo is missing. Confirm the dataset name and create the repo before submitting this parallel job.");
+    }
+    return this.createParallelRunFromPreview(preview, "parallel", input.queueMode !== "queue_next");
+  }
+
+  reorderParallelQueue(runIds: string[]): ParallelSolverRun[] {
+    const uniqueIds = [...new Set(runIds.map((id) => id.trim()).filter(Boolean))];
+    if (uniqueIds.length === 0) return this.options.db.getParallelSolverRuns();
+    const runs = this.options.db.getParallelSolverRuns();
+    const byId = new Map(runs.map((run) => [run.id, run]));
+    const queueRuns = runs
+      .filter((run) => run.status === "queued" || run.status === "running")
+      .sort(compareParallelRunQueue);
+    const movableRuns = queueRuns.filter((run) => run.status === "queued" && !parallelRunLocked(run));
+    const movableIds = new Set(movableRuns.map((run) => run.id));
+    if (uniqueIds.length !== movableIds.size || uniqueIds.some((id) => !movableIds.has(id))) {
+      throw new Error("Parallel queue reorder payload is stale. Refresh and try again.");
+    }
+    for (const id of uniqueIds) {
+      const run = byId.get(id);
+      if (!run) throw new Error(`Parallel solver run ${id} not found`);
+      if (parallelRunLocked(run)) {
+        throw new Error(`Parallel solver run ${run.datasetName} is locked because a server is running it.`);
+      }
+      if (run.status !== "queued") {
+        throw new Error(`Only queued parallel runs can be reordered.`);
+      }
+    }
+    let movableIndex = 0;
+    const orderedIds = queueRuns.map((run) => {
+      if (!movableIds.has(run.id)) return run.id;
+      return uniqueIds[movableIndex++]!;
+    });
+    orderedIds.forEach((id, index) => {
+      this.options.db.updateParallelSolverRunQueueOrder(id, index + 1);
+    });
+    return this.options.db.getParallelSolverRuns();
+  }
+
+  async cancelParallelRun(id: string): Promise<ParallelSolverRun> {
+    const run = this.getParallelRun(id);
+    for (const slice of run.slices) {
+      if (!slice.job) continue;
+      if (slice.job.status === "queued") {
+        this.options.db.updateSolverJob(slice.job.id, {
+          status: "canceled",
+          finishedAt: new Date().toISOString()
+        });
+        this.recordEvent(slice.job.id, "canceled", "Parallel run canceled.", null);
+      } else if (ACTIVE_JOB_STATUSES.has(slice.job.status)) {
+        await this.stop(slice.job.id);
+      }
+      this.options.db.updateParallelSolverSlice(slice.id, {
+        status: "canceled",
+        finishedAt: new Date().toISOString(),
+        lastError: "Parallel run canceled."
+      });
+    }
+    this.options.db.updateParallelSolverRun(id, {
+      status: "canceled",
+      finishedAt: new Date().toISOString(),
+      lastError: "Parallel run canceled."
+    });
+    return this.getParallelRun(id);
+  }
+
+  async previewFailurePool(input: ParallelFailurePoolPreviewRequest): Promise<ParallelSolverJobPreview> {
+    const base = await this.buildParallelPreview(input, {
+      explicitIndices: this.failurePoolIndices(input)
+    });
+    return base;
+  }
+
+  async submitFailurePool(input: ParallelFailurePoolSubmitRequest): Promise<ParallelSolverRun> {
+    const indices = this.failurePoolIndices(input);
+    if (indices.length === 0) {
+      throw new Error("Failure pool has no pending boards for this range.");
+    }
+    const preview = await this.buildParallelPreview(input, {
+      explicitIndices: indices,
+      createRepoIfConfirmed: Boolean(input.confirmDatasetName)
+    });
+    if (!preview.repoExists) {
+      throw new Error("Dataset repo is missing. Confirm the dataset name and create the repo before submitting this failure pool.");
+    }
+    const run = await this.createParallelRunFromPreview(preview, "failure_pool", input.queueMode !== "queue_next");
+    this.options.db.updateParallelFailurePoolEntries(preview.rangePath, preview.datasetName, preview.missingIndices, "queued");
+    return run;
+  }
+
   preview(input: SolverJobPreviewRequest): SolverJobPreview {
     return buildSolverJobPreview({
       input,
@@ -163,11 +292,13 @@ export class SolverJobService {
     const now = new Date().toISOString();
     const jobId = randomUUID();
     const remoteRangePath = jobScopedRemoteRangePath(jobId, preview.datasetName);
+    const remoteResultPath = jobScopedRemoteResultPath(jobId, preview.datasetName);
     const command = buildRunPipelineCommand({
       solverRoot: effectiveSolverRoot(),
       repoId: preview.repoId,
       scenario: preview.scenario,
       rangePath: remoteRangePath,
+      resultPath: remoteResultPath,
       settings: preview.settings,
       statusFilePath: preview.pipelineStatusFilePath,
       hfToken: this.hfToken,
@@ -190,6 +321,11 @@ export class SolverJobService {
       confirmUnstudied: Boolean(input.confirmUnstudied),
       tmuxSession: preview.tmuxSession,
       remoteRangePath,
+      remoteResultPath,
+      parallelRunId: null,
+      parallelSliceId: null,
+      assignedIndices: [],
+      sourceType: "single",
       createdAt: now,
       updatedAt: now,
       startedAt: null,
@@ -350,6 +486,7 @@ export class SolverJobService {
 
   async reconcileAndStartQueuedJobs(): Promise<void> {
     this.reconcileCompletedJobs();
+    this.reconcileParallelRuns();
     const servers = this.options.db.getServerRows();
     for (const server of servers) {
       const queued = this.options.db.getQueuedSolverJobForServer(server.id);
@@ -359,6 +496,305 @@ export class SolverJobService {
       if (isPipelineActive(server.pipeline)) continue;
       await this.start(queued.id);
     }
+    this.reconcileCompletedJobs();
+    this.reconcileParallelRuns();
+  }
+
+  private async buildParallelPreview(
+    input: ParallelSolverJobPreviewRequest,
+    options: { explicitIndices?: number[]; createRepoIfConfirmed?: boolean } = {}
+  ): Promise<ParallelSolverJobPreview> {
+    const servers = this.options.db.getServerRows();
+    const availableServers = servers.filter((server) => server.enabled && serverIsOnline(server));
+    const selectedServerIds = normalizeSelectedServerIds(input.serverIds, availableServers);
+    if (selectedServerIds.length === 0) {
+      throw new Error("At least one online enabled server is required for parallel solver jobs.");
+    }
+    const selectedServers = selectedServerIds.map((serverId) => {
+      const server = availableServers.find((candidate) => candidate.id === serverId);
+      if (!server) throw new Error(`Server ${serverId} is not online and available.`);
+      return server;
+    });
+
+    const basePreview = buildSolverJobPreview({
+      input: {
+        ...input,
+        serverId: selectedServers[0]!.id
+      },
+      server: selectedServers[0]!,
+      preflopRangesPath: this.options.preflopRangesPath,
+      defaultPipelineStatusFilePath: this.defaultPipelineStatusFilePath,
+      repoNamespace: this.repoNamespace,
+      hfToken: this.hfToken,
+      solverHfProxyUrl: this.effectiveSolverHfProxyUrl(),
+      scenarioLibrary: this.getScenarioLibrary()
+    });
+
+    let repoExists = await huggingFaceDatasetRepoExists(basePreview.repoId, this.hfToken, this.effectiveHfProxyUrl());
+    if (!repoExists && options.createRepoIfConfirmed) {
+      if (!this.hfToken) throw new Error("HF_TOKEN is required to create a missing Hugging Face dataset repo.");
+      await createHuggingFaceDatasetRepo(basePreview.repoId, this.hfToken, this.effectiveHfProxyUrl());
+      repoExists = true;
+    }
+
+    const allBoards = readSolverCards();
+    const indices = options.explicitIndices
+      ? normalizeBoardIndices(options.explicitIndices, allBoards.length)
+      : repoExists
+        ? await fetchMissingBoardIndices(basePreview.repoId, allBoards, this.hfToken, this.effectiveHfProxyUrl())
+        : [];
+    const allocations = allocateRoundRobin(indices, selectedServers).map((allocation) => {
+      const settings = { ...basePreview.settings, rangeExpr: allocation.rangeExpr };
+      const commandPreview = buildRunPipelineCommand({
+        solverRoot: effectiveSolverRoot(),
+        repoId: basePreview.repoId,
+        scenario: basePreview.scenario,
+        rangePath: jobScopedRemoteRangePath("<job-id>", basePreview.datasetName),
+        resultPath: jobScopedRemoteResultPath("<job-id>", basePreview.datasetName),
+        settings,
+        statusFilePath: allocation.server.pipelineStatusFilePath?.trim() || this.defaultPipelineStatusFilePath,
+        hfToken: this.hfToken,
+        hfProxyUrl: this.effectiveSolverHfProxyUrl(),
+        redactSecrets: true
+      });
+      return {
+        server: allocation.server,
+        rangeExpr: allocation.rangeExpr,
+        indices: allocation.indices,
+        boardNames: allocation.indices.map((index) => allBoards[index - 1] ?? String(index)),
+        commandPreview
+      };
+    });
+
+    return {
+      rangePath: basePreview.rangePath,
+      rangeName: basePreview.rangeName,
+      learned: basePreview.learned,
+      datasetName: basePreview.datasetName,
+      repoId: basePreview.repoId,
+      scenario: basePreview.scenario,
+      solverRangeText: basePreview.solverRangeText,
+      settings: basePreview.settings,
+      selectedServerIds,
+      availableServers,
+      missingIndices: indices,
+      missingBoardNames: indices.map((index) => allBoards[index - 1] ?? String(index)),
+      allocations,
+      repoExists,
+      tokenConfigured: Boolean(this.hfToken),
+      requiresConfirmation: !basePreview.learned || !repoExists,
+      warnings: [
+        ...basePreview.warnings,
+        ...(!repoExists ? ["Dataset repo is missing. Confirm the dataset name before creating it."] : []),
+        ...(indices.length === 0 && repoExists ? ["No missing boards remain for this dataset."] : [])
+      ]
+    };
+  }
+
+  private async createParallelRunFromPreview(
+    preview: ParallelSolverJobPreview,
+    sourceType: "parallel" | "failure_pool",
+    autoStart: boolean
+  ): Promise<ParallelSolverRun> {
+    const now = new Date().toISOString();
+    const runId = randomUUID();
+    const run: ParallelSolverRun = {
+      id: runId,
+      sourceType,
+      rangePath: preview.rangePath,
+      rangeName: preview.rangeName,
+      datasetName: preview.datasetName,
+      repoId: preview.repoId,
+      scenario: preview.scenario,
+      settings: preview.settings,
+      solverRangeText: preview.solverRangeText,
+      status: preview.missingIndices.length === 0 ? "completed" : "queued",
+      queueOrder: this.options.db.getNextParallelSolverQueueOrder(),
+      serverIds: preview.selectedServerIds,
+      totalIndices: preview.missingIndices,
+      missingIndices: preview.missingIndices,
+      createdAt: now,
+      updatedAt: now,
+      startedAt: null,
+      finishedAt: preview.missingIndices.length === 0 ? now : null,
+      lastError: null,
+      slices: [],
+      report: {
+        totalBoards: preview.missingIndices.length,
+        completedBoards: preview.missingIndices.length === 0 ? 0 : 0,
+        failedBoards: 0,
+        queuedBoards: preview.missingIndices.length,
+        runningBoards: 0,
+        successRate: preview.missingIndices.length === 0 ? 1 : 0,
+        durationSeconds: null
+      }
+    };
+    this.options.db.insertParallelSolverRun(run);
+
+    for (const allocation of preview.allocations) {
+      if (allocation.indices.length === 0) continue;
+      const sliceId = randomUUID();
+      const jobId = randomUUID();
+      const settings = { ...preview.settings, rangeExpr: allocation.rangeExpr };
+      const remoteRangePath = jobScopedRemoteRangePath(jobId, preview.datasetName);
+      const remoteResultPath = jobScopedRemoteResultPath(jobId, preview.datasetName);
+      const statusFilePath = allocation.server.pipelineStatusFilePath?.trim() || this.defaultPipelineStatusFilePath;
+      const command = buildRunPipelineCommand({
+        solverRoot: effectiveSolverRoot(),
+        repoId: preview.repoId,
+        scenario: preview.scenario,
+        rangePath: remoteRangePath,
+        resultPath: remoteResultPath,
+        settings,
+        statusFilePath,
+        hfToken: this.hfToken,
+        hfProxyUrl: this.effectiveSolverHfProxyUrl(),
+        redactSecrets: true
+      });
+      const job: SolverJob = {
+        id: jobId,
+        serverId: allocation.server.id,
+        rangePath: preview.rangePath,
+        rangeName: preview.rangeName,
+        datasetName: preview.datasetName,
+        scenario: preview.scenario,
+        repoId: preview.repoId,
+        settings,
+        command,
+        solverRangeText: preview.solverRangeText,
+        status: "queued",
+        queueMode: "parallel",
+        confirmUnstudied: false,
+        tmuxSession: allocation.server.tmuxSession?.trim() || "solver",
+        remoteRangePath,
+        remoteResultPath,
+        parallelRunId: runId,
+        parallelSliceId: sliceId,
+        assignedIndices: allocation.indices,
+        sourceType,
+        createdAt: now,
+        updatedAt: now,
+        startedAt: null,
+        finishedAt: null,
+        lastError: null,
+        pipeline: allocation.server.pipeline
+      };
+      const slice: ParallelSolverSlice = {
+        id: sliceId,
+        runId,
+        serverId: allocation.server.id,
+        jobId,
+        rangeExpr: allocation.rangeExpr,
+        assignedIndices: allocation.indices,
+        assignedBoardNames: allocation.boardNames,
+        status: "queued",
+        completedCount: 0,
+        failedCount: 0,
+        startedAt: null,
+        finishedAt: null,
+        createdAt: now,
+        updatedAt: now,
+        lastError: null,
+        job
+      };
+      this.options.db.insertSolverJob(job);
+      this.options.db.insertParallelSolverSlice(slice);
+      this.recordEvent(job.id, "parallel_created", `Queued parallel slice ${allocation.rangeExpr} for ${allocation.server.id}.`, job.command);
+    }
+
+    if (autoStart) {
+      const inserted = this.options.db.getParallelSolverRun(runId);
+      if (!inserted) throw new Error(`Parallel solver run ${runId} not found`);
+      for (const slice of inserted.slices) {
+        const server = this.requireServer(slice.serverId);
+        if (!serverIsOnline(server)) continue;
+        if (this.options.db.getActiveSolverJobForServer(server.id)) continue;
+        if (isPipelineActive(server.pipeline)) continue;
+        if (slice.jobId) {
+          await this.start(slice.jobId);
+        }
+      }
+    }
+    this.reconcileCompletedJobs();
+    this.reconcileParallelRuns();
+    return this.getParallelRun(runId);
+  }
+
+  private reconcileParallelRuns(): void {
+    const allBoards = readSolverCards();
+    for (const run of this.options.db.getParallelSolverRuns()) {
+      for (const slice of run.slices) {
+        if (!slice.job) continue;
+        const next = sliceStateFromJob(slice, slice.job);
+        const becameRunning = slice.status !== "running" && next.status === "running";
+        const becameCompleted = slice.status !== "completed" && next.status === "completed";
+        const becameFailed = slice.status !== "failed" && next.status === "failed";
+        if (
+          next.status !== slice.status ||
+          next.completedCount !== slice.completedCount ||
+          next.failedCount !== slice.failedCount ||
+          next.startedAt !== slice.startedAt ||
+          next.finishedAt !== slice.finishedAt ||
+          next.lastError !== slice.lastError
+        ) {
+          this.options.db.updateParallelSolverSlice(slice.id, next);
+        }
+        if (becameRunning) {
+          this.options.db.updateParallelFailurePoolEntries(run.rangePath, run.datasetName, slice.assignedIndices, "running");
+        }
+        if (becameCompleted) {
+          this.options.db.updateParallelFailurePoolEntries(run.rangePath, run.datasetName, slice.assignedIndices, "solved");
+        }
+        if (becameFailed) {
+          const failedIndices = failedIndicesForSlice(slice, slice.job);
+          for (const index of failedIndices) {
+            const boardName = allBoards[index - 1] ?? String(index);
+            this.options.db.upsertParallelFailurePoolEntry({
+              id: randomUUID(),
+              rangePath: run.rangePath,
+              datasetName: run.datasetName,
+              repoId: run.repoId,
+              scenario: run.scenario,
+              boardIndex: index,
+              boardName,
+              boardKey: boardKeyFromName(boardName),
+              status: "pending",
+              attemptCount: 1,
+              lastRunId: run.id,
+              lastSliceId: slice.id,
+              lastServerId: slice.serverId,
+              lastError: next.lastError ?? null,
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString()
+            });
+          }
+        }
+      }
+      const refreshed = this.options.db.getParallelSolverRun(run.id);
+      if (!refreshed) continue;
+      const nextRun = parallelRunState(refreshed);
+      if (
+        nextRun.status !== refreshed.status ||
+        nextRun.startedAt !== refreshed.startedAt ||
+        nextRun.finishedAt !== refreshed.finishedAt ||
+        nextRun.lastError !== refreshed.lastError
+      ) {
+        this.options.db.updateParallelSolverRun(refreshed.id, nextRun);
+      }
+    }
+  }
+
+  private failurePoolIndices(input: ParallelFailurePoolPreviewRequest): number[] {
+    const datasetName = input.datasetName?.trim()
+      || datasetNameFromRangePath(input.rangePath, input.scenario ?? scenarioFromRangePath(input.rangePath));
+    const entries = this.options.db.getParallelFailurePoolEntries(input.rangePath, datasetName)
+      .filter((entry) => entry.status === "pending" || entry.status === "failed");
+    const selected = input.indices?.length
+      ? new Set(normalizeBoardIndices(input.indices, readSolverCards().length))
+      : null;
+    return entries
+      .map((entry) => entry.boardIndex)
+      .filter((index) => selected == null || selected.has(index));
   }
 
   private reconcileCompletedJobs(): void {
@@ -424,6 +860,7 @@ export class SolverJobService {
       repoId: job.repoId,
       scenario: job.scenario,
       rangePath: job.remoteRangePath,
+      resultPath: job.remoteResultPath,
       settings: job.settings,
       statusFilePath: statusFileFromJob(job),
       hfToken: this.hfToken,
@@ -482,11 +919,13 @@ export function buildSolverJobPreview({
   const tmuxSession = server.tmuxSession?.trim() || "solver";
   const pipelineStatusFilePath = server.pipelineStatusFilePath?.trim() || defaultPipelineStatusFilePath;
   const remoteRangePath = jobScopedRemoteRangePath("<job-id>", datasetName);
+  const remoteResultPath = jobScopedRemoteResultPath("<job-id>", datasetName);
   const commandPreview = buildRunPipelineCommand({
     solverRoot,
     repoId,
     scenario,
     rangePath: remoteRangePath,
+    resultPath: remoteResultPath,
     settings,
     statusFilePath: pipelineStatusFilePath,
     hfToken,
@@ -509,6 +948,7 @@ export function buildSolverJobPreview({
     scenario,
     solverRangeText,
     remoteRangePath,
+    remoteResultPath,
     commandPreview,
     tmuxSession,
     pipelineStatusFilePath,
@@ -680,6 +1120,7 @@ export function buildRunPipelineCommand({
   rangeFileName,
   oopRange,
   ipRange,
+  resultPath,
   settings,
   statusFilePath,
   hfToken,
@@ -693,6 +1134,7 @@ export function buildRunPipelineCommand({
   rangeFileName?: string;
   oopRange?: string;
   ipRange?: string;
+  resultPath?: string;
   settings: SolverJobSettings;
   statusFilePath: string;
   hfToken?: string | null;
@@ -718,6 +1160,9 @@ export function buildRunPipelineCommand({
     "--scenario",
     scenario
   ];
+  if (resultPath) {
+    args.push("--result-path", resultPath);
+  }
   if (rangePath) {
     args.push("--range-path", rangePath);
   } else if (oopRange && ipRange) {
@@ -951,6 +1396,232 @@ function isPipelineActive(pipeline: PipelineStatusSnapshot | null): boolean {
   );
 }
 
+function normalizeSelectedServerIds(serverIds: string[] | undefined, availableServers: ServerRow[]): string[] {
+  const availableIds = availableServers.map((server) => server.id);
+  const requested = serverIds?.map((id) => id.trim()).filter(Boolean) ?? [];
+  const selected = requested.length > 0 ? requested : availableIds;
+  const unique: string[] = [];
+  for (const id of selected) {
+    if (!availableIds.includes(id)) {
+      throw new Error(`Server ${id} is not online and available.`);
+    }
+    if (!unique.includes(id)) unique.push(id);
+  }
+  return unique;
+}
+
+function readSolverCards(): string[] {
+  const candidates = [
+    path.resolve(process.cwd(), "tmp/solver/cards/cards.txt"),
+    path.resolve(process.cwd(), "cards/cards.txt")
+  ];
+  const cardsPath = candidates.find((candidate) => fs.existsSync(candidate));
+  if (!cardsPath) {
+    throw new Error("Unable to locate solver cards.txt for parallel allocation.");
+  }
+  return fs.readFileSync(cardsPath, "utf8")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+async function fetchMissingBoardIndices(
+  repoId: string,
+  allBoards: string[],
+  hfToken: string | null,
+  hfProxyUrl: string | null
+): Promise<number[]> {
+  const existing = await fetchHuggingFaceDatasetBoardKeys(repoId, hfToken, hfProxyUrl);
+  const missing: number[] = [];
+  allBoards.forEach((board, index) => {
+    if (!existing.has(boardKeyFromName(board))) missing.push(index + 1);
+  });
+  return missing;
+}
+
+async function fetchHuggingFaceDatasetBoardKeys(
+  repoId: string,
+  hfToken: string | null,
+  hfProxyUrl: string | null
+): Promise<Set<string>> {
+  const response = await huggingFaceFetch(`${HUGGING_FACE_ORIGIN}/api/datasets/${repoIdPath(repoId)}/tree/main?recursive=1`, {
+    headers: huggingFaceHeaders(hfToken),
+    proxyUrl: hfProxyUrl,
+    signal: AbortSignal.timeout(20_000)
+  });
+  if (!response.ok) {
+    throw new Error(`Hugging Face dataset file listing failed for ${repoId}: ${await huggingFaceErrorMessage(response)}`);
+  }
+  const data = await response.json() as unknown;
+  const items = Array.isArray(data)
+    ? data
+    : isRecord(data) && Array.isArray(data.items)
+      ? data.items
+      : [];
+  const keys = new Set<string>();
+  for (const item of items) {
+    const rawPath = isRecord(item) && typeof item.path === "string"
+      ? item.path
+      : isRecord(item) && typeof item.rfilename === "string"
+        ? item.rfilename
+        : null;
+    if (!rawPath || !/\.(parquet|json)$/i.test(rawPath)) continue;
+    const stem = rawPath.split("/").pop()?.replace(/\.(parquet|json)$/i, "");
+    if (stem) keys.add(boardKeyFromName(stem));
+  }
+  return keys;
+}
+
+function boardKeyFromName(board: string): string {
+  return board.replace(/,/g, "").trim().toLowerCase();
+}
+
+function normalizeBoardIndices(indices: number[], total: number): number[] {
+  const seen = new Set<number>();
+  const normalized: number[] = [];
+  for (const value of indices) {
+    const index = Math.trunc(Number(value));
+    if (!Number.isFinite(index) || index < 1 || index > total || seen.has(index)) continue;
+    seen.add(index);
+    normalized.push(index);
+  }
+  return normalized.sort((a, b) => a - b);
+}
+
+function allocateRoundRobin(indices: number[], servers: ServerRow[]): Array<{ server: ServerRow; indices: number[]; rangeExpr: string }> {
+  const buckets = servers.map((server) => ({ server, indices: [] as number[] }));
+  indices.forEach((index, position) => {
+    buckets[position % buckets.length]!.indices.push(index);
+  });
+  return buckets.map((bucket) => ({
+    ...bucket,
+    rangeExpr: compressIndices(bucket.indices)
+  }));
+}
+
+function compressIndices(indices: number[]): string {
+  const sorted = [...indices].sort((a, b) => a - b);
+  if (sorted.length === 0) return "";
+  const parts: string[] = [];
+  let start = sorted[0]!;
+  let prev = sorted[0]!;
+  for (const index of sorted.slice(1)) {
+    if (index === prev + 1) {
+      prev = index;
+      continue;
+    }
+    parts.push(start === prev ? String(start) : `${start}-${prev}`);
+    start = index;
+    prev = index;
+  }
+  parts.push(start === prev ? String(start) : `${start}-${prev}`);
+  return parts.join(",");
+}
+
+function sliceStateFromJob(
+  slice: ParallelSolverSlice,
+  job: SolverJob
+): Partial<Pick<ParallelSolverSlice, "status" | "completedCount" | "failedCount" | "startedAt" | "finishedAt" | "lastError">> {
+  const completedCount = job.pipeline?.completedCount ?? job.pipeline?.completedIndices.length ?? 0;
+  const failedCount = job.pipeline?.failedCount ?? job.pipeline?.failedIndices.length ?? 0;
+  if (job.status === "queued" || job.status === "draft") {
+    return { status: "queued", completedCount, failedCount, startedAt: job.startedAt, finishedAt: job.finishedAt, lastError: job.lastError };
+  }
+  if (job.status === "deploying" || job.status === "running" || job.status === "stopping") {
+    return { status: "running", completedCount, failedCount, startedAt: job.startedAt, finishedAt: null, lastError: job.lastError };
+  }
+  if (job.status === "completed") {
+    return {
+      status: "completed",
+      completedCount: completedCount || slice.assignedIndices.length,
+      failedCount,
+      startedAt: job.startedAt,
+      finishedAt: job.finishedAt,
+      lastError: null
+    };
+  }
+  if (job.status === "canceled") {
+    return { status: "canceled", completedCount, failedCount, startedAt: job.startedAt, finishedAt: job.finishedAt, lastError: job.lastError };
+  }
+  return {
+    status: "failed",
+    completedCount,
+    failedCount: failedCount || Math.max(0, slice.assignedIndices.length - completedCount),
+    startedAt: job.startedAt,
+    finishedAt: job.finishedAt,
+    lastError: job.lastError
+  };
+}
+
+function failedIndicesForSlice(slice: ParallelSolverSlice, job: SolverJob): number[] {
+  const failed = job.pipeline?.failedIndices ?? [];
+  if (failed.length > 0) return failed.filter((index) => slice.assignedIndices.includes(index));
+  const completed = new Set(job.pipeline?.completedIndices ?? []);
+  const remaining = slice.assignedIndices.filter((index) => !completed.has(index));
+  return remaining.length > 0 ? remaining : slice.assignedIndices;
+}
+
+function parallelRunState(
+  run: ParallelSolverRun
+): Partial<Pick<ParallelSolverRun, "status" | "startedAt" | "finishedAt" | "lastError">> {
+  if (run.slices.length === 0) {
+    return { status: "completed", startedAt: run.startedAt, finishedAt: run.finishedAt ?? new Date().toISOString(), lastError: null };
+  }
+  const statuses = run.slices.map((slice) => slice.status);
+  const startedAt = run.startedAt ?? earliestDate(run.slices.map((slice) => slice.startedAt));
+  if (statuses.some((status) => status === "running")) {
+    return { status: "running", startedAt, finishedAt: null, lastError: null };
+  }
+  if (statuses.some((status) => status === "queued")) {
+    return { status: startedAt ? "running" : "queued", startedAt, finishedAt: null, lastError: null };
+  }
+  const finishedAt = latestDate(run.slices.map((slice) => slice.finishedAt)) ?? new Date().toISOString();
+  if (statuses.every((status) => status === "completed")) {
+    return { status: "completed", startedAt, finishedAt, lastError: null };
+  }
+  if (statuses.every((status) => status === "canceled")) {
+    return { status: "canceled", startedAt, finishedAt, lastError: "All slices were canceled." };
+  }
+  return { status: "completed_with_failures", startedAt, finishedAt, lastError: "One or more slices failed." };
+}
+
+function parallelRunLocked(run: ParallelSolverRun): boolean {
+  return run.slices.some((slice) =>
+    slice.status === "running" ||
+    slice.job?.status === "deploying" ||
+    slice.job?.status === "running" ||
+    slice.job?.status === "stopping"
+  );
+}
+
+function compareParallelRunQueue(left: ParallelSolverRun, right: ParallelSolverRun): number {
+  const orderDelta = left.queueOrder - right.queueOrder;
+  if (orderDelta !== 0) return orderDelta;
+  return Date.parse(left.createdAt) - Date.parse(right.createdAt);
+}
+
+function earliestDate(values: Array<string | null>): string | null {
+  const timestamps = values
+    .filter((value): value is string => Boolean(value))
+    .map((value) => Date.parse(value))
+    .filter(Number.isFinite);
+  if (timestamps.length === 0) return null;
+  return new Date(Math.min(...timestamps)).toISOString();
+}
+
+function latestDate(values: Array<string | null>): string | null {
+  const timestamps = values
+    .filter((value): value is string => Boolean(value))
+    .map((value) => Date.parse(value))
+    .filter(Number.isFinite);
+  if (timestamps.length === 0) return null;
+  return new Date(Math.max(...timestamps)).toISOString();
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
 function positiveInteger(value: unknown, fallback: number): number {
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed <= 0) return fallback;
@@ -982,6 +1653,10 @@ function effectiveSolverRoot(): string {
 
 function jobScopedRemoteRangePath(jobId: string, datasetName: string): string {
   return joinRemotePath(effectiveSolverRoot(), "job-ranges", jobId, `${datasetName}.txt`);
+}
+
+function jobScopedRemoteResultPath(jobId: string, datasetName: string): string {
+  return joinRemotePath(effectiveSolverRoot(), "results", datasetName, jobId);
 }
 
 function dirnameRemote(remotePath: string): string {

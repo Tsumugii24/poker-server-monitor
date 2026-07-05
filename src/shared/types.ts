@@ -189,6 +189,12 @@ export type PipelineStatusSnapshot = {
   totalBatches: number | null;
   totalTasks: number | null;
   batchExpr: string | null;
+  assignedIndices: number[];
+  completedIndices: number[];
+  failedIndices: number[];
+  completedCount: number | null;
+  failedCount: number | null;
+  resultPath: string | null;
   pid: number | null;
   startedAt: string | null;
   updatedAt: string | null;

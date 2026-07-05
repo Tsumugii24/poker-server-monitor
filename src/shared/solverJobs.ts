@@ -13,8 +13,30 @@ export const SOLVER_JOB_STATUSES = [
 ] as const;
 export type SolverJobStatus = (typeof SOLVER_JOB_STATUSES)[number];
 
-export const SOLVER_JOB_QUEUE_MODES = ["manual", "queue_next"] as const;
+export const SOLVER_JOB_QUEUE_MODES = ["manual", "queue_next", "parallel"] as const;
 export type SolverJobQueueMode = (typeof SOLVER_JOB_QUEUE_MODES)[number];
+
+export const PARALLEL_SOLVER_RUN_STATUSES = [
+  "queued",
+  "running",
+  "completed",
+  "completed_with_failures",
+  "failed",
+  "canceled"
+] as const;
+export type ParallelSolverRunStatus = (typeof PARALLEL_SOLVER_RUN_STATUSES)[number];
+
+export const PARALLEL_SOLVER_SLICE_STATUSES = [
+  "queued",
+  "running",
+  "completed",
+  "failed",
+  "canceled"
+] as const;
+export type ParallelSolverSliceStatus = (typeof PARALLEL_SOLVER_SLICE_STATUSES)[number];
+
+export const PARALLEL_FAILURE_POOL_STATUSES = ["pending", "queued", "running", "solved", "failed"] as const;
+export type ParallelFailurePoolStatus = (typeof PARALLEL_FAILURE_POOL_STATUSES)[number];
 
 export const SOLVER_SCENARIOS = [
   "sia-sod",
@@ -158,6 +180,7 @@ export type SolverJobPreview = {
   scenario: SolverScenario;
   solverRangeText: string;
   remoteRangePath: string;
+  remoteResultPath: string;
   commandPreview: string;
   tmuxSession: string;
   pipelineStatusFilePath: string;
@@ -182,6 +205,11 @@ export type SolverJob = {
   confirmUnstudied: boolean;
   tmuxSession: string;
   remoteRangePath: string;
+  remoteResultPath: string;
+  parallelRunId: string | null;
+  parallelSliceId: string | null;
+  assignedIndices: number[];
+  sourceType: "single" | "parallel" | "failure_pool";
   createdAt: string;
   updatedAt: string;
   startedAt: string | null;
@@ -218,4 +246,134 @@ export type SolverDatasetRepoStatus = {
 
 export type SolverDatasetRepoEnsureRequest = SolverJobPreviewRequest & {
   confirmDatasetName?: boolean;
+};
+
+export type ParallelSolverServerAllocation = {
+  server: ServerRow;
+  rangeExpr: string;
+  indices: number[];
+  boardNames: string[];
+  commandPreview: string;
+};
+
+export type ParallelSolverJobPreviewRequest = {
+  rangePath: string;
+  scenario?: SolverScenario;
+  datasetName?: string;
+  serverIds?: string[];
+  settings?: Partial<SolverJobSettings>;
+  confirmUnstudied?: boolean;
+};
+
+export type ParallelSolverJobCreateRequest = ParallelSolverJobPreviewRequest & {
+  confirmDatasetName?: boolean;
+  queueMode?: "start_now" | "queue_next";
+};
+
+export type ParallelFailurePoolPreviewRequest = ParallelSolverJobPreviewRequest & {
+  indices?: number[];
+};
+
+export type ParallelFailurePoolSubmitRequest = ParallelFailurePoolPreviewRequest & {
+  confirmDatasetName?: boolean;
+  queueMode?: "start_now" | "queue_next";
+};
+
+export type ParallelSolverJobPreview = {
+  rangePath: string;
+  rangeName: string;
+  learned: boolean;
+  datasetName: string;
+  repoId: string;
+  scenario: SolverScenario;
+  solverRangeText: string;
+  settings: SolverJobSettings;
+  selectedServerIds: string[];
+  availableServers: ServerRow[];
+  missingIndices: number[];
+  missingBoardNames: string[];
+  allocations: ParallelSolverServerAllocation[];
+  repoExists: boolean;
+  tokenConfigured: boolean;
+  requiresConfirmation: boolean;
+  warnings: string[];
+};
+
+export type ParallelSolverSlice = {
+  id: string;
+  runId: string;
+  serverId: string;
+  jobId: string | null;
+  rangeExpr: string;
+  assignedIndices: number[];
+  assignedBoardNames: string[];
+  status: ParallelSolverSliceStatus;
+  completedCount: number;
+  failedCount: number;
+  startedAt: string | null;
+  finishedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  lastError: string | null;
+  job: SolverJob | null;
+};
+
+export type ParallelSolverRun = {
+  id: string;
+  sourceType: "parallel" | "failure_pool";
+  rangePath: string;
+  rangeName: string;
+  datasetName: string;
+  repoId: string;
+  scenario: SolverScenario;
+  settings: SolverJobSettings;
+  solverRangeText: string;
+  status: ParallelSolverRunStatus;
+  queueOrder: number;
+  serverIds: string[];
+  totalIndices: number[];
+  missingIndices: number[];
+  createdAt: string;
+  updatedAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  lastError: string | null;
+  slices: ParallelSolverSlice[];
+  report: {
+    totalBoards: number;
+    completedBoards: number;
+    failedBoards: number;
+    queuedBoards: number;
+    runningBoards: number;
+    successRate: number;
+    durationSeconds: number | null;
+  };
+};
+
+export type ParallelFailurePoolEntry = {
+  id: string;
+  rangePath: string;
+  datasetName: string;
+  repoId: string;
+  scenario: SolverScenario;
+  boardIndex: number;
+  boardName: string;
+  boardKey: string;
+  status: ParallelFailurePoolStatus;
+  attemptCount: number;
+  lastRunId: string | null;
+  lastSliceId: string | null;
+  lastServerId: string | null;
+  lastError: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ParallelSolverJobsResponse = {
+  runs: ParallelSolverRun[];
+  failurePool: ParallelFailurePoolEntry[];
+};
+
+export type ParallelSolverQueueReorderRequest = {
+  runIds: string[];
 };

@@ -56,6 +56,11 @@ import {
 import { SolverJobService } from "./solverJobService";
 import {
   SOLVER_JOB_QUEUE_MODES,
+  type ParallelFailurePoolPreviewRequest,
+  type ParallelFailurePoolSubmitRequest,
+  type ParallelSolverJobCreateRequest,
+  type ParallelSolverJobPreviewRequest,
+  type ParallelSolverQueueReorderRequest,
   type SolverDatasetRepoEnsureRequest,
   type SolverJobCreateRequest,
   type SolverJobPreviewRequest,
@@ -653,6 +658,98 @@ export function createApp({
       response.json(solverJobService.deleteJob(request.params.id));
     } catch (error) {
       respondSolverJobError(response, error, "solver_job_delete_failed");
+    }
+  });
+
+  app.get("/api/parallel-jobs", (_request, response) => {
+    try {
+      response.json(solverJobService.listParallelJobs());
+    } catch (error) {
+      respondSolverJobError(response, error, "parallel_solver_jobs_list_failed");
+    }
+  });
+
+  app.post("/api/parallel-jobs/preview", async (request, response) => {
+    if (!isParallelSolverJobPreviewRequest(request.body)) {
+      response.status(400).json({ error: "invalid_parallel_solver_job_preview" });
+      return;
+    }
+
+    try {
+      response.json(await solverJobService.previewParallel(request.body));
+    } catch (error) {
+      respondSolverJobError(response, error, "parallel_solver_job_preview_failed");
+    }
+  });
+
+  app.post("/api/parallel-jobs", async (request, response) => {
+    if (!isParallelSolverJobCreateRequest(request.body)) {
+      response.status(400).json({ error: "invalid_parallel_solver_job" });
+      return;
+    }
+
+    try {
+      const run = await solverJobService.createParallel(request.body);
+      response.status(201).json({ run, ...solverJobService.listParallelJobs() });
+    } catch (error) {
+      respondSolverJobError(response, error, "parallel_solver_job_create_failed");
+    }
+  });
+
+  app.post("/api/parallel-jobs/reorder", (request, response) => {
+    if (!isParallelSolverQueueReorderRequest(request.body)) {
+      response.status(400).json({ error: "invalid_parallel_solver_queue_reorder" });
+      return;
+    }
+
+    try {
+      const runs = solverJobService.reorderParallelQueue(request.body.runIds);
+      response.json({ runs, failurePool: solverJobService.listParallelJobs().failurePool });
+    } catch (error) {
+      respondSolverJobError(response, error, "parallel_solver_queue_reorder_failed");
+    }
+  });
+
+  app.get("/api/parallel-jobs/:id", (request, response) => {
+    try {
+      response.json({ run: solverJobService.getParallelRun(request.params.id) });
+    } catch (error) {
+      respondSolverJobError(response, error, "parallel_solver_job_read_failed");
+    }
+  });
+
+  app.post("/api/parallel-jobs/:id/cancel", async (request, response) => {
+    try {
+      response.json({ run: await solverJobService.cancelParallelRun(request.params.id), ...solverJobService.listParallelJobs() });
+    } catch (error) {
+      respondSolverJobError(response, error, "parallel_solver_job_cancel_failed");
+    }
+  });
+
+  app.post("/api/parallel-jobs/failure-pool/preview", async (request, response) => {
+    if (!isParallelFailurePoolPreviewRequest(request.body)) {
+      response.status(400).json({ error: "invalid_parallel_failure_pool_preview" });
+      return;
+    }
+
+    try {
+      response.json(await solverJobService.previewFailurePool(request.body));
+    } catch (error) {
+      respondSolverJobError(response, error, "parallel_failure_pool_preview_failed");
+    }
+  });
+
+  app.post("/api/parallel-jobs/failure-pool/submit", async (request, response) => {
+    if (!isParallelFailurePoolSubmitRequest(request.body)) {
+      response.status(400).json({ error: "invalid_parallel_failure_pool_submit" });
+      return;
+    }
+
+    try {
+      const run = await solverJobService.submitFailurePool(request.body);
+      response.status(201).json({ run, ...solverJobService.listParallelJobs() });
+    } catch (error) {
+      respondSolverJobError(response, error, "parallel_failure_pool_submit_failed");
     }
   });
 
@@ -1334,6 +1431,66 @@ function isSolverJobCreateRequest(value: unknown): value is SolverJobCreateReque
     return false;
   }
   return true;
+}
+
+function isParallelSolverJobPreviewRequest(value: unknown): value is ParallelSolverJobPreviewRequest {
+  if (!isRecord(value)) return false;
+  if (typeof value.rangePath !== "string" || value.rangePath.trim() === "") return false;
+  if (
+    value.scenario != null &&
+    (typeof value.scenario !== "string" || value.scenario.trim() === "")
+  ) {
+    return false;
+  }
+  if (value.datasetName != null && typeof value.datasetName !== "string") return false;
+  if (value.settings != null && !isRecord(value.settings)) return false;
+  if (value.confirmUnstudied != null && typeof value.confirmUnstudied !== "boolean") return false;
+  if (value.serverIds != null && (!Array.isArray(value.serverIds) || value.serverIds.some((id) => typeof id !== "string"))) {
+    return false;
+  }
+  return true;
+}
+
+function isParallelSolverJobCreateRequest(value: unknown): value is ParallelSolverJobCreateRequest {
+  if (!isParallelSolverJobPreviewRequest(value)) return false;
+  const candidate = value as Record<string, unknown>;
+  if (candidate.confirmDatasetName != null && typeof candidate.confirmDatasetName !== "boolean") return false;
+  if (
+    candidate.queueMode != null &&
+    candidate.queueMode !== "start_now" &&
+    candidate.queueMode !== "queue_next"
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function isParallelFailurePoolPreviewRequest(value: unknown): value is ParallelFailurePoolPreviewRequest {
+  if (!isParallelSolverJobPreviewRequest(value)) return false;
+  const candidate = value as Record<string, unknown>;
+  if (candidate.indices != null && (!Array.isArray(candidate.indices) || candidate.indices.some((index) => typeof index !== "number"))) {
+    return false;
+  }
+  return true;
+}
+
+function isParallelFailurePoolSubmitRequest(value: unknown): value is ParallelFailurePoolSubmitRequest {
+  if (!isParallelFailurePoolPreviewRequest(value)) return false;
+  const candidate = value as Record<string, unknown>;
+  if (candidate.confirmDatasetName != null && typeof candidate.confirmDatasetName !== "boolean") return false;
+  if (
+    candidate.queueMode != null &&
+    candidate.queueMode !== "start_now" &&
+    candidate.queueMode !== "queue_next"
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function isParallelSolverQueueReorderRequest(value: unknown): value is ParallelSolverQueueReorderRequest {
+  if (!isRecord(value)) return false;
+  return Array.isArray(value.runIds) && value.runIds.every((id) => typeof id === "string" && id.trim() !== "");
 }
 
 function alertStatus(settings: AlertSettings): { enabled: boolean; configured: boolean } {

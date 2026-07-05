@@ -50,6 +50,7 @@ describe("solver job helpers", () => {
       repoId: "Tsumugii/3ia-4.2-3od-4.3",
       scenario: "3ia-3od",
       rangePath: "~/solver/job-ranges/job-1/3ia-4.2-3od-4.3.txt",
+      resultPath: "~/solver/results/3ia-4.2-3od-4.3/job-1",
       statusFilePath: "~/run/status.json",
       settings: {
         ...DEFAULT_SOLVER_JOB_SETTINGS,
@@ -63,6 +64,7 @@ describe("solver job helpers", () => {
     expect(command).toContain("'--no-upload'");
     expect(command).toContain("'--scenario' '3ia-3od'");
     expect(command).toContain("'--range-path' '~/solver/job-ranges/job-1/3ia-4.2-3od-4.3.txt'");
+    expect(command).toContain("'--result-path' '~/solver/results/3ia-4.2-3od-4.3/job-1'");
     expect(command).not.toContain("'--range-file'");
     expect(command).not.toContain("'--repo-id'");
     expect(command).not.toContain("'--upload-format'");
@@ -81,6 +83,7 @@ describe("solver job helpers", () => {
       repoId: "Tsumugii/3ia-4.2-3od-4.3",
       scenario: "3ia-3od",
       rangePath: "~/solver/job-ranges/job-1/3ia-4.2-3od-4.3.txt",
+      resultPath: "~/solver/results/3ia-4.2-3od-4.3/job-1",
       statusFilePath: "~/run/status.json",
       settings: DEFAULT_SOLVER_JOB_SETTINGS,
       hfToken: "hf_test_token",
@@ -93,6 +96,7 @@ describe("solver job helpers", () => {
     expect(command).toContain("'--repo-id' 'Tsumugii/3ia-4.2-3od-4.3'");
     expect(command).toContain("'--scenario' '3ia-3od'");
     expect(command).toContain("'--range-path' '~/solver/job-ranges/job-1/3ia-4.2-3od-4.3.txt'");
+    expect(command).toContain("'--result-path' '~/solver/results/3ia-4.2-3od-4.3/job-1'");
     expect(command).toContain("'--upload-format' 'parquet'");
     expect(command).not.toContain("'--no-upload'");
   });
@@ -260,12 +264,14 @@ describe("solver job API", () => {
     expect(preview.body.repoId).toBe("Tsumugii/3ia-4.2-3od-4.3");
     expect(preview.body.scenario).toBe("3ia-3od");
     expect(preview.body.remoteRangePath).toBe("~/solver/job-ranges/<job-id>/3ia-4.2-3od-4.3.txt");
+    expect(preview.body.remoteResultPath).toBe("~/solver/results/3ia-4.2-3od-4.3/<job-id>");
     expect(preview.body.requiresConfirmation).toBe(true);
     expect(preview.body.commandPreview).toContain("export HF_TOKEN=$HF_TOKEN");
     expect(preview.body.commandPreview).not.toContain("hf_test_token");
     expect(preview.body.commandPreview).toContain("export http_proxy='http://127.0.0.1:7890'");
     expect(preview.body.commandPreview).toContain("'--scenario' '3ia-3od'");
     expect(preview.body.commandPreview).toContain("'--range-path' '~/solver/job-ranges/<job-id>/3ia-4.2-3od-4.3.txt'");
+    expect(preview.body.commandPreview).toContain("'--result-path' '~/solver/results/3ia-4.2-3od-4.3/<job-id>'");
 
     const noUploadPreview = await request(app)
       .post("/api/jobs/preview")
@@ -277,6 +283,7 @@ describe("solver job API", () => {
     expect(noUploadPreview.body.commandPreview).toContain("'--no-upload'");
     expect(noUploadPreview.body.commandPreview).toContain("'--scenario' '3ia-3od'");
     expect(noUploadPreview.body.commandPreview).toContain("'--range-path' '~/solver/job-ranges/<job-id>/3ia-4.2-3od-4.3.txt'");
+    expect(noUploadPreview.body.commandPreview).toContain("'--result-path' '~/solver/results/3ia-4.2-3od-4.3/<job-id>'");
     expect(noUploadPreview.body.commandPreview).not.toContain("'--repo-id'");
     expect(noUploadPreview.body.commandPreview).not.toContain("'--upload-format'");
     expect(noUploadPreview.body.commandPreview).not.toContain("'--upload-attempt-timeout'");
@@ -303,6 +310,7 @@ describe("solver job API", () => {
 
     expect(created.status).toBe(201);
     expect(created.body.job.status).toBe("queued");
+    expect(created.body.job.remoteResultPath).toBe(`~/solver/results/3ia-4.2-3od-4.3/${created.body.job.id}`);
     expect(created.body.job.command).toContain("export HF_TOKEN=$HF_TOKEN");
     expect(created.body.job.command).not.toContain("hf_test_token");
 
@@ -330,6 +338,8 @@ describe("solver job API", () => {
     expect(commands[1]).toContain("3ia-3od");
     expect(commands[1]).toContain("--range-path");
     expect(commands[1]).toContain(`job-ranges/${created.body.job.id}/3ia-4.2-3od-4.3.txt`);
+    expect(commands[1]).toContain("--result-path");
+    expect(commands[1]).toContain(`results/3ia-4.2-3od-4.3/${created.body.job.id}`);
     expect(commands[1]).toContain("hf_test_token");
 
     const list = await request(app).get("/api/jobs");
@@ -337,7 +347,8 @@ describe("solver job API", () => {
     expect(list.body.jobs[0]).toMatchObject({
       id: created.body.job.id,
       status: "running",
-      repoId: "Tsumugii/3ia-4.2-3od-4.3"
+      repoId: "Tsumugii/3ia-4.2-3od-4.3",
+      remoteResultPath: `~/solver/results/3ia-4.2-3od-4.3/${created.body.job.id}`
     });
     expect(list.body.jobs[0].command).toContain("export HF_TOKEN=$HF_TOKEN");
     expect(list.body.jobs[0].command).not.toContain("hf_test_token");
@@ -418,9 +429,11 @@ describe("solver job API", () => {
     expect(preview.body.repoId).toBe("Tsumugii/sia-45-sod-40");
     expect(preview.body.scenario).toBe("sia-sod-open2.5");
     expect(preview.body.remoteRangePath).toBe("~/solver/job-ranges/<job-id>/sia-45-sod-40.txt");
+    expect(preview.body.remoteResultPath).toBe("~/solver/results/sia-45-sod-40/<job-id>");
     expect(preview.body.commandPreview).toContain("'--repo-id' 'Tsumugii/sia-45-sod-40'");
     expect(preview.body.commandPreview).toContain("'--scenario' 'sia-sod-open2.5'");
     expect(preview.body.commandPreview).toContain("'--range-path' '~/solver/job-ranges/<job-id>/sia-45-sod-40.txt'");
+    expect(preview.body.commandPreview).toContain("'--result-path' '~/solver/results/sia-45-sod-40/<job-id>'");
 
     const overridden = await request(app)
       .post("/api/jobs/preview")
@@ -637,6 +650,159 @@ describe("solver job API", () => {
     expect(list.body.events.some((event: { message: string }) =>
       event.message === "Server task reconciled job as failed."
     )).toBe(true);
+  });
+
+  it("creates a parallel run, distributes boards, and records failed slices in the failure pool", async () => {
+    db.syncServers([
+      ...servers,
+      {
+        id: "solver-02",
+        name: "Solver 02",
+        host: "10.0.0.2",
+        port: 22,
+        enabled: true,
+        note: "TBD",
+        solverRoot: "/srv/solver",
+        tmuxSession: "solver",
+        pipelineStatusFilePath: "~/run/status.json"
+      }
+    ]);
+    db.insertSnapshot(metricSnapshot("solver-02", "online"));
+    const executor: SshExecutor = {
+      run: vi.fn(async (_server, _credentials, command) => {
+        commands.push(command);
+        return "ok";
+      })
+    };
+    const solverJobService = new SolverJobService({
+      db,
+      preflopRangesPath,
+      credentials: { username: "root", password: "secret" },
+      executor,
+      defaultPipelineStatusFilePath: "~/run/solver_running_status.json",
+      repoNamespace: "Tsumugii",
+      hfToken: "hf_test_token"
+    });
+    const app = createApp({ db, refreshService, preflopRangesPath, solverJobService });
+    const rangePath = "3OD-EP/3OD-4.3 vs 3IA-4.2.json";
+    await approveRange(app, rangePath);
+
+    const preview = await request(app)
+      .post("/api/parallel-jobs/preview")
+      .send({ rangePath, serverIds: ["solver-01", "solver-02"], settings: { uploadEnabled: false } });
+
+    expect(preview.status).toBe(200);
+    expect(preview.body.missingIndices).toHaveLength(1755);
+    expect(preview.body.allocations).toHaveLength(2);
+    expect(preview.body.allocations[0].indices).toHaveLength(878);
+    expect(preview.body.allocations[1].indices).toHaveLength(877);
+    expect(preview.body.allocations[0].rangeExpr).toContain("1,3,5");
+    expect(preview.body.allocations[1].rangeExpr).toContain("2,4,6");
+
+    const created = await request(app)
+      .post("/api/parallel-jobs")
+      .send({ rangePath, serverIds: ["solver-01", "solver-02"], settings: { uploadEnabled: false }, confirmDatasetName: true });
+
+    expect(created.status).toBe(201);
+    expect(created.body.run.slices).toHaveLength(2);
+    expect(created.body.run.slices.every((slice: { jobId: string | null }) => slice.jobId)).toBe(true);
+    expect(commands.filter((command) => command.includes("run_pipeline.py"))).toHaveLength(2);
+    expect(commands.join("\n")).toContain("--no-upload");
+
+    const failedSlice = created.body.run.slices[0];
+    db.updateSolverJob(failedSlice.jobId, {
+      status: "failed",
+      finishedAt: new Date().toISOString(),
+      lastError: "solver failed"
+    });
+
+    const list = await request(app).get("/api/parallel-jobs");
+    expect(list.status).toBe(200);
+    expect(list.body.runs[0].status).toBe("running");
+    expect(list.body.failurePool.length).toBe(failedSlice.assignedIndices.length);
+    expect(list.body.failurePool[0]).toMatchObject({
+      rangePath,
+      datasetName: "3ia-4.2-3od-4.3",
+      status: "pending",
+      lastServerId: "solver-01"
+    });
+  });
+
+  it("queues parallel runs, reorders movable runs, and starts servers in queue order", async () => {
+    db.syncServers([
+      ...servers,
+      {
+        id: "solver-02",
+        name: "Solver 02",
+        host: "10.0.0.2",
+        port: 22,
+        enabled: true,
+        note: "TBD",
+        solverRoot: "/srv/solver",
+        tmuxSession: "solver",
+        pipelineStatusFilePath: "~/run/status.json"
+      }
+    ]);
+    db.insertSnapshot(metricSnapshot("solver-02", "online"));
+    const executor: SshExecutor = {
+      run: vi.fn(async (_server, _credentials, command) => {
+        commands.push(command);
+        return "ok";
+      })
+    };
+    const solverJobService = new SolverJobService({
+      db,
+      preflopRangesPath,
+      credentials: { username: "root", password: "secret" },
+      executor,
+      defaultPipelineStatusFilePath: "~/run/solver_running_status.json",
+      repoNamespace: "Tsumugii",
+      hfToken: "hf_test_token"
+    });
+    const app = createApp({ db, refreshService, preflopRangesPath, solverJobService });
+    const rangePath = "3OD-EP/3OD-4.3 vs 3IA-4.2.json";
+    await approveRange(app, rangePath);
+
+    const first = await request(app)
+      .post("/api/parallel-jobs")
+      .send({
+        rangePath,
+        datasetName: "parallel-a",
+        serverIds: ["solver-01", "solver-02"],
+        settings: { uploadEnabled: false },
+        confirmDatasetName: true,
+        queueMode: "queue_next"
+      });
+    const second = await request(app)
+      .post("/api/parallel-jobs")
+      .send({
+        rangePath,
+        datasetName: "parallel-b",
+        serverIds: ["solver-01", "solver-02"],
+        settings: { uploadEnabled: false },
+        confirmDatasetName: true,
+        queueMode: "queue_next"
+      });
+
+    expect(first.status).toBe(201);
+    expect(second.status).toBe(201);
+    expect(commands).toHaveLength(0);
+
+    const reordered = await request(app)
+      .post("/api/parallel-jobs/reorder")
+      .send({ runIds: [second.body.run.id, first.body.run.id] });
+
+    expect(reordered.status).toBe(200);
+    expect(reordered.body.runs.slice(0, 2).map((run: { id: string }) => run.id)).toEqual([
+      second.body.run.id,
+      first.body.run.id
+    ]);
+
+    await solverJobService.reconcileAndStartQueuedJobs();
+
+    expect(commands.filter((command) => command.includes("run_pipeline.py"))).toHaveLength(2);
+    expect(db.getActiveSolverJobForServer("solver-01")?.datasetName).toBe("parallel-b");
+    expect(db.getActiveSolverJobForServer("solver-02")?.datasetName).toBe("parallel-b");
   });
 
   it("rejects job operations while the server is offline", async () => {

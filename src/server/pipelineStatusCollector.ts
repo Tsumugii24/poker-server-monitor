@@ -110,6 +110,12 @@ export function buildPipelineSnapshot(
       totalBatches: null,
       totalTasks: null,
       batchExpr: null,
+      assignedIndices: [],
+      completedIndices: [],
+      failedIndices: [],
+      completedCount: null,
+      failedCount: null,
+      resultPath: null,
       pid: null,
       startedAt: null,
       updatedAt: null,
@@ -141,6 +147,12 @@ export function buildPipelineSnapshot(
     totalBatches: optionalNumber(raw.total_batches),
     totalTasks: optionalNumber(raw.total_tasks),
     batchExpr: optionalString(raw.batch_expr),
+    assignedIndices: optionalNumberArray(raw.assigned_indices),
+    completedIndices: optionalNumberArray(raw.completed_indices),
+    failedIndices: optionalNumberArray(raw.failed_indices),
+    completedCount: optionalNumber(raw.completed_count),
+    failedCount: optionalNumber(raw.failed_count),
+    resultPath: optionalString(raw.result_path),
     pid: optionalNumber(raw.pid),
     startedAt: optionalString(raw.started_at),
     updatedAt: optionalString(raw.updated_at),
@@ -174,6 +186,12 @@ export function buildPipelineFailureSnapshot(
     totalBatches: null,
     totalTasks: null,
     batchExpr: null,
+    assignedIndices: [],
+    completedIndices: [],
+    failedIndices: [],
+    completedCount: null,
+    failedCount: null,
+    resultPath: null,
     pid: null,
     startedAt: null,
     updatedAt: null,
@@ -213,6 +231,13 @@ function optionalString(value: unknown): string | null {
 
 function optionalNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function optionalNumberArray(value: unknown): number[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => typeof item === "number" && Number.isFinite(item) ? Math.trunc(item) : null)
+    .filter((item): item is number => item != null);
 }
 
 function optionalPipelineStatus(value: unknown): PipelineStatusSnapshot["fileStatus"] {

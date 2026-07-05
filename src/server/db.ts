@@ -10,7 +10,18 @@ import type {
   ServerConfig,
   ServerRow
 } from "../shared/types";
-import type { SolverJob, SolverJobEvent, SolverJobSettings, SolverJobStatus } from "../shared/solverJobs";
+import type {
+  ParallelFailurePoolEntry,
+  ParallelFailurePoolStatus,
+  ParallelSolverRun,
+  ParallelSolverRunStatus,
+  ParallelSolverSlice,
+  ParallelSolverSliceStatus,
+  SolverJob,
+  SolverJobEvent,
+  SolverJobSettings,
+  SolverJobStatus
+} from "../shared/solverJobs";
 
 let sqlPromise: Promise<SqlJsStatic> | null = null;
 
@@ -220,8 +231,9 @@ export class MonitorDatabase {
       `INSERT INTO pipeline_status_snapshots (
         id, server_id, collected_at, available, process_alive, file_status, display_status, phase,
         repo_id, dataset_name, scenario, current_batch, total_batches, total_tasks, batch_expr,
+        assigned_indices_json, completed_indices_json, failed_indices_json, completed_count, failed_count, result_path,
         pid, started_at, updated_at, finished_at, command_text, error_text, error_code, error_message
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         snapshot.id,
         snapshot.serverId,
@@ -238,6 +250,12 @@ export class MonitorDatabase {
         snapshot.totalBatches,
         snapshot.totalTasks,
         snapshot.batchExpr,
+        JSON.stringify(snapshot.assignedIndices ?? []),
+        JSON.stringify(snapshot.completedIndices ?? []),
+        JSON.stringify(snapshot.failedIndices ?? []),
+        snapshot.completedCount ?? null,
+        snapshot.failedCount ?? null,
+        snapshot.resultPath ?? null,
         snapshot.pid,
         snapshot.startedAt,
         snapshot.updatedAt,
@@ -342,9 +360,10 @@ export class MonitorDatabase {
       `INSERT INTO solver_jobs (
         id, server_id, range_path, range_name, dataset_name, scenario, repo_id,
         settings_json, command_text, solver_range_text, status, queue_mode,
-        confirm_unstudied, tmux_session, remote_range_path, created_at, updated_at,
-        started_at, finished_at, last_error
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        confirm_unstudied, tmux_session, remote_range_path, remote_result_path,
+        parallel_run_id, parallel_slice_id, assigned_indices_json, source_type,
+        created_at, updated_at, started_at, finished_at, last_error
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         job.id,
         job.serverId,
@@ -361,6 +380,11 @@ export class MonitorDatabase {
         job.confirmUnstudied ? 1 : 0,
         job.tmuxSession,
         job.remoteRangePath,
+        job.remoteResultPath,
+        job.parallelRunId,
+        job.parallelSliceId,
+        JSON.stringify(job.assignedIndices),
+        job.sourceType,
         job.createdAt,
         job.updatedAt,
         job.startedAt,
@@ -443,12 +467,288 @@ export class MonitorDatabase {
   getQueuedSolverJobForServer(serverId: string): SolverJob | null {
     return (
       this.query<SolverJob>(
-        `SELECT * FROM solver_jobs
-         WHERE server_id = ? AND status = 'queued' AND queue_mode = 'queue_next'
-         ORDER BY created_at ASC LIMIT 1`,
+        `SELECT solver_jobs.* FROM solver_jobs
+         LEFT JOIN parallel_solver_runs ON parallel_solver_runs.id = solver_jobs.parallel_run_id
+         WHERE solver_jobs.server_id = ? AND solver_jobs.status = 'queued' AND solver_jobs.queue_mode IN ('queue_next', 'parallel')
+         ORDER BY COALESCE(parallel_solver_runs.queue_order, 999999), solver_jobs.created_at ASC LIMIT 1`,
         [serverId],
         (row) => mapSolverJob(row, this.getLatestPipelineSnapshot(String(row.server_id)))
       )[0] ?? null
+    );
+  }
+
+  insertParallelSolverRun(run: ParallelSolverRun): void {
+    this.database.run(
+      `INSERT INTO parallel_solver_runs (
+        id, source_type, range_path, range_name, dataset_name, scenario, repo_id,
+        settings_json, solver_range_text, status, server_ids_json, total_indices_json,
+        missing_indices_json, queue_order, created_at, updated_at, started_at, finished_at, last_error
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        run.id,
+        run.sourceType,
+        run.rangePath,
+        run.rangeName,
+        run.datasetName,
+        run.scenario,
+        run.repoId,
+        JSON.stringify(run.settings),
+        run.solverRangeText,
+        run.status,
+        JSON.stringify(run.serverIds),
+        JSON.stringify(run.totalIndices),
+        JSON.stringify(run.missingIndices),
+        run.queueOrder,
+        run.createdAt,
+        run.updatedAt,
+        run.startedAt,
+        run.finishedAt,
+        run.lastError
+      ]
+    );
+    this.persist();
+  }
+
+  updateParallelSolverRun(
+    id: string,
+    patch: Partial<Pick<ParallelSolverRun, "status" | "startedAt" | "finishedAt" | "lastError" | "updatedAt">>
+  ): ParallelSolverRun {
+    const current = this.getParallelSolverRun(id);
+    if (!current) throw new Error(`Parallel solver run ${id} not found`);
+    const updatedAt = patch.updatedAt ?? new Date().toISOString();
+    this.database.run(
+      `UPDATE parallel_solver_runs
+       SET status = ?, started_at = ?, finished_at = ?, last_error = ?, updated_at = ?
+       WHERE id = ?`,
+      [
+        patch.status ?? current.status,
+        patch.startedAt !== undefined ? patch.startedAt : current.startedAt,
+        patch.finishedAt !== undefined ? patch.finishedAt : current.finishedAt,
+        patch.lastError !== undefined ? patch.lastError : current.lastError,
+        updatedAt,
+        id
+      ]
+    );
+    this.persist();
+    const updated = this.getParallelSolverRun(id);
+    if (!updated) throw new Error(`Parallel solver run ${id} not found`);
+    return updated;
+  }
+
+  insertParallelSolverSlice(slice: ParallelSolverSlice): void {
+    this.database.run(
+      `INSERT INTO parallel_solver_slices (
+        id, run_id, server_id, job_id, range_expr, assigned_indices_json, assigned_board_names_json,
+        status, completed_count, failed_count, started_at, finished_at, created_at, updated_at, last_error
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        slice.id,
+        slice.runId,
+        slice.serverId,
+        slice.jobId,
+        slice.rangeExpr,
+        JSON.stringify(slice.assignedIndices),
+        JSON.stringify(slice.assignedBoardNames),
+        slice.status,
+        slice.completedCount,
+        slice.failedCount,
+        slice.startedAt,
+        slice.finishedAt,
+        slice.createdAt,
+        slice.updatedAt,
+        slice.lastError
+      ]
+    );
+    this.persist();
+  }
+
+  updateParallelSolverSlice(
+    id: string,
+    patch: Partial<Pick<ParallelSolverSlice, "status" | "jobId" | "completedCount" | "failedCount" | "startedAt" | "finishedAt" | "lastError" | "updatedAt">>
+  ): ParallelSolverSlice {
+    const current = this.getParallelSolverSlice(id);
+    if (!current) throw new Error(`Parallel solver slice ${id} not found`);
+    const updatedAt = patch.updatedAt ?? new Date().toISOString();
+    this.database.run(
+      `UPDATE parallel_solver_slices
+       SET status = ?, job_id = ?, completed_count = ?, failed_count = ?, started_at = ?, finished_at = ?, last_error = ?, updated_at = ?
+       WHERE id = ?`,
+      [
+        patch.status ?? current.status,
+        patch.jobId !== undefined ? patch.jobId : current.jobId,
+        patch.completedCount !== undefined ? patch.completedCount : current.completedCount,
+        patch.failedCount !== undefined ? patch.failedCount : current.failedCount,
+        patch.startedAt !== undefined ? patch.startedAt : current.startedAt,
+        patch.finishedAt !== undefined ? patch.finishedAt : current.finishedAt,
+        patch.lastError !== undefined ? patch.lastError : current.lastError,
+        updatedAt,
+        id
+      ]
+    );
+    this.persist();
+    const updated = this.getParallelSolverSlice(id);
+    if (!updated) throw new Error(`Parallel solver slice ${id} not found`);
+    return updated;
+  }
+
+  getParallelSolverRuns(): ParallelSolverRun[] {
+    return this.query<ParallelSolverRun>(
+      "SELECT * FROM parallel_solver_runs ORDER BY queue_order ASC, created_at DESC",
+      [],
+      (row) => mapParallelSolverRun(row, this.getParallelSolverSlices(String(row.id)))
+    );
+  }
+
+  getParallelSolverRun(id: string): ParallelSolverRun | null {
+    return (
+      this.query<ParallelSolverRun>(
+        "SELECT * FROM parallel_solver_runs WHERE id = ?",
+        [id],
+        (row) => mapParallelSolverRun(row, this.getParallelSolverSlices(String(row.id)))
+      )[0] ?? null
+    );
+  }
+
+  getNextParallelSolverQueueOrder(): number {
+    return (
+      this.query<number>(
+        "SELECT COALESCE(MAX(queue_order), 0) + 1 AS next_order FROM parallel_solver_runs",
+        [],
+        (row) => Number(row.next_order)
+      )[0] ?? 1
+    );
+  }
+
+  updateParallelSolverRunQueueOrder(id: string, queueOrder: number): void {
+    this.database.run(
+      "UPDATE parallel_solver_runs SET queue_order = ?, updated_at = ? WHERE id = ?",
+      [queueOrder, new Date().toISOString(), id]
+    );
+    this.persist();
+  }
+
+  getParallelSolverSlices(runId?: string): ParallelSolverSlice[] {
+    if (runId) {
+      return this.query<ParallelSolverSlice>(
+        "SELECT * FROM parallel_solver_slices WHERE run_id = ? ORDER BY created_at ASC",
+        [runId],
+        (row) => mapParallelSolverSlice(row, row.job_id == null ? null : this.getSolverJob(String(row.job_id)))
+      );
+    }
+    return this.query<ParallelSolverSlice>(
+      "SELECT * FROM parallel_solver_slices ORDER BY created_at ASC",
+      [],
+      (row) => mapParallelSolverSlice(row, row.job_id == null ? null : this.getSolverJob(String(row.job_id)))
+    );
+  }
+
+  getParallelSolverSlice(id: string): ParallelSolverSlice | null {
+    return (
+      this.query<ParallelSolverSlice>(
+        "SELECT * FROM parallel_solver_slices WHERE id = ?",
+        [id],
+        (row) => mapParallelSolverSlice(row, row.job_id == null ? null : this.getSolverJob(String(row.job_id)))
+      )[0] ?? null
+    );
+  }
+
+  getParallelSolverSliceByJobId(jobId: string): ParallelSolverSlice | null {
+    return (
+      this.query<ParallelSolverSlice>(
+        "SELECT * FROM parallel_solver_slices WHERE job_id = ?",
+        [jobId],
+        (row) => mapParallelSolverSlice(row, this.getSolverJob(jobId))
+      )[0] ?? null
+    );
+  }
+
+  upsertParallelFailurePoolEntry(entry: ParallelFailurePoolEntry): void {
+    const existing = this.query<{ id: string; attemptCount: number }>(
+      "SELECT id, attempt_count FROM parallel_failure_pool_entries WHERE range_path = ? AND dataset_name = ? AND board_index = ?",
+      [entry.rangePath, entry.datasetName, entry.boardIndex],
+      (row) => ({ id: String(row.id), attemptCount: Number(row.attempt_count) })
+    )[0];
+    if (existing) {
+      this.database.run(
+        `UPDATE parallel_failure_pool_entries
+         SET repo_id = ?, scenario = ?, board_name = ?, board_key = ?, status = ?, attempt_count = ?,
+             last_run_id = ?, last_slice_id = ?, last_server_id = ?, last_error = ?, updated_at = ?
+         WHERE id = ?`,
+        [
+          entry.repoId,
+          entry.scenario,
+          entry.boardName,
+          entry.boardKey,
+          entry.status,
+          Math.max(existing.attemptCount + 1, entry.attemptCount),
+          entry.lastRunId,
+          entry.lastSliceId,
+          entry.lastServerId,
+          entry.lastError,
+          entry.updatedAt,
+          existing.id
+        ]
+      );
+    } else {
+      this.database.run(
+        `INSERT INTO parallel_failure_pool_entries (
+          id, range_path, dataset_name, repo_id, scenario, board_index, board_name, board_key,
+          status, attempt_count, last_run_id, last_slice_id, last_server_id, last_error, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          entry.id,
+          entry.rangePath,
+          entry.datasetName,
+          entry.repoId,
+          entry.scenario,
+          entry.boardIndex,
+          entry.boardName,
+          entry.boardKey,
+          entry.status,
+          entry.attemptCount,
+          entry.lastRunId,
+          entry.lastSliceId,
+          entry.lastServerId,
+          entry.lastError,
+          entry.createdAt,
+          entry.updatedAt
+        ]
+      );
+    }
+    this.persist();
+  }
+
+  updateParallelFailurePoolEntries(
+    rangePath: string,
+    datasetName: string,
+    indices: number[],
+    status: ParallelFailurePoolStatus
+  ): void {
+    if (indices.length === 0) return;
+    const placeholders = indices.map(() => "?").join(", ");
+    this.database.run(
+      `UPDATE parallel_failure_pool_entries
+       SET status = ?, updated_at = ?
+       WHERE range_path = ? AND dataset_name = ? AND board_index IN (${placeholders})`,
+      [status, new Date().toISOString(), rangePath, datasetName, ...indices]
+    );
+    this.persist();
+  }
+
+  getParallelFailurePoolEntries(rangePath?: string, datasetName?: string): ParallelFailurePoolEntry[] {
+    if (rangePath && datasetName) {
+      return this.query<ParallelFailurePoolEntry>(
+        `SELECT * FROM parallel_failure_pool_entries
+         WHERE range_path = ? AND dataset_name = ?
+         ORDER BY board_index ASC`,
+        [rangePath, datasetName],
+        mapParallelFailurePoolEntry
+      );
+    }
+    return this.query<ParallelFailurePoolEntry>(
+      "SELECT * FROM parallel_failure_pool_entries ORDER BY updated_at DESC, board_index ASC",
+      [],
+      mapParallelFailurePoolEntry
     );
   }
 
@@ -547,6 +847,12 @@ export class MonitorDatabase {
         total_batches INTEGER,
         total_tasks INTEGER,
         batch_expr TEXT,
+        assigned_indices_json TEXT,
+        completed_indices_json TEXT,
+        failed_indices_json TEXT,
+        completed_count INTEGER,
+        failed_count INTEGER,
+        result_path TEXT,
         pid INTEGER,
         started_at TEXT,
         updated_at TEXT,
@@ -587,6 +893,11 @@ export class MonitorDatabase {
         confirm_unstudied INTEGER NOT NULL,
         tmux_session TEXT NOT NULL,
         remote_range_path TEXT NOT NULL,
+        remote_result_path TEXT,
+        parallel_run_id TEXT,
+        parallel_slice_id TEXT,
+        assigned_indices_json TEXT,
+        source_type TEXT NOT NULL DEFAULT 'single',
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         started_at TEXT,
@@ -608,11 +919,145 @@ export class MonitorDatabase {
 
       CREATE INDEX IF NOT EXISTS idx_solver_job_events_job_time
         ON solver_job_events(job_id, created_at);
+
+      CREATE TABLE IF NOT EXISTS parallel_solver_runs (
+        id TEXT PRIMARY KEY,
+        source_type TEXT NOT NULL,
+        range_path TEXT NOT NULL,
+        range_name TEXT NOT NULL,
+        dataset_name TEXT NOT NULL,
+        scenario TEXT NOT NULL,
+        repo_id TEXT NOT NULL,
+        settings_json TEXT NOT NULL,
+        solver_range_text TEXT NOT NULL,
+        status TEXT NOT NULL,
+        server_ids_json TEXT NOT NULL,
+        total_indices_json TEXT NOT NULL,
+        missing_indices_json TEXT NOT NULL,
+        queue_order INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        started_at TEXT,
+        finished_at TEXT,
+        last_error TEXT
+      );
+
+      CREATE TABLE IF NOT EXISTS parallel_solver_slices (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        server_id TEXT NOT NULL,
+        job_id TEXT,
+        range_expr TEXT NOT NULL,
+        assigned_indices_json TEXT NOT NULL,
+        assigned_board_names_json TEXT NOT NULL,
+        status TEXT NOT NULL,
+        completed_count INTEGER NOT NULL,
+        failed_count INTEGER NOT NULL,
+        started_at TEXT,
+        finished_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        last_error TEXT
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_parallel_solver_slices_run
+        ON parallel_solver_slices(run_id, server_id);
+
+      CREATE TABLE IF NOT EXISTS parallel_failure_pool_entries (
+        id TEXT PRIMARY KEY,
+        range_path TEXT NOT NULL,
+        dataset_name TEXT NOT NULL,
+        repo_id TEXT NOT NULL,
+        scenario TEXT NOT NULL,
+        board_index INTEGER NOT NULL,
+        board_name TEXT NOT NULL,
+        board_key TEXT NOT NULL,
+        status TEXT NOT NULL,
+        attempt_count INTEGER NOT NULL,
+        last_run_id TEXT,
+        last_slice_id TEXT,
+        last_server_id TEXT,
+        last_error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_parallel_failure_pool_unique
+        ON parallel_failure_pool_entries(range_path, dataset_name, board_index);
     `);
     this.ensureServerNoteColumn();
     this.ensureLastDatasetNameColumn();
     this.ensureServerSolverColumns();
+    this.ensurePipelineDetailColumns();
+    this.ensureSolverJobParallelColumns();
+    this.ensureParallelSolverRunQueueOrderColumn();
+    this.ensureSolverJobResultPathColumn();
     this.persist();
+  }
+
+  private ensureSolverJobResultPathColumn(): void {
+    const columns = this.query<{ name: string }>(
+      "PRAGMA table_info(solver_jobs)",
+      [],
+      (row) => ({ name: String(row.name) })
+    );
+    if (!columns.some((column) => column.name === "remote_result_path")) {
+      this.database.run("ALTER TABLE solver_jobs ADD COLUMN remote_result_path TEXT");
+    }
+  }
+
+  private ensurePipelineDetailColumns(): void {
+    const columns = this.query<{ name: string }>(
+      "PRAGMA table_info(pipeline_status_snapshots)",
+      [],
+      (row) => ({ name: String(row.name) })
+    );
+    const names = new Set(columns.map((column) => column.name));
+    const additions: Array<[string, string]> = [
+      ["assigned_indices_json", "TEXT"],
+      ["completed_indices_json", "TEXT"],
+      ["failed_indices_json", "TEXT"],
+      ["completed_count", "INTEGER"],
+      ["failed_count", "INTEGER"],
+      ["result_path", "TEXT"]
+    ];
+    for (const [name, type] of additions) {
+      if (!names.has(name)) {
+        this.database.run(`ALTER TABLE pipeline_status_snapshots ADD COLUMN ${name} ${type}`);
+      }
+    }
+  }
+
+  private ensureSolverJobParallelColumns(): void {
+    const columns = this.query<{ name: string }>(
+      "PRAGMA table_info(solver_jobs)",
+      [],
+      (row) => ({ name: String(row.name) })
+    );
+    const names = new Set(columns.map((column) => column.name));
+    const additions: Array<[string, string]> = [
+      ["parallel_run_id", "TEXT"],
+      ["parallel_slice_id", "TEXT"],
+      ["assigned_indices_json", "TEXT"],
+      ["source_type", "TEXT NOT NULL DEFAULT 'single'"]
+    ];
+    for (const [name, type] of additions) {
+      if (!names.has(name)) {
+        this.database.run(`ALTER TABLE solver_jobs ADD COLUMN ${name} ${type}`);
+      }
+    }
+  }
+
+  private ensureParallelSolverRunQueueOrderColumn(): void {
+    const columns = this.query<{ name: string }>(
+      "PRAGMA table_info(parallel_solver_runs)",
+      [],
+      (row) => ({ name: String(row.name) })
+    );
+    if (!columns.some((column) => column.name === "queue_order")) {
+      this.database.run("ALTER TABLE parallel_solver_runs ADD COLUMN queue_order INTEGER NOT NULL DEFAULT 0");
+      this.database.run("UPDATE parallel_solver_runs SET queue_order = CAST(strftime('%s', created_at) AS INTEGER) WHERE queue_order = 0");
+    }
   }
 
   private ensureServerSolverColumns(): void {
@@ -719,12 +1164,115 @@ function mapSolverJob(row: Record<string, SqlValue>, pipeline: PipelineStatusSna
     confirmUnstudied: Number(row.confirm_unstudied) === 1,
     tmuxSession: String(row.tmux_session),
     remoteRangePath: String(row.remote_range_path),
+    remoteResultPath: row.remote_result_path == null || String(row.remote_result_path).trim() === ""
+      ? fallbackRemoteResultPath(String(row.dataset_name), String(row.id))
+      : String(row.remote_result_path),
+    parallelRunId: row.parallel_run_id == null ? null : String(row.parallel_run_id),
+    parallelSliceId: row.parallel_slice_id == null ? null : String(row.parallel_slice_id),
+    assignedIndices: parseNumberArray(row.assigned_indices_json),
+    sourceType: row.source_type === "parallel" || row.source_type === "failure_pool" ? row.source_type : "single",
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
     startedAt: row.started_at == null ? null : String(row.started_at),
     finishedAt: row.finished_at == null ? null : String(row.finished_at),
     lastError: row.last_error == null ? null : String(row.last_error),
     pipeline
+  };
+}
+
+function fallbackRemoteResultPath(datasetName: string, jobId: string): string {
+  return `~/solver/results/${datasetName}/${jobId}`;
+}
+
+function mapParallelSolverRun(row: Record<string, SqlValue>, slices: ParallelSolverSlice[]): ParallelSolverRun {
+  const startedAt = row.started_at == null ? null : String(row.started_at);
+  const finishedAt = row.finished_at == null ? null : String(row.finished_at);
+  const totalBoards = parseNumberArray(row.total_indices_json).length;
+  const completedBoards = uniqueCount(slices.flatMap((slice) =>
+    slice.status === "completed" ? slice.assignedIndices : slice.job?.pipeline?.completedIndices ?? []
+  ));
+  const failedBoards = uniqueCount(slices.flatMap((slice) =>
+    slice.status === "failed" ? slice.assignedIndices : slice.job?.pipeline?.failedIndices ?? []
+  ));
+  const runningBoards = slices
+    .filter((slice) => slice.status === "running")
+    .reduce((sum, slice) => sum + slice.assignedIndices.length, 0);
+  const queuedBoards = slices
+    .filter((slice) => slice.status === "queued")
+    .reduce((sum, slice) => sum + slice.assignedIndices.length, 0);
+  return {
+    id: String(row.id),
+    sourceType: row.source_type === "failure_pool" ? "failure_pool" : "parallel",
+    rangePath: String(row.range_path),
+    rangeName: String(row.range_name),
+    datasetName: String(row.dataset_name),
+    repoId: String(row.repo_id),
+    scenario: String(row.scenario),
+    settings: parseSolverJobSettings(row.settings_json),
+    solverRangeText: String(row.solver_range_text),
+    status: String(row.status) as ParallelSolverRunStatus,
+    queueOrder: Number(row.queue_order ?? 0),
+    serverIds: parseStringArray(row.server_ids_json),
+    totalIndices: parseNumberArray(row.total_indices_json),
+    missingIndices: parseNumberArray(row.missing_indices_json),
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+    startedAt,
+    finishedAt,
+    lastError: row.last_error == null ? null : String(row.last_error),
+    slices,
+    report: {
+      totalBoards,
+      completedBoards,
+      failedBoards,
+      queuedBoards,
+      runningBoards,
+      successRate: totalBoards > 0 ? completedBoards / totalBoards : 1,
+      durationSeconds: durationSeconds(startedAt, finishedAt)
+    }
+  };
+}
+
+function mapParallelSolverSlice(row: Record<string, SqlValue>, job: SolverJob | null): ParallelSolverSlice {
+  const assignedIndices = parseNumberArray(row.assigned_indices_json);
+  return {
+    id: String(row.id),
+    runId: String(row.run_id),
+    serverId: String(row.server_id),
+    jobId: row.job_id == null ? null : String(row.job_id),
+    rangeExpr: String(row.range_expr),
+    assignedIndices,
+    assignedBoardNames: parseStringArray(row.assigned_board_names_json),
+    status: String(row.status) as ParallelSolverSliceStatus,
+    completedCount: Number(row.completed_count),
+    failedCount: Number(row.failed_count),
+    startedAt: row.started_at == null ? null : String(row.started_at),
+    finishedAt: row.finished_at == null ? null : String(row.finished_at),
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+    lastError: row.last_error == null ? null : String(row.last_error),
+    job
+  };
+}
+
+function mapParallelFailurePoolEntry(row: Record<string, SqlValue>): ParallelFailurePoolEntry {
+  return {
+    id: String(row.id),
+    rangePath: String(row.range_path),
+    datasetName: String(row.dataset_name),
+    repoId: String(row.repo_id),
+    scenario: String(row.scenario),
+    boardIndex: Number(row.board_index),
+    boardName: String(row.board_name),
+    boardKey: String(row.board_key),
+    status: String(row.status) as ParallelFailurePoolStatus,
+    attemptCount: Number(row.attempt_count),
+    lastRunId: row.last_run_id == null ? null : String(row.last_run_id),
+    lastSliceId: row.last_slice_id == null ? null : String(row.last_slice_id),
+    lastServerId: row.last_server_id == null ? null : String(row.last_server_id),
+    lastError: row.last_error == null ? null : String(row.last_error),
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at)
   };
 }
 
@@ -792,6 +1340,12 @@ function mapPipelineSnapshot(row: Record<string, SqlValue>): PipelineStatusSnaps
     totalBatches: nullableNumber(row.total_batches),
     totalTasks: nullableNumber(row.total_tasks),
     batchExpr: row.batch_expr == null ? null : String(row.batch_expr),
+    assignedIndices: parseNumberArray(row.assigned_indices_json),
+    completedIndices: parseNumberArray(row.completed_indices_json),
+    failedIndices: parseNumberArray(row.failed_indices_json),
+    completedCount: nullableNumber(row.completed_count),
+    failedCount: nullableNumber(row.failed_count),
+    resultPath: row.result_path == null ? null : String(row.result_path),
     pid: nullableNumber(row.pid),
     startedAt: row.started_at == null ? null : String(row.started_at),
     updatedAt: row.updated_at == null ? null : String(row.updated_at),
@@ -805,4 +1359,40 @@ function mapPipelineSnapshot(row: Record<string, SqlValue>): PipelineStatusSnaps
 
 function nullableNumber(value: SqlValue): number | null {
   return value == null ? null : Number(value);
+}
+
+function parseNumberArray(value: SqlValue): number[] {
+  if (typeof value !== "string" || value.trim() === "") return [];
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map((item) => typeof item === "number" && Number.isFinite(item) ? Math.trunc(item) : null)
+      .filter((item): item is number => item != null);
+  } catch {
+    return [];
+  }
+}
+
+function parseStringArray(value: SqlValue): string[] {
+  if (typeof value !== "string" || value.trim() === "") return [];
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((item): item is string => typeof item === "string");
+  } catch {
+    return [];
+  }
+}
+
+function uniqueCount(values: number[]): number {
+  return new Set(values).size;
+}
+
+function durationSeconds(startedAt: string | null, finishedAt: string | null): number | null {
+  if (!startedAt || !finishedAt) return null;
+  const started = Date.parse(startedAt);
+  const finished = Date.parse(finishedAt);
+  if (!Number.isFinite(started) || !Number.isFinite(finished) || finished < started) return null;
+  return Math.round((finished - started) / 1000);
 }

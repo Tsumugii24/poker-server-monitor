@@ -9,6 +9,8 @@ import {
   FileJson,
   Folder,
   FolderPlus,
+  GripVertical,
+  Lock,
   Pencil,
   Play,
   RefreshCw,
@@ -47,6 +49,11 @@ import {
   DEFAULT_SOLVER_SCENARIO_LIBRARY,
   SOLVER_EXPORT_FORMATS,
   SOLVER_UPLOAD_FORMATS,
+  type ParallelFailurePoolEntry,
+  type ParallelSolverJobPreview,
+  type ParallelSolverJobPreviewRequest,
+  type ParallelSolverJobsResponse,
+  type ParallelSolverRun,
   type SolverExportFormat,
   type SolverDatasetRepoStatus,
   type SolverJob,
@@ -101,8 +108,10 @@ type OfflineServerNotice = {
 };
 
 type PendingDatasetRepoAction = {
-  action: "preview" | "start-now" | "queue-next";
+  action: "preview" | "start-now" | "queue-next" | "parallel-preview" | "parallel-start" | "pool-submit";
   request: SolverJobPreviewRequest;
+  parallelRequest?: ParallelSolverJobPreviewRequest;
+  parallelQueueMode?: "start_now" | "queue_next";
 };
 
 type PendingScenarioLibraryAction = {
@@ -159,6 +168,12 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
   const [servers, setServers] = useState<ServerRow[]>([]);
   const [jobs, setJobs] = useState<SolverJob[]>([]);
   const [jobEvents, setJobEvents] = useState<SolverJobEvent[]>([]);
+  const [parallelRuns, setParallelRuns] = useState<ParallelSolverRun[]>([]);
+  const [failurePool, setFailurePool] = useState<ParallelFailurePoolEntry[]>([]);
+  const [parallelPreview, setParallelPreview] = useState<ParallelSolverJobPreview | null>(null);
+  const [selectedParallelServerIds, setSelectedParallelServerIds] = useState<string[]>([]);
+  const [parallelQueueDragId, setParallelQueueDragId] = useState<string | null>(null);
+  const [activeSolverJobTab, setActiveSolverJobTab] = useState<"single" | "parallel">("single");
   const [selectedServerId, setSelectedServerId] = useState("");
   const [jobSettings, setJobSettings] = useState<SolverJobSettings>(DEFAULT_SOLVER_JOB_SETTINGS);
   const [jobPreview, setJobPreview] = useState<SolverJobPreview | null>(null);
@@ -233,9 +248,19 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
         fetchPreflopJson<OverviewResponse>("/api/overview"),
         fetchPreflopJson<SolverJobsResponse>("/api/jobs")
       ]);
+      const parallelResponse = await fetchPreflopJson<ParallelSolverJobsResponse>("/api/parallel-jobs");
       setServers(overviewResponse.servers);
       setJobs(jobsResponse.jobs);
       setJobEvents(jobsResponse.events);
+      setParallelRuns(parallelResponse.runs);
+      setFailurePool(parallelResponse.failurePool);
+      setSelectedParallelServerIds((current) => {
+        const availableIds = overviewResponse.servers
+          .filter((server) => server.enabled && serverIsOnlineForJob(server))
+          .map((server) => server.id);
+        const retained = current.filter((id) => availableIds.includes(id));
+        return retained.length > 0 ? retained : availableIds;
+      });
       setSelectedServerId((current) =>
         current && overviewResponse.servers.some((server) => server.id === current)
           ? current
@@ -293,6 +318,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
 
   useEffect(() => {
     setJobPreview(null);
+    setParallelPreview(null);
     setSelectedJobScenario("");
     setJobDatasetName("");
     setJobDatasetNameTouched(false);
@@ -737,6 +763,182 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
     };
   };
 
+  const parallelJobRequest = (scenarioOverride = selectedJobScenario): ParallelSolverJobPreviewRequest | null => {
+    if (!selectedRangePathForJob) return null;
+    return {
+      rangePath: selectedRangePathForJob,
+      scenario: scenarioOverride || undefined,
+      datasetName: jobDatasetNameTouched ? jobDatasetName.trim() || undefined : undefined,
+      serverIds: selectedParallelServerIds,
+      settings: jobSettings,
+      confirmUnstudied
+    };
+  };
+
+  const datasetGateRequestForParallel = (requestPayload: ParallelSolverJobPreviewRequest): SolverJobPreviewRequest | null => {
+    const serverId = requestPayload.serverIds?.[0] ?? selectedParallelServerIds[0] ?? selectedServerId;
+    if (!serverId) return null;
+    return {
+      serverId,
+      rangePath: requestPayload.rangePath,
+      scenario: requestPayload.scenario,
+      datasetName: requestPayload.datasetName,
+      settings: requestPayload.settings,
+      confirmUnstudied: requestPayload.confirmUnstudied
+    };
+  };
+
+  const previewParallelJob = async () => {
+    const requestPayload = parallelJobRequest();
+    if (!requestPayload) return;
+    const gateRequest = datasetGateRequestForParallel(requestPayload);
+    if (!gateRequest) return;
+    setJobBusy("parallel-preview");
+    setJobError(null);
+    try {
+      const repoStatus = await checkDatasetRepoForAction("parallel-preview", gateRequest);
+      if (!repoStatus) {
+        setPendingDatasetRepoAction({ action: "parallel-preview", request: gateRequest, parallelRequest: requestPayload });
+        return;
+      }
+      const preview = await fetchPreflopJson<ParallelSolverJobPreview>("/api/parallel-jobs/preview", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...requestPayload, datasetName: repoStatus.datasetName })
+      });
+      setParallelPreview(preview);
+      setJobDatasetName(preview.datasetName);
+    } catch (caught) {
+      setJobError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setJobBusy(null);
+    }
+  };
+
+  const createParallelJob = async (queueMode: "start_now" | "queue_next") => {
+    const requestPayload = parallelJobRequest();
+    if (!requestPayload) return;
+    const gateRequest = datasetGateRequestForParallel(requestPayload);
+    if (!gateRequest) return;
+    setJobBusy("parallel-start");
+    setJobError(null);
+    try {
+      const repoStatus = await checkDatasetRepoForAction("parallel-start", gateRequest);
+      if (!repoStatus) {
+        setPendingDatasetRepoAction({
+          action: "parallel-start",
+          request: gateRequest,
+          parallelRequest: requestPayload,
+          parallelQueueMode: queueMode
+        });
+        return;
+      }
+      await createParallelJobAfterRepoReady({ ...requestPayload, datasetName: repoStatus.datasetName }, queueMode);
+    } catch (caught) {
+      setJobError(caught instanceof Error ? caught.message : String(caught));
+      await loadJobContext();
+      await loadTree();
+    } finally {
+      setJobBusy(null);
+    }
+  };
+
+  const createParallelJobAfterRepoReady = async (
+    requestPayload: ParallelSolverJobPreviewRequest,
+    queueMode: "start_now" | "queue_next"
+  ) => {
+    await fetchPreflopJson<{ run: ParallelSolverRun }>("/api/parallel-jobs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...requestPayload, confirmDatasetName: true, queueMode })
+    });
+    setParallelPreview(null);
+    await loadJobContext();
+    await loadTree();
+  };
+
+  const submitFailurePool = async (queueMode: "start_now" | "queue_next") => {
+    const requestPayload = parallelJobRequest();
+    if (!requestPayload) return;
+    const gateRequest = datasetGateRequestForParallel(requestPayload);
+    if (!gateRequest) return;
+    setJobBusy("pool-submit");
+    setJobError(null);
+    try {
+      const repoStatus = await checkDatasetRepoForAction("pool-submit", gateRequest);
+      if (!repoStatus) {
+        setPendingDatasetRepoAction({
+          action: "pool-submit",
+          request: gateRequest,
+          parallelRequest: requestPayload,
+          parallelQueueMode: queueMode
+        });
+        return;
+      }
+      await fetchPreflopJson<{ run: ParallelSolverRun }>("/api/parallel-jobs/failure-pool/submit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...requestPayload, datasetName: repoStatus.datasetName, confirmDatasetName: true, queueMode })
+      });
+      await loadJobContext();
+      await loadTree();
+    } catch (caught) {
+      setJobError(caught instanceof Error ? caught.message : String(caught));
+      await loadJobContext();
+      await loadTree();
+    } finally {
+      setJobBusy(null);
+    }
+  };
+
+  const reorderParallelQueue = async (targetRunId: string) => {
+    const draggedRunId = parallelQueueDragId;
+    setParallelQueueDragId(null);
+    if (!draggedRunId || draggedRunId === targetRunId) return;
+    const movableRunIds = parallelQueueRuns(parallelRuns)
+      .filter((run) => run.status === "queued" && !parallelRunIsLocked(run))
+      .map((run) => run.id);
+    const fromIndex = movableRunIds.indexOf(draggedRunId);
+    const toIndex = movableRunIds.indexOf(targetRunId);
+    if (fromIndex < 0 || toIndex < 0) return;
+    const [moved] = movableRunIds.splice(fromIndex, 1);
+    if (!moved) return;
+    movableRunIds.splice(toIndex, 0, moved);
+    setJobBusy("parallel-reorder");
+    setJobError(null);
+    try {
+      const response = await fetchPreflopJson<ParallelSolverJobsResponse>("/api/parallel-jobs/reorder", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ runIds: movableRunIds })
+      });
+      setParallelRuns(response.runs);
+      setFailurePool(response.failurePool);
+    } catch (caught) {
+      setJobError(caught instanceof Error ? caught.message : String(caught));
+      await loadJobContext();
+    } finally {
+      setJobBusy(null);
+    }
+  };
+
+  const cancelParallelRun = async (run: ParallelSolverRun) => {
+    setJobBusy(`parallel-cancel:${run.id}`);
+    setJobError(null);
+    try {
+      await fetchPreflopJson<{ run: ParallelSolverRun }>(`/api/parallel-jobs/${encodeURIComponent(run.id)}/cancel`, {
+        method: "POST"
+      });
+      await loadJobContext();
+      await loadTree();
+    } catch (caught) {
+      setJobError(caught instanceof Error ? caught.message : String(caught));
+      await loadJobContext();
+    } finally {
+      setJobBusy(null);
+    }
+  };
+
   const checkDatasetRepoForAction = async (
     action: PendingDatasetRepoAction["action"],
     requestPayload: SolverJobPreviewRequest
@@ -775,6 +977,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
   const changeJobScenario = (scenario: SolverScenario | "") => {
     setSelectedJobScenario(scenario);
     setJobPreview(null);
+    setParallelPreview(null);
     if (!jobDatasetNameTouched) setJobDatasetName("");
     clearDatasetRepoGate();
     if (selectedRangePathForJob && selectedServerId) {
@@ -855,6 +1058,38 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
       setPendingDatasetRepoAction(null);
       setDatasetRepoConfirmed(false);
       if (pending.action === "preview") return;
+      if (pending.action === "parallel-preview" && pending.parallelRequest) {
+        const preview = await fetchPreflopJson<ParallelSolverJobPreview>("/api/parallel-jobs/preview", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ...pending.parallelRequest, datasetName: ensured.datasetName })
+        });
+        setParallelPreview(preview);
+        return;
+      }
+      if (pending.action === "parallel-start" && pending.parallelRequest) {
+        await createParallelJobAfterRepoReady(
+          { ...pending.parallelRequest, datasetName: ensured.datasetName },
+          pending.parallelQueueMode ?? "start_now"
+        );
+        return;
+      }
+      if (pending.action === "pool-submit" && pending.parallelRequest) {
+        await fetchPreflopJson<{ run: ParallelSolverRun }>("/api/parallel-jobs/failure-pool/submit", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            ...pending.parallelRequest,
+            datasetName: ensured.datasetName,
+            confirmDatasetName: true,
+            queueMode: pending.parallelQueueMode ?? "queue_next"
+          })
+        });
+        await loadJobContext();
+        await loadTree();
+        return;
+      }
+      if (pending.action !== "start-now" && pending.action !== "queue-next") return;
       await createSolverJobAfterRepoReady(
         pending.action === "start-now" ? "manual" : "queue_next",
         pending.action === "start-now",
@@ -1562,6 +1797,11 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
           servers={servers}
           jobs={jobs}
           events={jobEvents}
+          parallelRuns={parallelRuns}
+          failurePool={failurePool}
+          parallelPreview={parallelPreview}
+          selectedParallelServerIds={selectedParallelServerIds}
+          activeTab={activeSolverJobTab}
           selectedServerId={selectedServerId}
           selectedRangePath={selectedRangePathForJob}
           selectedRangeName={selectedRangeNameForJob}
@@ -1586,15 +1826,27 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
             setJobPreview(null);
             clearDatasetRepoGate();
           }}
+          onParallelServerToggle={(serverId) => {
+            setSelectedParallelServerIds((current) =>
+              current.includes(serverId)
+                ? current.filter((id) => id !== serverId)
+                : [...current, serverId]
+            );
+            setParallelPreview(null);
+            clearDatasetRepoGate();
+          }}
+          onTabChange={setActiveSolverJobTab}
           onDatasetNameChange={(datasetName) => {
             setJobDatasetName(datasetName);
             setJobDatasetNameTouched(Boolean(datasetName.trim()));
             setJobPreview(null);
+            setParallelPreview(null);
             clearDatasetRepoGate();
           }}
           onSettingsChange={(patch) => {
             setJobSettings((current) => ({ ...current, ...patch }));
             setJobPreview(null);
+            setParallelPreview(null);
             clearDatasetRepoGate();
           }}
           onConfirmUnstudiedChange={(checked) => {
@@ -1616,6 +1868,15 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
           onPreview={() => void previewJob()}
           onStartNow={() => void createSolverJob("manual", true)}
           onQueueNext={() => void createSolverJob("queue_next", false)}
+          onParallelPreview={() => void previewParallelJob()}
+          onParallelStart={() => void createParallelJob("start_now")}
+          onParallelQueueNext={() => void createParallelJob("queue_next")}
+          onFailurePoolSubmit={() => void submitFailurePool("queue_next")}
+          onParallelCancel={(run) => void cancelParallelRun(run)}
+          parallelQueueDragId={parallelQueueDragId}
+          onParallelQueueDragStart={setParallelQueueDragId}
+          onParallelQueueDragEnd={() => setParallelQueueDragId(null)}
+          onParallelQueueDrop={(runId) => void reorderParallelQueue(runId)}
           onJobAction={(job, action) => void runJobAction(job, action)}
         />
       </section>
@@ -1877,6 +2138,11 @@ function SolverJobPanel({
   servers,
   jobs,
   events,
+  parallelRuns,
+  failurePool,
+  parallelPreview,
+  selectedParallelServerIds,
+  activeTab,
   selectedServerId,
   selectedRangePath,
   selectedRangeName,
@@ -1897,6 +2163,8 @@ function SolverJobPanel({
   error,
   onRefresh,
   onServerChange,
+  onParallelServerToggle,
+  onTabChange,
   onDatasetNameChange,
   onSettingsChange,
   onScenarioChange,
@@ -1911,11 +2179,25 @@ function SolverJobPanel({
   onPreview,
   onStartNow,
   onQueueNext,
+  onParallelPreview,
+  onParallelStart,
+  onParallelQueueNext,
+  onFailurePoolSubmit,
+  onParallelCancel,
+  parallelQueueDragId,
+  onParallelQueueDragStart,
+  onParallelQueueDragEnd,
+  onParallelQueueDrop,
   onJobAction
 }: {
   servers: ServerRow[];
   jobs: SolverJob[];
   events: SolverJobEvent[];
+  parallelRuns: ParallelSolverRun[];
+  failurePool: ParallelFailurePoolEntry[];
+  parallelPreview: ParallelSolverJobPreview | null;
+  selectedParallelServerIds: string[];
+  activeTab: "single" | "parallel";
   selectedServerId: string;
   selectedRangePath: string;
   selectedRangeName: string;
@@ -1936,6 +2218,8 @@ function SolverJobPanel({
   error: string | null;
   onRefresh: () => void;
   onServerChange: (serverId: string) => void;
+  onParallelServerToggle: (serverId: string) => void;
+  onTabChange: (tab: "single" | "parallel") => void;
   onDatasetNameChange: (datasetName: string) => void;
   onSettingsChange: (patch: Partial<SolverJobSettings>) => void;
   onScenarioChange: (scenario: SolverScenario | "") => void;
@@ -1950,6 +2234,15 @@ function SolverJobPanel({
   onPreview: () => void;
   onStartNow: () => void;
   onQueueNext: () => void;
+  onParallelPreview: () => void;
+  onParallelStart: () => void;
+  onParallelQueueNext: () => void;
+  onFailurePoolSubmit: () => void;
+  onParallelCancel: (run: ParallelSolverRun) => void;
+  parallelQueueDragId: string | null;
+  onParallelQueueDragStart: (runId: string) => void;
+  onParallelQueueDragEnd: () => void;
+  onParallelQueueDrop: (runId: string) => void;
   onJobAction: (job: SolverJob, action: SolverJobAction) => void;
 }) {
   const selectedServer = servers.find((server) => server.id === selectedServerId) ?? null;
@@ -1985,6 +2278,16 @@ function SolverJobPanel({
 
       {error ? <div className="notice error compact-notice">{error}</div> : null}
 
+      <div className="solver-job-tabs" role="tablist" aria-label="Solver job mode">
+        <button className={activeTab === "single" ? "active" : ""} onClick={() => onTabChange("single")}>
+          Job System
+        </button>
+        <button className={activeTab === "parallel" ? "active" : ""} onClick={() => onTabChange("parallel")}>
+          Parallel Job System
+        </button>
+      </div>
+
+      {activeTab === "single" ? (
       <div className="solver-job-grid">
         <div className="solver-job-submit">
           <div className="solver-job-selected-range">
@@ -2216,6 +2519,10 @@ function SolverJobPanel({
                   <dt>Submitted Range</dt>
                   <dd>{preview.remoteRangePath}</dd>
                 </div>
+                <div>
+                  <dt>Result Path</dt>
+                  <dd>{preview.remoteResultPath}</dd>
+                </div>
               </dl>
               <pre>{preview.commandPreview}</pre>
             </div>
@@ -2256,6 +2563,36 @@ function SolverJobPanel({
           />
         </div>
       </div>
+      ) : (
+        <ParallelSolverJobPanel
+          servers={servers}
+          selectedServerIds={selectedParallelServerIds}
+          selectedRangePath={selectedRangePath}
+          selectedRangeName={selectedRangeName}
+          selectedRangeLearned={selectedRangeLearned}
+          settings={settings}
+          preview={parallelPreview}
+          datasetName={datasetName}
+          selectedScenario={selectedScenario}
+          scenarioLibrary={scenarioLibrary}
+          runs={parallelRuns}
+          failurePool={failurePool}
+          busy={busy}
+          onServerToggle={onParallelServerToggle}
+          onDatasetNameChange={onDatasetNameChange}
+          onSettingsChange={onSettingsChange}
+          onScenarioChange={onScenarioChange}
+          onPreview={onParallelPreview}
+          onStart={onParallelStart}
+          onQueueNext={onParallelQueueNext}
+          onFailurePoolSubmit={onFailurePoolSubmit}
+          onCancelRun={onParallelCancel}
+          queueDragId={parallelQueueDragId}
+          onQueueDragStart={onParallelQueueDragStart}
+          onQueueDragEnd={onParallelQueueDragEnd}
+          onQueueDrop={onParallelQueueDrop}
+        />
+      )}
     </section>
   );
 }
@@ -2403,6 +2740,378 @@ function ScenarioLibraryPanel({
         </div>
       ) : (
         <pre className="solver-scenario-text">{selectedScenario ? formatScenarioLibraryText(selectedScenario) : ""}</pre>
+      )}
+    </section>
+  );
+}
+
+function ParallelSolverJobPanel({
+  servers,
+  selectedServerIds,
+  selectedRangePath,
+  selectedRangeName,
+  selectedRangeLearned,
+  settings,
+  preview,
+  datasetName,
+  selectedScenario,
+  scenarioLibrary,
+  runs,
+  failurePool,
+  busy,
+  onServerToggle,
+  onDatasetNameChange,
+  onSettingsChange,
+  onScenarioChange,
+  onPreview,
+  onStart,
+  onQueueNext,
+  onFailurePoolSubmit,
+  onCancelRun,
+  queueDragId,
+  onQueueDragStart,
+  onQueueDragEnd,
+  onQueueDrop
+}: {
+  servers: ServerRow[];
+  selectedServerIds: string[];
+  selectedRangePath: string;
+  selectedRangeName: string;
+  selectedRangeLearned: boolean;
+  settings: SolverJobSettings;
+  preview: ParallelSolverJobPreview | null;
+  datasetName: string;
+  selectedScenario: SolverScenario | "";
+  scenarioLibrary: SolverScenarioLibraryItem[];
+  runs: ParallelSolverRun[];
+  failurePool: ParallelFailurePoolEntry[];
+  busy: string | null;
+  onServerToggle: (serverId: string) => void;
+  onDatasetNameChange: (datasetName: string) => void;
+  onSettingsChange: (patch: Partial<SolverJobSettings>) => void;
+  onScenarioChange: (scenario: SolverScenario | "") => void;
+  onPreview: () => void;
+  onStart: () => void;
+  onQueueNext: () => void;
+  onFailurePoolSubmit: () => void;
+  onCancelRun: (run: ParallelSolverRun) => void;
+  queueDragId: string | null;
+  onQueueDragStart: (runId: string) => void;
+  onQueueDragEnd: () => void;
+  onQueueDrop: (runId: string) => void;
+}) {
+  const availableServers = servers.filter((server) => server.enabled && serverIsOnlineForJob(server));
+  const selectedServers = availableServers.filter((server) => selectedServerIds.includes(server.id));
+  const activeDatasetName = preview?.datasetName ?? datasetName.trim();
+  const visibleFailurePool = failurePool.filter((entry) =>
+    entry.rangePath === selectedRangePath &&
+    (!activeDatasetName || entry.datasetName === activeDatasetName) &&
+    (entry.status === "pending" || entry.status === "failed")
+  );
+  const submitDisabled = !selectedRangePath || !selectedRangeLearned || selectedServers.length === 0 || busy != null;
+  const latestRuns = runs
+    .slice()
+    .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))
+    .slice(0, 6);
+
+  return (
+    <div className="parallel-job-shell">
+      <ParallelQueueBoard
+        runs={runs}
+        busy={busy}
+        dragId={queueDragId}
+        onDragStart={onQueueDragStart}
+        onDragEnd={onQueueDragEnd}
+        onDrop={onQueueDrop}
+      />
+
+    <div className="parallel-job-grid">
+      <div className="parallel-job-submit">
+        <div className="solver-job-selected-range">
+          <span>Selected Range</span>
+          <strong>{selectedRangeName || "None"}</strong>
+          <em className={selectedRangeLearned ? "studied" : "unstudied"}>
+            {selectedRangePath ? (selectedRangeLearned ? "Approved" : "Needs approval") : "No file selected"}
+          </em>
+        </div>
+
+        <div className="parallel-server-strip">
+          <div className="parallel-section-title">
+            <strong>Available Servers</strong>
+            <span>{selectedServers.length}/{availableServers.length} selected</span>
+          </div>
+          <div className="parallel-server-tags">
+            {availableServers.length === 0 ? <span className="text-muted">No online enabled servers.</span> : null}
+            {availableServers.map((server) => {
+              const selected = selectedServerIds.includes(server.id);
+              return (
+                <button
+                  key={server.id}
+                  className={`parallel-server-tag ${selected ? "selected" : ""}`}
+                  onClick={() => onServerToggle(server.id)}
+                  disabled={busy != null}
+                >
+                  <span>{server.id}</span>
+                  <ConnectionBadge status={server.latest?.connectionStatus ?? "unknown"} />
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        <div className="solver-job-form-grid parallel-config-grid">
+          <label className="solver-job-field wide">
+            <span>Dataset</span>
+            <input value={datasetName} placeholder="Auto from range" onChange={(event) => onDatasetNameChange(event.target.value)} />
+          </label>
+          <label className="solver-job-field wide">
+            <span>Scenario</span>
+            <select value={selectedScenario} onChange={(event) => onScenarioChange(event.target.value as SolverScenario | "")}>
+              <option value="">Auto</option>
+              {scenarioLibrary.map((scenario) => <option key={scenario.id} value={scenario.id}>{scenario.id}</option>)}
+            </select>
+          </label>
+          <label className="solver-job-field">
+            <span>Batch Size</span>
+            <input
+              type="number"
+              min="1"
+              value={settings.batchSize}
+              onChange={(event) => onSettingsChange({ batchSize: positiveNumberFromInput(event.target.value, settings.batchSize) })}
+            />
+          </label>
+          <label className="solver-job-field">
+            <span>Threads</span>
+            <input
+              type="number"
+              value={settings.threadNum}
+              onChange={(event) => onSettingsChange({ threadNum: integerFromInput(event.target.value, settings.threadNum) })}
+            />
+          </label>
+          <label className="solver-job-field">
+            <span>Max Iteration</span>
+            <input
+              type="number"
+              min="1"
+              value={settings.maxIteration}
+              onChange={(event) => onSettingsChange({ maxIteration: positiveNumberFromInput(event.target.value, settings.maxIteration) })}
+            />
+          </label>
+          <label className="solver-job-field">
+            <span>Upload</span>
+            <select
+              value={settings.uploadEnabled ? "on" : "off"}
+              onChange={(event) => onSettingsChange({ uploadEnabled: event.target.value === "on" })}
+            >
+              <option value="on">Enabled</option>
+              <option value="off">Disabled</option>
+            </select>
+          </label>
+        </div>
+
+        <div className="solver-job-actions">
+          <button className="icon-button compact" onClick={onPreview} disabled={submitDisabled}>
+            <Search size={15} />
+            Preview Distribution
+          </button>
+          <button className="icon-button compact primary" onClick={onStart} disabled={submitDisabled || (preview != null && preview.missingIndices.length === 0)}>
+            <Play size={15} />
+            Start Parallel
+          </button>
+          <button className="icon-button compact" onClick={onQueueNext} disabled={submitDisabled || (preview != null && preview.missingIndices.length === 0)}>
+            <Send size={15} />
+            Queue Next
+          </button>
+          <button className="icon-button compact" onClick={onFailurePoolSubmit} disabled={submitDisabled || visibleFailurePool.length === 0}>
+            <RotateCcw size={15} />
+            Queue Failure Pool
+          </button>
+        </div>
+
+        {!selectedRangeLearned && selectedRangePath ? (
+          <div className="notice warning compact-notice">Approve this range before creating parallel jobs.</div>
+        ) : null}
+
+        {preview ? (
+          <div className="parallel-preview-panel">
+            <div className="parallel-preview-summary">
+              <div><span>Repo</span><strong>{preview.repoId}</strong></div>
+              <div><span>Missing</span><strong>{preview.missingIndices.length}</strong></div>
+              <div><span>Servers</span><strong>{preview.allocations.filter((item) => item.indices.length > 0).length}</strong></div>
+              <div><span>Repo Status</span><strong>{preview.repoExists ? "Exists" : "Missing"}</strong></div>
+            </div>
+            <div className="parallel-allocation-list">
+              {preview.allocations.map((allocation) => (
+                <article key={allocation.server.id} className="parallel-allocation-row">
+                  <div>
+                    <strong>{allocation.server.id}</strong>
+                    <span>{allocation.indices.length} boards</span>
+                  </div>
+                  <code>{allocation.rangeExpr || "-"}</code>
+                </article>
+              ))}
+            </div>
+          </div>
+        ) : null}
+      </div>
+
+      <div className="parallel-job-report-panel">
+        <div className="parallel-report-block">
+          <div className="parallel-section-title">
+            <strong>Failure Pool</strong>
+            <span>{visibleFailurePool.length}</span>
+          </div>
+          {visibleFailurePool.length === 0 ? (
+            <p className="solver-job-empty">No pending failed boards for this range.</p>
+          ) : (
+            <div className="failure-pool-list">
+              {visibleFailurePool.slice(0, 24).map((entry) => (
+                <span key={entry.id} className={`failure-pool-chip ${entry.status}`}>
+                  {entry.boardIndex}. {entry.boardName}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="parallel-report-block">
+          <div className="parallel-section-title">
+            <strong>Parallel Reports</strong>
+            <span>{runs.length}</span>
+          </div>
+          {latestRuns.length === 0 ? <p className="solver-job-empty">No parallel runs yet.</p> : null}
+          {latestRuns.map((run) => (
+            <article key={run.id} className={`parallel-run-card ${run.status}`}>
+              <div className="parallel-run-head">
+                <div>
+                  <strong>{run.datasetName}</strong>
+                  <span>{run.sourceType === "failure_pool" ? "Failure pool retry" : "Parallel run"} · {formatShortDateTime(run.createdAt)}</span>
+                </div>
+                <em className={`solver-job-status ${run.status}`}>{formatParallelRunStatus(run.status)}</em>
+              </div>
+              <div className="parallel-run-metrics">
+                <div><span>Total</span><strong>{run.report.totalBoards}</strong></div>
+                <div><span>Done</span><strong>{run.report.completedBoards}</strong></div>
+                <div><span>Failed</span><strong>{run.report.failedBoards}</strong></div>
+                <div><span>Success</span><strong>{formatRatio(run.report.successRate)}</strong></div>
+                <div><span>Duration</span><strong>{formatDuration(run.report.durationSeconds)}</strong></div>
+              </div>
+              <div className="parallel-slice-list">
+                {run.slices.map((slice) => (
+                  <div key={slice.id} className={`parallel-slice-row ${slice.status}`}>
+                    <span>{slice.serverId}</span>
+                    <strong>{slice.assignedIndices.length}</strong>
+                    <em>{slice.status}</em>
+                    <small>{slice.rangeExpr}</small>
+                  </div>
+                ))}
+              </div>
+              {["queued", "running"].includes(run.status) ? (
+                <button className="icon-button compact danger" onClick={() => onCancelRun(run)} disabled={busy === `parallel-cancel:${run.id}`}>
+                  <X size={14} />
+                  Cancel
+                </button>
+              ) : null}
+            </article>
+          ))}
+        </div>
+      </div>
+    </div>
+    </div>
+  );
+}
+
+function ParallelQueueBoard({
+  runs,
+  busy,
+  dragId,
+  onDragStart,
+  onDragEnd,
+  onDrop
+}: {
+  runs: ParallelSolverRun[];
+  busy: string | null;
+  dragId: string | null;
+  onDragStart: (runId: string) => void;
+  onDragEnd: () => void;
+  onDrop: (runId: string) => void;
+}) {
+  const queueRuns = parallelQueueRuns(runs);
+  const movableCount = queueRuns.filter((run) => run.status === "queued" && !parallelRunIsLocked(run)).length;
+
+  return (
+    <section className="parallel-queue-board">
+      <div className="parallel-section-title">
+        <strong>Parallel Queue</strong>
+        <span>{queueRuns.length} active / queued · {movableCount} movable</span>
+      </div>
+      {queueRuns.length === 0 ? (
+        <p className="solver-job-empty">No active or queued parallel run.</p>
+      ) : (
+        <div className="parallel-queue-lane" aria-label="Parallel queue order">
+          {queueRuns.map((run, index) => {
+            const locked = parallelRunIsLocked(run);
+            const movable = run.status === "queued" && !locked && busy == null;
+            const isDragging = dragId === run.id;
+            const canDrop = movable && dragId != null && dragId !== run.id;
+            const runningServers = run.slices.filter((slice) => slice.status === "running").map((slice) => slice.serverId);
+            const serverText = runningServers.length > 0
+              ? `${runningServers.length} running: ${runningServers.join(", ")}`
+              : `${run.serverIds.length} server${run.serverIds.length === 1 ? "" : "s"}`;
+            return (
+              <article
+                key={run.id}
+                className={[
+                  "parallel-queue-item",
+                  run.status,
+                  run.sourceType,
+                  locked ? "locked" : "",
+                  movable ? "movable" : "",
+                  isDragging ? "dragging" : ""
+                ].filter(Boolean).join(" ")}
+                draggable={movable}
+                onDragStart={(event) => {
+                  if (!movable) return;
+                  event.dataTransfer.effectAllowed = "move";
+                  event.dataTransfer.setData("text/plain", run.id);
+                  onDragStart(run.id);
+                }}
+                onDragOver={(event) => {
+                  if (!canDrop) return;
+                  event.preventDefault();
+                  event.dataTransfer.dropEffect = "move";
+                }}
+                onDrop={(event) => {
+                  if (!canDrop) return;
+                  event.preventDefault();
+                  onDrop(run.id);
+                }}
+                onDragEnd={onDragEnd}
+              >
+                <div className="parallel-queue-rank">{index + 1}</div>
+                <div className="parallel-queue-marker" aria-hidden="true" />
+                <div className="parallel-queue-copy">
+                  <strong>{run.datasetName}</strong>
+                  <span>
+                    {run.sourceType === "failure_pool" ? "Pool retry" : "Parallel run"} · {run.report.totalBoards} boards · {serverText}
+                  </span>
+                </div>
+                <div className="parallel-queue-state">
+                  <em className={`solver-job-status ${run.status}`}>{formatParallelRunStatus(run.status)}</em>
+                  {locked ? (
+                    <span className="parallel-queue-lock" title="Locked while any server is running this run">
+                      <Lock size={12} />
+                    </span>
+                  ) : (
+                    <span className="parallel-queue-grip" title={movable ? "Drag to reorder" : "Queued run can be moved after refresh"}>
+                      <GripVertical size={14} />
+                    </span>
+                  )}
+                </div>
+              </article>
+            );
+          })}
+        </div>
       )}
     </section>
   );
@@ -2814,6 +3523,47 @@ function latestJobEvents(events: SolverJobEvent[]): Map<string, SolverJobEvent> 
 
 function formatJobStatus(status: SolverJob["status"]): string {
   return status.replace(/_/g, " ");
+}
+
+function formatParallelRunStatus(status: ParallelSolverRun["status"]): string {
+  return status.replace(/_/g, " ");
+}
+
+function parallelQueueRuns(runs: ParallelSolverRun[]): ParallelSolverRun[] {
+  return runs
+    .filter((run) => run.status === "queued" || run.status === "running")
+    .sort(compareParallelRunQueue);
+}
+
+function compareParallelRunQueue(left: ParallelSolverRun, right: ParallelSolverRun): number {
+  const orderDelta = left.queueOrder - right.queueOrder;
+  if (orderDelta !== 0) return orderDelta;
+  return Date.parse(left.createdAt) - Date.parse(right.createdAt);
+}
+
+function parallelRunIsLocked(run: ParallelSolverRun): boolean {
+  return run.slices.some((slice) =>
+    slice.status === "running" ||
+    slice.job?.status === "deploying" ||
+    slice.job?.status === "running" ||
+    slice.job?.status === "stopping"
+  );
+}
+
+function formatRatio(value: number): string {
+  if (!Number.isFinite(value)) return "-";
+  return `${Math.round(value * 100)}%`;
+}
+
+function formatDuration(value: number | null): string {
+  if (value == null || !Number.isFinite(value)) return "-";
+  if (value < 60) return `${value}s`;
+  const minutes = Math.floor(value / 60);
+  const seconds = value % 60;
+  if (minutes < 60) return seconds > 0 ? `${minutes}m ${seconds}s` : `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  return remainingMinutes > 0 ? `${hours}h ${remainingMinutes}m` : `${hours}h`;
 }
 
 function formatShortDateTime(value: string): string {

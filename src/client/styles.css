@@ -5519,6 +5519,445 @@ td .port-value {
   gap: 6px;
 }
 
+.solver-job-tabs {
+  display: inline-flex;
+  width: fit-content;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 3px;
+  background: var(--bg-elevated);
+}
+
+.solver-job-tabs button {
+  min-height: 30px;
+  border: 0;
+  border-radius: calc(var(--radius-sm) - 2px);
+  padding: 0 12px;
+  color: var(--text-tertiary);
+  background: transparent;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 850;
+  cursor: pointer;
+}
+
+.solver-job-tabs button.active {
+  color: var(--accent);
+  background: var(--accent-subtle);
+}
+
+.parallel-job-shell {
+  display: grid;
+  gap: 14px;
+}
+
+.parallel-queue-board {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+  background: var(--bg-elevated);
+}
+
+.parallel-queue-lane {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 9px;
+}
+
+.parallel-queue-item {
+  position: relative;
+  display: grid;
+  grid-template-columns: 30px 4px minmax(0, 1fr) auto;
+  gap: 9px;
+  align-items: center;
+  min-width: 0;
+  min-height: 74px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px;
+  background: var(--bg-base);
+  transition: border-color 0.16s ease, box-shadow 0.16s ease, transform 0.16s ease, opacity 0.16s ease;
+}
+
+.parallel-queue-item.queued {
+  border-color: color-mix(in srgb, var(--yellow) 30%, var(--border));
+}
+
+.parallel-queue-item.running {
+  border-color: color-mix(in srgb, var(--green) 38%, var(--border));
+  background: color-mix(in srgb, var(--green) 5%, var(--bg-base));
+}
+
+.parallel-queue-item.failure_pool {
+  border-color: color-mix(in srgb, var(--red) 26%, var(--border));
+}
+
+.parallel-queue-item.movable {
+  cursor: grab;
+}
+
+.parallel-queue-item.movable:hover {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+  box-shadow: 0 10px 24px color-mix(in srgb, var(--accent) 9%, transparent);
+}
+
+.parallel-queue-item.dragging {
+  cursor: grabbing;
+  opacity: 0.56;
+  transform: scale(0.99);
+}
+
+.parallel-queue-item.locked {
+  cursor: default;
+}
+
+.parallel-queue-rank {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  background: var(--bg-elevated);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.parallel-queue-marker {
+  width: 4px;
+  height: 100%;
+  min-height: 42px;
+  border-radius: var(--radius-pill);
+  background: var(--yellow);
+}
+
+.parallel-queue-item.running .parallel-queue-marker {
+  background: var(--green);
+}
+
+.parallel-queue-item.failure_pool .parallel-queue-marker {
+  background: var(--red);
+}
+
+.parallel-queue-copy {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.parallel-queue-copy strong,
+.parallel-queue-copy span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.parallel-queue-copy strong {
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 850;
+}
+
+.parallel-queue-copy span {
+  color: var(--text-tertiary);
+  font-size: 11px;
+}
+
+.parallel-queue-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.parallel-queue-lock,
+.parallel-queue-grip {
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-tertiary);
+  background: var(--bg-elevated);
+}
+
+.parallel-queue-grip {
+  color: var(--accent);
+}
+
+.parallel-job-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(340px, 0.9fr);
+  gap: 14px;
+  align-items: start;
+}
+
+.parallel-job-submit,
+.parallel-job-report-panel,
+.parallel-report-block,
+.parallel-preview-panel {
+  min-width: 0;
+  display: grid;
+  gap: 12px;
+}
+
+.parallel-server-strip,
+.parallel-report-block,
+.parallel-preview-panel {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+  background: var(--bg-elevated);
+}
+
+.parallel-section-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.parallel-section-title strong {
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 850;
+}
+
+.parallel-section-title span {
+  color: var(--text-tertiary);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.parallel-server-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.parallel-server-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 34px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  padding: 0 9px;
+  color: var(--text-secondary);
+  background: var(--bg-base);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 850;
+  cursor: pointer;
+}
+
+.parallel-server-tag.selected {
+  border-color: color-mix(in srgb, var(--accent) 42%, var(--border));
+  color: var(--accent);
+  background: var(--accent-subtle);
+}
+
+.parallel-config-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.parallel-preview-summary,
+.parallel-run-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.parallel-preview-summary div,
+.parallel-run-metrics div {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px;
+  background: var(--bg-base);
+}
+
+.parallel-preview-summary span,
+.parallel-run-metrics span {
+  display: block;
+  color: var(--text-tertiary);
+  font-size: 10px;
+  font-weight: 850;
+  text-transform: uppercase;
+}
+
+.parallel-preview-summary strong,
+.parallel-run-metrics strong {
+  display: block;
+  margin-top: 3px;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.parallel-allocation-list,
+.parallel-slice-list,
+.failure-pool-list {
+  display: grid;
+  gap: 8px;
+}
+
+.parallel-allocation-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 0.35fr) minmax(0, 0.65fr);
+  gap: 10px;
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 9px;
+  background: var(--bg-base);
+}
+
+.parallel-allocation-row div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.parallel-allocation-row strong {
+  color: var(--text-primary);
+  font-size: 12px;
+}
+
+.parallel-allocation-row span {
+  color: var(--text-tertiary);
+  font-size: 11px;
+}
+
+.parallel-allocation-row code {
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.failure-pool-list {
+  display: flex;
+  flex-wrap: wrap;
+}
+
+.failure-pool-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 26px;
+  border: 1px solid color-mix(in srgb, var(--red) 28%, var(--border));
+  border-radius: var(--radius-pill);
+  padding: 0 8px;
+  color: var(--red-text);
+  background: var(--red-bg);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.parallel-run-card {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px;
+  background: var(--bg-elevated);
+}
+
+.parallel-run-card.running,
+.parallel-run-card.queued {
+  border-color: color-mix(in srgb, var(--accent) 36%, var(--border));
+}
+
+.parallel-run-card.completed {
+  border-color: color-mix(in srgb, var(--green) 34%, var(--border));
+}
+
+.parallel-run-card.completed_with_failures,
+.parallel-run-card.failed {
+  border-color: color-mix(in srgb, var(--red) 34%, var(--border));
+}
+
+.parallel-run-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.parallel-run-head > div {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.parallel-run-head strong,
+.parallel-run-head span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.parallel-run-head strong {
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.parallel-run-head span {
+  color: var(--text-tertiary);
+  font-size: 11px;
+}
+
+.parallel-slice-row {
+  display: grid;
+  grid-template-columns: minmax(72px, 0.25fr) 48px 78px minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 7px 8px;
+  background: var(--bg-base);
+  font-size: 11px;
+}
+
+.parallel-slice-row span {
+  overflow: hidden;
+  color: var(--text-primary);
+  font-weight: 850;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.parallel-slice-row strong {
+  color: var(--text-secondary);
+}
+
+.parallel-slice-row em {
+  color: var(--text-tertiary);
+  font-style: normal;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.parallel-slice-row small {
+  overflow: hidden;
+  color: var(--text-tertiary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.solver-job-status.completed_with_failures,
+.solver-job-status.failed {
+  color: var(--red-text);
+  background: var(--red-bg);
+}
+
 .preflop-matrix-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -5758,9 +6197,16 @@ td .port-value {
   .solver-job-head,
   .solver-job-selected-range,
   .solver-job-advanced-grid,
-  .solver-job-preview dl,
-  .solver-job-card dl {
-    grid-template-columns: 1fr;
+  .parallel-job-grid,
+	  .parallel-config-grid,
+	  .parallel-preview-summary,
+	  .parallel-run-metrics,
+	  .parallel-allocation-row,
+	  .parallel-queue-item,
+	  .parallel-slice-row,
+	  .solver-job-preview dl,
+	  .solver-job-card dl {
+	    grid-template-columns: 1fr;
     flex-direction: column;
     align-items: stretch;
   }
