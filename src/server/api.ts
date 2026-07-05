@@ -80,7 +80,6 @@ export type AppDependencies = {
   alertSettingsPath?: string;
   preflopRangesPath?: string;
   solverScenarioLibraryPath?: string;
-  solverCardsPath?: string | null;
   solverJobService?: SolverJobService;
   solverJobRepoNamespace?: string;
   hfToken?: string | null;
@@ -119,7 +118,6 @@ export function createApp({
   alertSettingsPath = "config/alerts.json",
   preflopRangesPath = "config/preflop-ranges",
   solverScenarioLibraryPath = "config/solver-scenarios.json",
-  solverCardsPath = null,
   solverJobService: providedSolverJobService,
   solverJobRepoNamespace = "Tsumugii",
   hfToken = null,
@@ -151,7 +149,6 @@ export function createApp({
     hfToken,
     hfProxyUrl,
     solverHfProxyUrl,
-    solverCardsPath,
     getHfProxySettings: () => loadAlertSettings(alertSettingsPath),
     getScenarioLibrary: () => loadSolverScenarioLibrary(solverScenarioLibraryPath).scenarios
   });

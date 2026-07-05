@@ -670,6 +670,7 @@ describe("solver job API", () => {
     db.insertSnapshot(metricSnapshot("solver-02", "online"));
     const executor: SshExecutor = {
       run: vi.fn(async (_server, _credentials, command) => {
+        if (command.includes("cards/cards.txt")) return solverCardsText();
         commands.push(command);
         return "ok";
       })
@@ -698,6 +699,11 @@ describe("solver job API", () => {
     expect(preview.body.allocations[1].indices).toHaveLength(877);
     expect(preview.body.allocations[0].rangeExpr).toContain("1,3,5");
     expect(preview.body.allocations[1].rangeExpr).toContain("2,4,6");
+    expect(executor.run).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "solver-01" }),
+      { username: "root", password: "secret" },
+      expect.stringContaining("cat '/srv/solver/cards/cards.txt'")
+    );
 
     const created = await request(app)
       .post("/api/parallel-jobs")
@@ -746,6 +752,7 @@ describe("solver job API", () => {
     db.insertSnapshot(metricSnapshot("solver-02", "online"));
     const executor: SshExecutor = {
       run: vi.fn(async (_server, _credentials, command) => {
+        if (command.includes("cards/cards.txt")) return solverCardsText();
         commands.push(command);
         return "ok";
       })
@@ -905,4 +912,8 @@ async function approveRange(app: ReturnType<typeof createApp>, rangePath: string
     .post("/api/preflop-ranges/status")
     .send({ path: rangePath, status: "approved" });
   expect(response.status).toBe(200);
+}
+
+function solverCardsText(count = 1755): string {
+  return Array.from({ length: count }, (_value, index) => `board-${index + 1}`).join("\n");
 }

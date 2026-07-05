@@ -1,7 +1,4 @@
 import { randomUUID } from "node:crypto";
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
 import {
   DEFAULT_SOLVER_JOB_SETTINGS,
   SOLVER_EXPORT_FORMATS,
@@ -60,7 +57,6 @@ type SolverJobServiceOptions = {
   hfToken?: string | null;
   hfProxyUrl?: string | null;
   solverHfProxyUrl?: string | null;
-  solverCardsPath?: string | null;
   getHfProxySettings?: () => Pick<AlertSettings, "hfProxyEnabled" | "solverHfProxyEnabled">;
   getScenarioLibrary?: () => SolverScenarioLibraryItem[];
 };
@@ -77,7 +73,6 @@ export class SolverJobService {
   private readonly hfToken: string | null;
   private readonly hfProxyUrl: string | null;
   private readonly solverHfProxyUrl: string | null;
-  private readonly solverCardsPath: string | null;
   private readonly getHfProxySettings: () => Pick<AlertSettings, "hfProxyEnabled" | "solverHfProxyEnabled">;
   private readonly getScenarioLibrary: () => SolverScenarioLibraryItem[];
 
@@ -88,7 +83,6 @@ export class SolverJobService {
     this.hfToken = options.hfToken?.trim() || null;
     this.hfProxyUrl = options.hfProxyUrl?.trim() || null;
     this.solverHfProxyUrl = options.solverHfProxyUrl?.trim() || null;
-    this.solverCardsPath = options.solverCardsPath?.trim() || process.env.SERVER_MONITOR_SOLVER_CARDS_PATH?.trim() || null;
     this.getHfProxySettings = options.getHfProxySettings ?? (() => ({
       hfProxyEnabled: false,
       solverHfProxyEnabled: false
@@ -542,7 +536,7 @@ export class SolverJobService {
       repoExists = true;
     }
 
-    const allBoards = this.readSolverCards();
+    const allBoards = await this.readSolverCardsForServers(selectedServers);
     const indices = options.explicitIndices
       ? normalizeBoardIndices(options.explicitIndices, allBoards.length)
       : repoExists
@@ -729,7 +723,6 @@ export class SolverJobService {
 
   private reconcileParallelRuns(): void {
     const runs = this.options.db.getParallelSolverRuns();
-    let allBoards: string[] | null = null;
     for (const run of runs) {
       for (const slice of run.slices) {
         if (!slice.job) continue;
@@ -754,10 +747,12 @@ export class SolverJobService {
           this.options.db.updateParallelFailurePoolEntries(run.rangePath, run.datasetName, slice.assignedIndices, "solved");
         }
         if (becameFailed) {
-          allBoards ??= this.readSolverCards();
           const failedIndices = failedIndicesForSlice(slice, slice.job);
           for (const index of failedIndices) {
-            const boardName = allBoards[index - 1] ?? String(index);
+            const assignedPosition = slice.assignedIndices.indexOf(index);
+            const boardName = assignedPosition >= 0
+              ? slice.assignedBoardNames[assignedPosition] ?? String(index)
+              : String(index);
             this.options.db.upsertParallelFailurePoolEntry({
               id: randomUUID(),
               rangePath: run.rangePath,
@@ -799,7 +794,7 @@ export class SolverJobService {
     const entries = this.options.db.getParallelFailurePoolEntries(input.rangePath, datasetName)
       .filter((entry) => entry.status === "pending" || entry.status === "failed");
     const selected = input.indices?.length
-      ? new Set(normalizeBoardIndices(input.indices, this.readSolverCards().length))
+      ? new Set(normalizePositiveIndices(input.indices))
       : null;
     return entries
       .map((entry) => entry.boardIndex)
@@ -885,11 +880,30 @@ export class SolverJobService {
     return this.getHfProxySettings().solverHfProxyEnabled ? this.solverHfProxyUrl : null;
   }
 
-  private readSolverCards(): string[] {
-    return readSolverCards({
-      explicitPath: this.solverCardsPath,
-      solverRoots: this.options.db.getServerRows().map((server) => server.solverRoot)
-    });
+  private async readSolverCardsForServers(servers: ServerRow[]): Promise<string[]> {
+    if (!this.options.credentials) {
+      throw new Error("SSH credentials are required to read remote solver cards for parallel allocation.");
+    }
+    const remoteErrors: string[] = [];
+    for (const server of servers) {
+      const solverRoot = effectiveSolverRoot(server);
+      try {
+        return parseSolverCards(await this.executor.run(
+          server,
+          this.options.credentials,
+          buildReadSolverCardsCommand(solverRoot)
+        ));
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        remoteErrors.push(`${server.id} (${joinRemotePath(solverRoot, "cards", "cards.txt")}): ${message}`);
+      }
+    }
+
+    throw new Error(
+      "Unable to read remote solver cards.txt for parallel allocation. " +
+      "Parallel allocation reads cards/cards.txt from the selected server solverRoot over SSH. " +
+      `Remote errors: ${remoteErrors.join("; ") || "none"}.`
+    );
   }
 
   private recordEvent(jobId: string, type: string, message: string, commandPreview: string | null): void {
@@ -1426,33 +1440,22 @@ function normalizeSelectedServerIds(serverIds: string[] | undefined, availableSe
   return unique;
 }
 
-function readSolverCards({
-  explicitPath,
-  solverRoots
-}: {
-  explicitPath?: string | null;
-  solverRoots?: Array<string | null | undefined>;
-} = {}): string[] {
-  const candidates = uniqueStrings([
-    explicitPath ? resolveLocalPath(explicitPath) : null,
-    ...[...(solverRoots ?? []), DEFAULT_SOLVER_ROOT]
-      .map((root) => root?.trim())
-      .filter((root): root is string => Boolean(root))
-      .map((root) => path.join(resolveLocalPath(root), "cards", "cards.txt")),
-    path.resolve(process.cwd(), "tmp/solver/cards/cards.txt"),
-    path.resolve(process.cwd(), "cards/cards.txt")
-  ]);
-  const cardsPath = candidates.find((candidate) => fs.existsSync(candidate));
-  if (!cardsPath) {
-    throw new Error(
-      `Unable to locate solver cards.txt for parallel allocation. Checked: ${candidates.join(", ")}. ` +
-      "Set SERVER_MONITOR_SOLVER_CARDS_PATH or make sure the configured solverRoot contains cards/cards.txt on this host."
-    );
-  }
-  return fs.readFileSync(cardsPath, "utf8")
+function buildReadSolverCardsCommand(solverRoot: string): string {
+  return [
+    "set -e",
+    `cat ${shellQuoteRemotePath(joinRemotePath(solverRoot, "cards", "cards.txt"))}`
+  ].join("\n");
+}
+
+function parseSolverCards(raw: string): string[] {
+  const cards = raw
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean);
+  if (cards.length === 0) {
+    throw new Error("solver cards.txt is empty.");
+  }
+  return cards;
 }
 
 async function fetchMissingBoardIndices(
@@ -1512,6 +1515,18 @@ function normalizeBoardIndices(indices: number[], total: number): number[] {
   for (const value of indices) {
     const index = Math.trunc(Number(value));
     if (!Number.isFinite(index) || index < 1 || index > total || seen.has(index)) continue;
+    seen.add(index);
+    normalized.push(index);
+  }
+  return normalized.sort((a, b) => a - b);
+}
+
+function normalizePositiveIndices(indices: number[]): number[] {
+  const seen = new Set<number>();
+  const normalized: number[] = [];
+  for (const value of indices) {
+    const index = Math.trunc(Number(value));
+    if (!Number.isFinite(index) || index < 1 || seen.has(index)) continue;
     seen.add(index);
     normalized.push(index);
   }
@@ -1687,25 +1702,6 @@ function jobScopedRemoteRangePath(jobId: string, datasetName: string, solverRoot
 
 function jobScopedRemoteResultPath(jobId: string, datasetName: string, solverRoot = DEFAULT_SOLVER_ROOT): string {
   return joinRemotePath(solverRoot, "results", datasetName, jobId);
-}
-
-function resolveLocalPath(rawPath: string): string {
-  const trimmed = rawPath.trim();
-  if (trimmed === "~") return os.homedir();
-  if (trimmed.startsWith("~/")) return path.join(os.homedir(), trimmed.slice(2));
-  if (path.isAbsolute(trimmed)) return trimmed;
-  return path.resolve(process.cwd(), trimmed);
-}
-
-function uniqueStrings(values: Array<string | null | undefined>): string[] {
-  const seen = new Set<string>();
-  const result: string[] = [];
-  for (const value of values) {
-    if (!value || seen.has(value)) continue;
-    seen.add(value);
-    result.push(value);
-  }
-  return result;
 }
 
 function dirnameRemote(remotePath: string): string {
