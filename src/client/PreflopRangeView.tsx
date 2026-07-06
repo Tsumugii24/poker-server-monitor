@@ -3719,11 +3719,7 @@ function ServerOperationsPanel({
               </span>
             ))}
           </div>
-          <pre className="server-ops-command-preview">
-export http_proxy="http://127.0.0.1:7890"
-export https_proxy="http://127.0.0.1:7890"
-git stash
-git pull --rebase</pre>
+          <pre className="server-ops-command-preview">{`cd "$HOME/solver" && export http_proxy='http://127.0.0.1:7890' && export https_proxy='http://127.0.0.1:7890' && git stash && git pull --rebase`}</pre>
         </section>
 
         <section className="server-ops-card">

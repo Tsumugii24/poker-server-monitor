@@ -349,6 +349,8 @@ describe("solver job API", () => {
     expect(preview.body.remoteRangePath).toBe("/srv/solver/job-ranges/<job-id>/3ia-4.2-3od-4.3.txt");
     expect(preview.body.remoteResultPath).toBe("/srv/solver/results/3ia-4.2-3od-4.3/<job-id>");
     expect(preview.body.requiresConfirmation).toBe(true);
+    expect(preview.body.commandPreview).toContain("cd '/srv/solver'");
+    expect(preview.body.commandPreview).toContain("'python' 'run_pipeline.py'");
     expect(preview.body.commandPreview).toContain("export HF_TOKEN=$HF_TOKEN");
     expect(preview.body.commandPreview).not.toContain("hf_test_token");
     expect(preview.body.commandPreview).toContain("export http_proxy='http://127.0.0.1:7890'");
