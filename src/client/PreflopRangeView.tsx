@@ -71,7 +71,6 @@ import {
 } from "../shared/solverJobs";
 import type {
   ServerOperation,
-  ServerOperationEvent,
   ServerOperationsResponse,
   ServerUploadCandidate,
   ServerUploadCandidatesResponse,
@@ -204,7 +203,6 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
   const [activeSolverJobTab, setActiveSolverJobTab] = useState<"single" | "parallel" | "operations">("single");
   const [selectedServerId, setSelectedServerId] = useState("");
   const [serverOperations, setServerOperations] = useState<ServerOperation[]>([]);
-  const [serverOperationEvents, setServerOperationEvents] = useState<ServerOperationEvent[]>([]);
   const [uploadCandidates, setUploadCandidates] = useState<ServerUploadCandidate[]>([]);
   const [jobSettings, setJobSettings] = useState<SolverJobSettings>(DEFAULT_SOLVER_JOB_SETTINGS);
   const [jobPreview, setJobPreview] = useState<SolverJobPreview | null>(null);
@@ -289,7 +287,6 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
       setParallelRuns(parallelResponse.runs);
       setFailurePool(parallelResponse.failurePool);
       setServerOperations(operationsResponse.operations);
-      setServerOperationEvents(operationsResponse.events);
       setSelectedParallelServerIds((current) => {
         const availableIds = overviewResponse.servers
           .slice()
@@ -1043,7 +1040,6 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
 
   const applyServerOperationsResponse = (response: ServerOperationsResponse) => {
     setServerOperations(response.operations);
-    setServerOperationEvents(response.events);
   };
 
   const scanUploadCandidates = async () => {
@@ -2036,7 +2032,6 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
           settings={jobSettings}
           preview={jobPreview}
           serverOperations={serverOperations}
-          serverOperationEvents={serverOperationEvents}
           uploadCandidates={uploadCandidates}
           datasetName={jobDatasetName}
           datasetRepoStatus={datasetRepoStatus}
@@ -2504,7 +2499,6 @@ function SolverJobPanel({
   settings,
   preview,
   serverOperations,
-  serverOperationEvents,
   uploadCandidates,
   datasetName,
   datasetRepoStatus,
@@ -2573,7 +2567,6 @@ function SolverJobPanel({
   settings: SolverJobSettings;
   preview: SolverJobPreview | null;
   serverOperations: ServerOperation[];
-  serverOperationEvents: ServerOperationEvent[];
   uploadCandidates: ServerUploadCandidate[];
   datasetName: string;
   datasetRepoStatus: SolverDatasetRepoStatus | null;
@@ -2985,7 +2978,6 @@ function SolverJobPanel({
           servers={servers}
           bestServerId={parallelBestServerId}
           operations={serverOperations}
-          events={serverOperationEvents}
           uploadCandidates={uploadCandidates}
           busy={busy}
           onScanUploads={onOperationScanUploads}
@@ -3627,7 +3619,6 @@ function ServerOperationsPanel({
   servers,
   bestServerId,
   operations,
-  events,
   uploadCandidates,
   busy,
   onScanUploads,
@@ -3640,7 +3631,6 @@ function ServerOperationsPanel({
   servers: ServerRow[];
   bestServerId: string;
   operations: ServerOperation[];
-  events: ServerOperationEvent[];
   uploadCandidates: ServerUploadCandidate[];
   busy: string | null;
   onScanUploads: () => void;
@@ -3660,11 +3650,7 @@ function ServerOperationsPanel({
   const activeOperations = operations
     .filter((operation) => !serverOperationIsTerminal(operation))
     .sort(compareServerOperations);
-  const recentOperations = operations
-    .filter(serverOperationIsTerminal)
-    .sort(compareServerOperations)
-    .slice(0, 8);
-  const latestEventByOperationId = latestServerOperationEvents(events);
+  const operationRows = operations.slice().sort(compareServerOperations);
   const operationBusy = busy?.startsWith("operation-") ?? false;
 
   return (
@@ -3691,9 +3677,9 @@ function ServerOperationsPanel({
       ) : null}
 
       <div className="server-ops-overview-grid">
-        <ServerOperationMetric label="Sync Success" value={operationSummary.syncSuccess} detail={`${operationSummary.syncLatest} latest`} />
+        <ServerOperationMetric label="Sync Commands" value={operationSummary.syncTotal} detail={`${operationSummary.syncLatest} latest · ${operationSummary.syncSynced} synced`} />
         <ServerOperationMetric label="Sync Failed" value={operationSummary.syncFailed} detail="terminal sync failures" />
-        <ServerOperationMetric label="Upload Success" value={operationSummary.uploadSuccess} detail={`${operationSummary.filesRequested} requested files`} />
+        <ServerOperationMetric label="Upload Commands" value={operationSummary.uploadTotal} detail={`${operationSummary.uploadSuccess} completed`} />
         <ServerOperationMetric label="Upload Failed" value={operationSummary.uploadFailed} detail={`${operationSummary.noFiles} no-file server(s)`} />
       </div>
 
@@ -3773,105 +3759,86 @@ function ServerOperationsPanel({
       <section className="server-ops-card">
         <div className="parallel-section-title parallel-section-title-with-actions">
           <div>
-            <strong>Operation History</strong>
-            <span>{activeOperations.length} active · {recentOperations.length} recent · {terminalCount} clearable</span>
+            <strong>Operation Report</strong>
+            <span>{activeOperations.length} active · {operationRows.length} total · {terminalCount} clearable</span>
           </div>
           <button className="icon-button compact danger" type="button" onClick={onClear} disabled={operationBusy || terminalCount === 0}>
             <Trash2 size={14} />
             Clear
           </button>
         </div>
-        {activeOperations.length === 0 ? <p className="solver-job-empty">No active server operation.</p> : null}
-        <div className="server-ops-operation-list">
-          {activeOperations.map((operation) => (
-            <ServerOperationCard
-              key={operation.id}
-              operation={operation}
-              latestEvent={latestEventByOperationId.get(operation.id) ?? null}
-              busy={busy}
-              onStop={onStop}
-            />
-          ))}
-          {recentOperations.map((operation) => (
-            <ServerOperationCard
-              key={operation.id}
-              operation={operation}
-              latestEvent={latestEventByOperationId.get(operation.id) ?? null}
-              busy={busy}
-              onStop={onStop}
-            />
-          ))}
+        <div className="server-ops-report-grid">
+          <ServerOperationMetric label="Already Latest" value={operationSummary.syncLatest} detail="git already up to date" />
+          <ServerOperationMetric label="Synced" value={operationSummary.syncSynced} detail="pulled successfully" />
+          <ServerOperationMetric label="Sync Failed" value={operationSummary.syncFailed} detail="needs manual check" />
+          <ServerOperationMetric label="Files Requested" value={operationSummary.filesRequested} detail="upload operation input" />
         </div>
+        {operationRows.length === 0 ? <p className="solver-job-empty">No server operation has been recorded.</p> : null}
+        {operationRows.length > 0 ? (
+          <div className="server-ops-history-table-wrap">
+            <table className="server-ops-history-table">
+              <thead>
+                <tr>
+                  <th>Server ID</th>
+                  <th>Operation</th>
+                  <th>Status</th>
+                  <th>Result</th>
+                  <th>Created</th>
+                  <th aria-label="Actions" />
+                </tr>
+              </thead>
+              <tbody>
+                {operationRows.map((operation) => (
+                  <ServerOperationRow
+                    key={operation.id}
+                    operation={operation}
+                    busy={busy}
+                    onStop={onStop}
+                  />
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : null}
       </section>
     </div>
   );
 }
 
-function ServerOperationCard({
+function ServerOperationRow({
   operation,
-  latestEvent,
   busy,
   onStop
 }: {
   operation: ServerOperation;
-  latestEvent: ServerOperationEvent | null;
   busy: string | null;
   onStop: (operation: ServerOperation) => void;
 }) {
   const active = !serverOperationIsTerminal(operation);
   const stopping = busy === `operation-stop:${operation.id}`;
-  const resultDetails = operation.result?.details ?? [];
+  const result = serverOperationCompactResult(operation);
   return (
-    <article className={`server-ops-operation-card ${operation.status} ${operation.type}`}>
-      <div className="parallel-run-head">
-        <div>
-          <strong>{serverOperationTypeLabel(operation.type)} · {operation.serverId}</strong>
-          <span>{operationItemsSummary(operation)} · {formatShortDateTime(operation.createdAt)}</span>
-        </div>
-        <em className={`solver-job-status ${operation.status}`}>{formatServerOperationStatus(operation.status)}</em>
-      </div>
-      <dl>
-        <div>
-          <dt>Tmux</dt>
-          <dd>{operation.tmuxSession}</dd>
-        </div>
-        <div>
-          <dt>Log</dt>
-          <dd>{operation.logFilePath}</dd>
-        </div>
-      </dl>
-      {operation.result ? (
-        <div className="server-ops-result-grid">
-          {serverOperationResultMetrics(operation).map((metric) => (
-            <div key={metric.label}>
-              <span>{metric.label}</span>
-              <strong>{metric.value}</strong>
-            </div>
-          ))}
-        </div>
-      ) : null}
-      {resultDetails.length > 0 ? (
-        <div className="server-ops-result-details">
-          {resultDetails.slice(0, 4).map((detail, index) => (
-            <span key={`${operation.id}:detail:${index}`}>
-              <strong>{String(detail.repo_id ?? detail.kind ?? detail.dataset_name ?? `item ${index + 1}`)}</strong>
-              <em>{serverOperationDetailText(detail)}</em>
-            </span>
-          ))}
-        </div>
-      ) : null}
-      {latestEvent ? <p className="solver-job-event">{latestEvent.message}</p> : null}
-      {operation.lastError ? <p className="solver-job-error">{operation.lastError}</p> : null}
-      <pre>{operation.command}</pre>
-      {active ? (
-        <div className="solver-job-card-actions">
+    <tr className={`server-ops-history-row ${operation.status} ${operation.type}`}>
+      <td>
+        <strong>{operation.serverId}</strong>
+      </td>
+      <td>{serverOperationTypeLabel(operation.type)}</td>
+      <td>
+        <span className={`server-ops-status-pill ${operation.status}`}>{formatServerOperationStatus(operation.status)}</span>
+      </td>
+      <td>
+        <span className={`server-ops-result-pill ${result.tone}`}>{result.label}</span>
+      </td>
+      <td>{formatShortDateTime(operation.createdAt)}</td>
+      <td>
+        {active ? (
           <button className="inventory-confirm-button danger" type="button" onClick={() => onStop(operation)} disabled={stopping}>
             <Square size={14} />
             {stopping ? "Stopping" : "Stop"}
           </button>
-        </div>
-      ) : null}
-    </article>
+        ) : null}
+      </td>
+    </tr>
   );
 }
 
@@ -4316,25 +4283,6 @@ function compareServerOperations(left: ServerOperation, right: ServerOperation):
   return Date.parse(right.createdAt) - Date.parse(left.createdAt);
 }
 
-function latestServerOperationEvents(events: ServerOperationEvent[]): Map<string, ServerOperationEvent> {
-  const latest = new Map<string, ServerOperationEvent>();
-  for (const event of events) {
-    const current = latest.get(event.operationId);
-    if (!current || event.createdAt > current.createdAt) {
-      latest.set(event.operationId, event);
-    }
-  }
-  return latest;
-}
-
-function operationItemsSummary(operation: ServerOperation): string {
-  if (operation.type === "sync") return "git stash + pull";
-  const uploadItems = operation.items.filter((item): item is ServerUploadItem => "resultsDir" in item);
-  if (uploadItems.length === 0) return "no upload folders";
-  const fileCount = uploadItems.reduce((total, item) => total + (item.fileCount ?? 0), 0);
-  return `${uploadItems.length} folder${uploadItems.length === 1 ? "" : "s"} · ${fileCount} file${fileCount === 1 ? "" : "s"}`;
-}
-
 function summarizeUploadCandidates(candidates: ServerUploadCandidate[]): { folders: number; files: number; servers: number } {
   return {
     folders: candidates.length,
@@ -4344,18 +4292,22 @@ function summarizeUploadCandidates(candidates: ServerUploadCandidate[]): { folde
 }
 
 function summarizeServerOperations(operations: ServerOperation[]): {
-  syncSuccess: number;
+  syncTotal: number;
+  syncSynced: number;
   syncLatest: number;
   syncFailed: number;
+  uploadTotal: number;
   uploadSuccess: number;
   uploadFailed: number;
   filesRequested: number;
   noFiles: number;
 } {
   const summary = {
-    syncSuccess: 0,
+    syncTotal: 0,
+    syncSynced: 0,
     syncLatest: 0,
     syncFailed: 0,
+    uploadTotal: 0,
     uploadSuccess: 0,
     uploadFailed: 0,
     filesRequested: 0,
@@ -4364,10 +4316,12 @@ function summarizeServerOperations(operations: ServerOperation[]): {
   for (const operation of operations) {
     const result = operation.result?.summary ?? {};
     if (operation.type === "sync") {
+      summary.syncTotal += 1;
       summary.syncLatest += numericResult(result.latest);
-      summary.syncSuccess += numericResult(result.latest) + numericResult(result.synced);
+      summary.syncSynced += numericResult(result.synced);
       summary.syncFailed += operation.status === "failed" ? 1 : numericResult(result.failed);
     } else {
+      summary.uploadTotal += 1;
       summary.uploadSuccess += numericResult(result.upload_success);
       summary.uploadFailed += operation.status === "failed" ? Math.max(1, numericResult(result.upload_failed)) : numericResult(result.upload_failed);
       summary.filesRequested += numericResult(result.files_requested);
@@ -4377,36 +4331,27 @@ function summarizeServerOperations(operations: ServerOperation[]): {
   return summary;
 }
 
-function serverOperationResultMetrics(operation: ServerOperation): Array<{ label: string; value: string | number }> {
+function serverOperationCompactResult(operation: ServerOperation): { label: string; tone: "success" | "danger" | "warning" | "neutral" | "active" } {
   const summary = operation.result?.summary ?? {};
   if (operation.type === "sync") {
-    return [
-      { label: "Latest", value: numericResult(summary.latest) },
-      { label: "Synced", value: numericResult(summary.synced) },
-      { label: "Failed", value: numericResult(summary.failed) }
-    ];
+    if (operation.status === "failed" || numericResult(summary.failed) > 0) return { label: "failed", tone: "danger" };
+    if (numericResult(summary.synced) > 0) return { label: "synced", tone: "success" };
+    if (numericResult(summary.latest) > 0) return { label: "latest", tone: "neutral" };
+    if (operation.status === "canceled") return { label: "canceled", tone: "warning" };
+    if (!serverOperationIsTerminal(operation)) return { label: "in progress", tone: "active" };
+    return { label: formatServerOperationStatus(operation.status), tone: operation.status === "completed" ? "success" : "neutral" };
   }
-  return [
-    { label: "Success", value: numericResult(summary.upload_success) },
-    { label: "Failed", value: numericResult(summary.upload_failed) },
-    { label: "Files", value: numericResult(summary.files_requested) },
-    { label: "Duration", value: formatDuration(numericResult(summary.duration_seconds)) }
-  ];
-}
 
-function serverOperationDetailText(detail: Record<string, number | string | boolean | null>): string {
-  if (typeof detail.success === "boolean") {
-    const duration = typeof detail.duration_seconds === "number" ? ` · ${formatDuration(detail.duration_seconds)}` : "";
-    const files = typeof detail.file_count === "number" ? ` · ${detail.file_count} files` : "";
-    return `${detail.success ? "uploaded" : "failed"}${files}${duration}`;
+  const success = numericResult(summary.upload_success);
+  const failed = numericResult(summary.upload_failed);
+  if (operation.status === "failed" || failed > 0) {
+    return { label: success > 0 ? `${success} ok / ${failed || 1} failed` : "failed", tone: "danger" };
   }
-  if (typeof detail.kind === "string") {
-    return detail.kind;
-  }
-  if (typeof detail.error === "string") {
-    return detail.error;
-  }
-  return "recorded";
+  if (numericResult(summary.no_files) > 0) return { label: "no files", tone: "neutral" };
+  if (success > 0) return { label: `${success} uploaded`, tone: "success" };
+  if (operation.status === "canceled") return { label: "canceled", tone: "warning" };
+  if (!serverOperationIsTerminal(operation)) return { label: "in progress", tone: "active" };
+  return { label: formatServerOperationStatus(operation.status), tone: operation.status === "completed" ? "success" : "neutral" };
 }
 
 function numericResult(value: unknown): number {
