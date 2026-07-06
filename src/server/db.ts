@@ -23,6 +23,14 @@ import type {
   SolverJobSettings,
   SolverJobStatus
 } from "../shared/solverJobs";
+import type {
+  ServerOperation,
+  ServerOperationEvent,
+  ServerOperationItem,
+  ServerOperationResult,
+  ServerOperationStatus,
+  ServerOperationType
+} from "../shared/serverOperations";
 
 let sqlPromise: Promise<SqlJsStatic> | null = null;
 
@@ -232,9 +240,10 @@ export class MonitorDatabase {
       `INSERT INTO pipeline_status_snapshots (
         id, server_id, collected_at, available, process_alive, file_status, display_status, phase,
         repo_id, dataset_name, scenario, current_batch, total_batches, total_tasks, batch_expr,
-        assigned_indices_json, completed_indices_json, failed_indices_json, completed_count, failed_count, result_path,
+        assigned_indices_json, completed_indices_json, failed_indices_json, skipped_indices_json,
+        completed_count, failed_count, skipped_count, result_path,
         pid, started_at, updated_at, finished_at, command_text, error_text, error_code, error_message
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         snapshot.id,
         snapshot.serverId,
@@ -254,8 +263,10 @@ export class MonitorDatabase {
         JSON.stringify(snapshot.assignedIndices ?? []),
         JSON.stringify(snapshot.completedIndices ?? []),
         JSON.stringify(snapshot.failedIndices ?? []),
+        JSON.stringify(snapshot.skippedIndices ?? []),
         snapshot.completedCount ?? null,
         snapshot.failedCount ?? null,
+        snapshot.skippedCount ?? null,
         snapshot.resultPath ?? null,
         snapshot.pid,
         snapshot.startedAt,
@@ -817,6 +828,121 @@ export class MonitorDatabase {
     );
   }
 
+  insertServerOperation(operation: ServerOperation): void {
+    this.database.run(
+      `INSERT INTO server_operations (
+        id, operation_type, server_id, status, tmux_session, command_text, items_json,
+        status_file_path, log_file_path, created_at, updated_at, started_at, finished_at, last_error, result_json
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        operation.id,
+        operation.type,
+        operation.serverId,
+        operation.status,
+        operation.tmuxSession,
+        operation.command,
+        JSON.stringify(operation.items),
+        operation.statusFilePath,
+        operation.logFilePath,
+        operation.createdAt,
+        operation.updatedAt,
+        operation.startedAt,
+        operation.finishedAt,
+        operation.lastError,
+        operation.result ? JSON.stringify(operation.result) : null
+      ]
+    );
+    this.persist();
+  }
+
+  updateServerOperation(
+    id: string,
+    patch: Partial<Pick<ServerOperation, "status" | "startedAt" | "finishedAt" | "lastError" | "updatedAt" | "result">>
+  ): ServerOperation {
+    const current = this.getServerOperation(id);
+    if (!current) {
+      throw new Error(`Server operation ${id} not found`);
+    }
+    const updatedAt = patch.updatedAt ?? new Date().toISOString();
+    this.database.run(
+      `UPDATE server_operations
+       SET status = ?, started_at = ?, finished_at = ?, last_error = ?, result_json = ?, updated_at = ?
+       WHERE id = ?`,
+      [
+        patch.status ?? current.status,
+        patch.startedAt !== undefined ? patch.startedAt : current.startedAt,
+        patch.finishedAt !== undefined ? patch.finishedAt : current.finishedAt,
+        patch.lastError !== undefined ? patch.lastError : current.lastError,
+        patch.result !== undefined ? (patch.result ? JSON.stringify(patch.result) : null) : (current.result ? JSON.stringify(current.result) : null),
+        updatedAt,
+        id
+      ]
+    );
+    this.persist();
+    const updated = this.getServerOperation(id);
+    if (!updated) {
+      throw new Error(`Server operation ${id} not found`);
+    }
+    return updated;
+  }
+
+  getServerOperations(): ServerOperation[] {
+    return this.query<ServerOperation>(
+      "SELECT * FROM server_operations ORDER BY created_at DESC LIMIT 200",
+      [],
+      mapServerOperation
+    );
+  }
+
+  getServerOperation(id: string): ServerOperation | null {
+    return (
+      this.query<ServerOperation>(
+        "SELECT * FROM server_operations WHERE id = ?",
+        [id],
+        mapServerOperation
+      )[0] ?? null
+    );
+  }
+
+  clearTerminalServerOperations(): number {
+    const rows = this.query<{ id: string }>(
+      "SELECT id FROM server_operations WHERE status IN ('completed', 'failed', 'canceled')",
+      [],
+      (row) => ({ id: String(row.id) })
+    );
+    if (rows.length === 0) return 0;
+    const placeholders = rows.map(() => "?").join(", ");
+    const ids = rows.map((row) => row.id);
+    this.database.run(`DELETE FROM server_operation_events WHERE operation_id IN (${placeholders})`, ids);
+    this.database.run(`DELETE FROM server_operations WHERE id IN (${placeholders})`, ids);
+    this.persist();
+    return ids.length;
+  }
+
+  insertServerOperationEvent(event: ServerOperationEvent): void {
+    this.database.run(
+      `INSERT INTO server_operation_events (id, operation_id, event_type, message, command_preview, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [event.id, event.operationId, event.type, event.message, event.commandPreview, event.createdAt]
+    );
+    this.persist();
+  }
+
+  getServerOperationEvents(operationId?: string): ServerOperationEvent[] {
+    if (operationId) {
+      return this.query<ServerOperationEvent>(
+        "SELECT * FROM server_operation_events WHERE operation_id = ? ORDER BY created_at ASC",
+        [operationId],
+        mapServerOperationEvent
+      );
+    }
+    return this.query<ServerOperationEvent>(
+      "SELECT * FROM server_operation_events ORDER BY created_at DESC LIMIT 200",
+      [],
+      mapServerOperationEvent
+    );
+  }
+
   private initializeSchema(): void {
     this.database.run(`
       CREATE TABLE IF NOT EXISTS servers (
@@ -880,8 +1006,10 @@ export class MonitorDatabase {
         assigned_indices_json TEXT,
         completed_indices_json TEXT,
         failed_indices_json TEXT,
+        skipped_indices_json TEXT,
         completed_count INTEGER,
         failed_count INTEGER,
+        skipped_count INTEGER,
         result_path TEXT,
         pid INTEGER,
         started_at TEXT,
@@ -949,6 +1077,39 @@ export class MonitorDatabase {
 
       CREATE INDEX IF NOT EXISTS idx_solver_job_events_job_time
         ON solver_job_events(job_id, created_at);
+
+      CREATE TABLE IF NOT EXISTS server_operations (
+        id TEXT PRIMARY KEY,
+        operation_type TEXT NOT NULL,
+        server_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        tmux_session TEXT NOT NULL,
+        command_text TEXT NOT NULL,
+        items_json TEXT NOT NULL,
+        status_file_path TEXT NOT NULL,
+        log_file_path TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        started_at TEXT,
+        finished_at TEXT,
+        last_error TEXT,
+        result_json TEXT
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_server_operations_server_status_time
+        ON server_operations(server_id, status, created_at);
+
+      CREATE TABLE IF NOT EXISTS server_operation_events (
+        id TEXT PRIMARY KEY,
+        operation_id TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        message TEXT NOT NULL,
+        command_preview TEXT,
+        created_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_server_operation_events_operation_time
+        ON server_operation_events(operation_id, created_at);
 
       CREATE TABLE IF NOT EXISTS parallel_solver_runs (
         id TEXT PRIMARY KEY,
@@ -1026,7 +1187,19 @@ export class MonitorDatabase {
     this.ensureParallelSolverSliceCandidateServerColumn();
     this.ensureParallelFailurePoolReasonColumn();
     this.ensureSolverJobResultPathColumn();
+    this.ensureServerOperationResultColumn();
     this.persist();
+  }
+
+  private ensureServerOperationResultColumn(): void {
+    const columns = this.query<{ name: string }>(
+      "PRAGMA table_info(server_operations)",
+      [],
+      (row) => ({ name: String(row.name) })
+    );
+    if (!columns.some((column) => column.name === "result_json")) {
+      this.database.run("ALTER TABLE server_operations ADD COLUMN result_json TEXT");
+    }
   }
 
   private ensureParallelSolverSliceCandidateServerColumn(): void {
@@ -1073,8 +1246,10 @@ export class MonitorDatabase {
       ["assigned_indices_json", "TEXT"],
       ["completed_indices_json", "TEXT"],
       ["failed_indices_json", "TEXT"],
+      ["skipped_indices_json", "TEXT"],
       ["completed_count", "INTEGER"],
       ["failed_count", "INTEGER"],
+      ["skipped_count", "INTEGER"],
       ["result_path", "TEXT"]
     ];
     for (const [name, type] of additions) {
@@ -1244,12 +1419,16 @@ function mapParallelSolverRun(row: Record<string, SqlValue>, slices: ParallelSol
   const startedAt = row.started_at == null ? null : String(row.started_at);
   const finishedAt = row.finished_at == null ? null : String(row.finished_at);
   const totalBoards = parseNumberArray(row.total_indices_json).length;
-  const completedBoards = uniqueCount(slices.flatMap((slice) =>
-    slice.status === "completed" ? slice.assignedIndices : slice.job?.pipeline?.completedIndices ?? []
-  ));
-  const failedBoards = uniqueCount(slices.flatMap((slice) =>
-    slice.status === "failed" ? slice.assignedIndices : slice.job?.pipeline?.failedIndices ?? []
-  ));
+  const completedBoards = uniqueCount(slices.flatMap((slice) => {
+    const completed = assignedPipelineIndices(slice, slice.job?.pipeline?.completedIndices ?? []);
+    if (completed.length > 0) return completed;
+    return slice.status === "completed" ? slice.assignedIndices : [];
+  }));
+  const failedBoards = uniqueCount(slices.flatMap((slice) => {
+    const failed = assignedPipelineIndices(slice, slice.job?.pipeline?.failedIndices ?? []);
+    if (failed.length > 0) return failed;
+    return slice.status === "failed" ? slice.assignedIndices : [];
+  }));
   const runningBoards = slices
     .filter((slice) => slice.status === "running")
     .reduce((sum, slice) => sum + slice.assignedIndices.length, 0);
@@ -1287,6 +1466,11 @@ function mapParallelSolverRun(row: Record<string, SqlValue>, slices: ParallelSol
       durationSeconds: durationSeconds(startedAt, finishedAt)
     }
   };
+}
+
+function assignedPipelineIndices(slice: ParallelSolverSlice, indices: number[]): number[] {
+  const assigned = new Set(slice.assignedIndices);
+  return indices.filter((index) => assigned.has(index));
 }
 
 function mapParallelSolverSlice(row: Record<string, SqlValue>, job: SolverJob | null): ParallelSolverSlice {
@@ -1359,11 +1543,105 @@ function mapSolverJobEvent(row: Record<string, SqlValue>): SolverJobEvent {
   };
 }
 
+function mapServerOperation(row: Record<string, SqlValue>): ServerOperation {
+  return {
+    id: String(row.id),
+    type: normalizeServerOperationType(row.operation_type),
+    serverId: String(row.server_id),
+    status: normalizeServerOperationStatus(row.status),
+    tmuxSession: String(row.tmux_session),
+    command: redactSensitiveCommand(String(row.command_text)),
+    items: parseServerOperationItems(row.items_json),
+    statusFilePath: String(row.status_file_path),
+    logFilePath: String(row.log_file_path),
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+    startedAt: row.started_at == null ? null : String(row.started_at),
+    finishedAt: row.finished_at == null ? null : String(row.finished_at),
+    lastError: row.last_error == null ? null : String(row.last_error),
+    result: parseServerOperationResult(row.result_json)
+  };
+}
+
+function mapServerOperationEvent(row: Record<string, SqlValue>): ServerOperationEvent {
+  return {
+    id: String(row.id),
+    operationId: String(row.operation_id),
+    type: String(row.event_type),
+    message: String(row.message),
+    commandPreview: row.command_preview == null ? null : redactSensitiveCommand(String(row.command_preview)),
+    createdAt: String(row.created_at)
+  };
+}
+
 function parseSolverJobSettings(value: SqlValue): SolverJobSettings {
   if (typeof value !== "string") {
     throw new Error("solver job settings must be JSON");
   }
   return JSON.parse(value) as SolverJobSettings;
+}
+
+function parseServerOperationItems(value: SqlValue): ServerOperationItem[] {
+  if (typeof value !== "string" || value.trim() === "") return [];
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return Array.isArray(parsed) ? parsed.filter(isServerOperationItem) : [];
+  } catch {
+    return [];
+  }
+}
+
+function isServerOperationItem(value: unknown): value is ServerOperationItem {
+  return typeof value === "object" && value !== null;
+}
+
+function parseServerOperationResult(value: SqlValue): ServerOperationResult | null {
+  if (typeof value !== "string" || value.trim() === "") return null;
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!isRecord(parsed)) return null;
+    const summary = isRecord(parsed.summary) ? parsed.summary : {};
+    const details = Array.isArray(parsed.details) ? parsed.details.filter(isRecord) : [];
+    return {
+      summary: normalizeOperationResultRecord(summary),
+      details: details.map(normalizeOperationResultRecord),
+      raw: typeof parsed.raw === "string" ? parsed.raw : null
+    };
+  } catch {
+    return null;
+  }
+}
+
+function normalizeOperationResultRecord(value: Record<string, unknown>): Record<string, number | string | boolean | null> {
+  const result: Record<string, number | string | boolean | null> = {};
+  for (const [key, raw] of Object.entries(value)) {
+    if (typeof raw === "string" || typeof raw === "number" || typeof raw === "boolean" || raw === null) {
+      result[key] = raw;
+    }
+  }
+  return result;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function normalizeServerOperationType(value: SqlValue): ServerOperationType {
+  return value === "upload" ? "upload" : "sync";
+}
+
+function normalizeServerOperationStatus(value: SqlValue): ServerOperationStatus {
+  if (
+    value === "queued" ||
+    value === "deploying" ||
+    value === "running" ||
+    value === "completed" ||
+    value === "failed" ||
+    value === "canceled"
+  ) {
+    return value;
+  }
+  return "failed";
 }
 
 function redactSensitiveCommand(value: string): string {
@@ -1415,8 +1693,10 @@ function mapPipelineSnapshot(row: Record<string, SqlValue>): PipelineStatusSnaps
     assignedIndices: parseNumberArray(row.assigned_indices_json),
     completedIndices: parseNumberArray(row.completed_indices_json),
     failedIndices: parseNumberArray(row.failed_indices_json),
+    skippedIndices: parseNumberArray(row.skipped_indices_json),
     completedCount: nullableNumber(row.completed_count),
     failedCount: nullableNumber(row.failed_count),
+    skippedCount: nullableNumber(row.skipped_count),
     resultPath: row.result_path == null ? null : String(row.result_path),
     pid: nullableNumber(row.pid),
     startedAt: row.started_at == null ? null : String(row.started_at),

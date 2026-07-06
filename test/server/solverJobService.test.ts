@@ -12,7 +12,11 @@ import {
   buildForceKillPipelineCommand,
   buildGracefulStopPipelineCommand,
   buildRunPipelineCommand,
+  buildServerCodeReadyCommand,
+  buildServerSyncCommand,
+  buildServerUploadCommand,
   datasetNameFromRangePath,
+  parseUploadCandidatesOutput,
   scenarioFromRangePath,
   solverRangeTextFromDocument,
   SolverJobService
@@ -138,6 +142,84 @@ describe("solver job helpers", () => {
     expect(command).not.toContain("hf_test_token");
   });
 
+  it("builds server sync commands with proxy and git update steps", () => {
+    const command = buildServerSyncCommand({
+      solverRoot: "~/solver",
+      proxyUrl: "http://127.0.0.1:7890"
+    });
+
+    expect(command).toContain('cd "$HOME/solver"');
+    expect(command).toContain("export http_proxy='http://127.0.0.1:7890'");
+    expect(command).toContain("export https_proxy='http://127.0.0.1:7890'");
+    expect(command).toContain("git stash");
+    expect(command).toContain("git pull --rebase");
+  });
+
+  it("builds solver code readiness commands for dispatch gating", () => {
+    const command = buildServerCodeReadyCommand({
+      solverRoot: "~/solver",
+      proxyUrl: "http://127.0.0.1:7890"
+    });
+
+    expect(command).toContain('cd "$HOME/solver"');
+    expect(command).toContain("export http_proxy='http://127.0.0.1:7890'");
+    expect(command).toContain("git fetch --quiet");
+    expect(command).toContain("CODE_READY=1");
+    expect(command).toContain("CODE_REASON=behind upstream");
+  });
+
+  it("builds server upload commands with results-dir and redacted HF token support", () => {
+    const command = buildServerUploadCommand({
+      solverRoot: "~/solver",
+      hfToken: "hf_upload_token",
+      proxyUrl: "http://127.0.0.1:7890",
+      redactSecrets: true,
+      items: [{
+        datasetName: "sia-30-sod-13.5",
+        repoId: "Tsumugii/sia-30-sod-13.5",
+        jobId: "job-1",
+        resultsDir: "~/solver/results/sia-30-sod-13.5/job-1",
+        fileFormat: "parquet",
+        fileCount: 12
+      }]
+    });
+
+    expect(command).toContain('cd "$HOME/solver"');
+    expect(command).toContain("export HF_TOKEN=$HF_TOKEN");
+    expect(command).not.toContain("hf_upload_token");
+    expect(command).toContain('"resultsDir":"~/solver/results/sia-30-sod-13.5/job-1"');
+    expect(command).toContain('"repoId":"Tsumugii/sia-30-sod-13.5"');
+    expect(command).toContain('"fileFormat":"parquet"');
+    expect(command).toContain('"upload_success"');
+    expect(command).toContain('"upload_failed"');
+  });
+
+  it("parses retained upload directories from remote scan output", () => {
+    const candidates = parseUploadCandidatesOutput(
+      [
+        "noise",
+        "CANDIDATE\tsia-30-sod-13.5\tjob-1\t/home/jane/solver/results/sia-30-sod-13.5/job-1\t12\t0\tTsumugii/sia-30-sod-13.5",
+        "CANDIDATE\t3ia-7.5-3od-8.3\tjob-2\t/home/jane/solver/results/3ia-7.5-3od-8.3/job-2\t0\t4\tTsumugii/3ia-7.5-3od-8.3"
+      ].join("\n"),
+      "solver-08"
+    );
+
+    expect(candidates).toEqual([
+      expect.objectContaining({
+        id: "solver-08:/home/jane/solver/results/sia-30-sod-13.5/job-1",
+        datasetName: "sia-30-sod-13.5",
+        repoId: "Tsumugii/sia-30-sod-13.5",
+        fileFormat: "parquet",
+        fileCount: 12
+      }),
+      expect.objectContaining({
+        datasetName: "3ia-7.5-3od-8.3",
+        fileFormat: "json",
+        fileCount: 4
+      })
+    ]);
+  });
+
   it("requires HF_TOKEN when upload is enabled", () => {
     expect(() => buildRunPipelineCommand({
       solverRoot: "/srv/solver",
@@ -238,6 +320,7 @@ describe("solver job API", () => {
   it("previews, confirms, creates, and starts a solver job", async () => {
     const executor: SshExecutor = {
       run: vi.fn(async (_server, _credentials, command) => {
+        if (isCodeReadyCommand(command)) return codeReadyOutput();
         commands.push(command);
         return "ok";
       })
@@ -358,6 +441,7 @@ describe("solver job API", () => {
   it("supports graceful stop followed by force stop", async () => {
     const executor: SshExecutor = {
       run: vi.fn(async (_server, _credentials, command) => {
+        if (isCodeReadyCommand(command)) return codeReadyOutput();
         commands.push(command);
         if (command.includes("C-c")) return "TMUX_SIGNAL_SENT=1\nPIPELINE_ALIVE=1\n";
         return "ok";
@@ -407,6 +491,93 @@ describe("solver job API", () => {
     expect(list.status).toBe(200);
     expect(list.body.jobs).toHaveLength(0);
     expect(list.body.events).toHaveLength(0);
+  });
+
+  it("starts solver code sync instead of dispatching when code is not ready", async () => {
+    const executor: SshExecutor = {
+      run: vi.fn(async (_server, _credentials, command) => {
+        if (isCodeReadyCommand(command)) return "CODE_READY=0\nCODE_REASON=behind upstream\n";
+        commands.push(command);
+        return "ok";
+      })
+    };
+    const solverJobService = new SolverJobService({
+      db,
+      preflopRangesPath,
+      credentials: { username: "root", password: "secret" },
+      executor,
+      defaultPipelineStatusFilePath: "~/run/solver_running_status.json",
+      repoNamespace: "Tsumugii",
+      hfToken: "hf_test_token"
+    });
+    const app = createApp({ db, refreshService, preflopRangesPath, solverJobService });
+    const rangePath = "3OD-EP/3OD-4.3 vs 3IA-4.2.json";
+    await approveRange(app, rangePath);
+    const created = await request(app)
+      .post("/api/jobs")
+      .send({ serverId: "solver-01", rangePath });
+
+    const started = await request(app).post(`/api/jobs/${created.body.job.id}/start`);
+
+    expect(started.status).toBe(200);
+    expect(started.body.job).toMatchObject({
+      id: created.body.job.id,
+      status: "queued"
+    });
+    expect(started.body.job.lastError).toContain("solver code sync started");
+    expect(commands.some((command) => command.includes("git pull --rebase"))).toBe(true);
+    expect(commands.some((command) => command.includes("run_pipeline.py"))).toBe(false);
+
+    const operations = await request(app).get("/api/server-operations");
+    expect(operations.body.operations[0]).toMatchObject({
+      type: "sync",
+      serverId: "solver-01",
+      status: "running"
+    });
+  });
+
+  it("auto-scans online servers before starting retained result uploads", async () => {
+    const executor: SshExecutor = {
+      run: vi.fn(async (_server, _credentials, command) => {
+        commands.push(command);
+        if (command.includes("CANDIDATE")) {
+          return "CANDIDATE\tsia-30-sod-13.5\tjob-1\t/srv/solver/results/sia-30-sod-13.5/job-1\t5\t0\tTsumugii/sia-30-sod-13.5\n";
+        }
+        return "ok";
+      })
+    };
+    const solverJobService = new SolverJobService({
+      db,
+      preflopRangesPath,
+      credentials: { username: "root", password: "secret" },
+      executor,
+      defaultPipelineStatusFilePath: "~/run/solver_running_status.json",
+      repoNamespace: "Tsumugii",
+      hfToken: "hf_test_token",
+      solverHfProxyUrl: "http://127.0.0.1:7890",
+      getHfProxySettings: () => ({ hfProxyEnabled: false, solverHfProxyEnabled: true })
+    });
+    const app = createApp({ db, refreshService, preflopRangesPath, solverJobService });
+
+    const started = await request(app)
+      .post("/api/server-operations/upload")
+      .send({});
+
+    expect(started.status).toBe(201);
+    expect(started.body.operations[0]).toMatchObject({
+      type: "upload",
+      serverId: "solver-01",
+      status: "running"
+    });
+    expect(started.body.operations[0].items).toContainEqual(expect.objectContaining({
+      repoId: "Tsumugii/sia-30-sod-13.5",
+      resultsDir: "/srv/solver/results/sia-30-sod-13.5/job-1",
+      fileCount: 5
+    }));
+    expect(started.body.operations[0].command).toContain("export HF_TOKEN=$HF_TOKEN");
+    expect(started.body.operations[0].command).not.toContain("hf_test_token");
+    expect(commands.some((command) => command.includes("find \"$RESULTS_ROOT\""))).toBe(true);
+    expect(commands.some((command) => command.includes("tmux send-keys"))).toBe(true);
   });
 
   it("keeps open-size scenario out of the dataset repo name while passing the scenario explicitly", async () => {
@@ -617,6 +788,7 @@ describe("solver job API", () => {
   it("reconciles an active job when server inventory reports the task is idle", async () => {
     const executor: SshExecutor = {
       run: vi.fn(async (_server, _credentials, command) => {
+        if (isCodeReadyCommand(command)) return codeReadyOutput();
         commands.push(command);
         return "ok";
       })
@@ -672,6 +844,7 @@ describe("solver job API", () => {
       run: vi.fn(async (_server, _credentials, command) => {
         if (command.includes("cards/cards.txt")) return solverCardsText();
         if (command.includes("DISPATCH_READY")) return "DISPATCH_READY=1\n";
+        if (isCodeReadyCommand(command)) return codeReadyOutput();
         commands.push(command);
         return "ok";
       })
@@ -846,6 +1019,7 @@ describe("solver job API", () => {
       run: vi.fn(async (_server, _credentials, command) => {
         if (command.includes("cards/cards.txt")) return solverCardsText();
         if (command.includes("DISPATCH_READY")) return "DISPATCH_READY=1\n";
+        if (isCodeReadyCommand(command)) return codeReadyOutput();
         commands.push(command);
         return "ok";
       })
@@ -869,13 +1043,15 @@ describe("solver job API", () => {
     expect(created.status).toBe(201);
     const failedSlice = created.body.run.slices[0];
     const skippedIndex = failedSlice.assignedIndices[0];
+    const abnormalIndex = failedSlice.assignedIndices[1];
     db.insertPipelineSnapshot(failedPipelineSnapshot({
       serverId: failedSlice.serverId,
       repoId: created.body.run.repoId,
       datasetName: created.body.run.datasetName,
       assignedIndices: failedSlice.assignedIndices,
       completedIndices: [],
-      failedIndices: [skippedIndex]
+      failedIndices: [skippedIndex, abnormalIndex],
+      skippedIndices: [skippedIndex]
     }));
     db.updateSolverJob(failedSlice.jobId, {
       status: "failed",
@@ -886,6 +1062,10 @@ describe("solver job API", () => {
     const listed = await request(app).get("/api/parallel-jobs");
     expect(listed.body.failurePool.find((entry: { boardIndex: number }) => entry.boardIndex === skippedIndex)).toMatchObject({
       failureReason: "skipped",
+      status: "pending"
+    });
+    expect(listed.body.failurePool.find((entry: { boardIndex: number }) => entry.boardIndex === abnormalIndex)).toMatchObject({
+      failureReason: "abnormal_end",
       status: "pending"
     });
 
@@ -940,6 +1120,7 @@ describe("solver job API", () => {
     const executor: SshExecutor = {
       run: vi.fn(async (server, _credentials, command) => {
         if (command.includes("cards/cards.txt")) return solverCardsText();
+        if (isCodeReadyCommand(command)) return codeReadyOutput();
         if (command.includes("DISPATCH_READY")) {
           if (server.id === "solver-02" && !solver02Ready) {
             throw new Error("ssh connect failed");
@@ -1009,6 +1190,7 @@ describe("solver job API", () => {
       run: vi.fn(async (_server, _credentials, command) => {
         if (command.includes("cards/cards.txt")) return solverCardsText();
         if (command.includes("DISPATCH_READY")) return "DISPATCH_READY=1\n";
+        if (isCodeReadyCommand(command)) return codeReadyOutput();
         commands.push(command);
         return "ok";
       })
@@ -1153,6 +1335,7 @@ describe("solver job API", () => {
   it("rejects job operations while the server is offline", async () => {
     const executor: SshExecutor = {
       run: vi.fn(async (_server, _credentials, command) => {
+        if (isCodeReadyCommand(command)) return codeReadyOutput();
         commands.push(command);
         return "ok";
       })
@@ -1234,6 +1417,14 @@ function idlePipelineSnapshot(serverId: string, collectedAt: string): PipelineSt
     totalBatches: null,
     totalTasks: null,
     batchExpr: null,
+    assignedIndices: [],
+    completedIndices: [],
+    failedIndices: [],
+    skippedIndices: [],
+    completedCount: null,
+    failedCount: null,
+    skippedCount: null,
+    resultPath: null,
     pid: null,
     startedAt: null,
     updatedAt: collectedAt,
@@ -1251,7 +1442,8 @@ function failedPipelineSnapshot({
   datasetName,
   assignedIndices,
   completedIndices,
-  failedIndices
+  failedIndices,
+  skippedIndices = []
 }: {
   serverId: string;
   repoId: string;
@@ -1259,6 +1451,7 @@ function failedPipelineSnapshot({
   assignedIndices: number[];
   completedIndices: number[];
   failedIndices: number[];
+  skippedIndices?: number[];
 }): PipelineStatusSnapshot {
   const collectedAt = new Date().toISOString();
   return {
@@ -1280,8 +1473,10 @@ function failedPipelineSnapshot({
     assignedIndices,
     completedIndices,
     failedIndices,
+    skippedIndices,
     completedCount: completedIndices.length,
     failedCount: failedIndices.length,
+    skippedCount: skippedIndices.length,
     resultPath: null,
     pid: null,
     startedAt: collectedAt,
@@ -1303,4 +1498,12 @@ async function approveRange(app: ReturnType<typeof createApp>, rangePath: string
 
 function solverCardsText(count = 1755): string {
   return Array.from({ length: count }, (_value, index) => `board-${index + 1}`).join("\n");
+}
+
+function isCodeReadyCommand(command: string): boolean {
+  return command.includes("CODE_READY=") && command.includes("git fetch --quiet");
+}
+
+function codeReadyOutput(): string {
+  return "CODE_READY=1\nCODE_REASON=up to date\n";
 }

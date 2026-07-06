@@ -202,6 +202,21 @@ Context refresh reminder behavior:
 - The reminder message asks the user to send any message to ClawBot to reactivate alert delivery.
 - If the reminder send is already too late and returns `ret=-2`, the stale-token frontend prompt remains the recovery path.
 
+### Solver Jobs / Server Operations
+
+The current implementation also includes solver job orchestration for the shared `~/solver` deployment on each server:
+
+- Single solver jobs submit one reviewed range to one selected server.
+- Parallel solver jobs split remaining board indices across available servers and keep a queue for follow-up chunks.
+- `Best Server` is treated as an operations-level setting. It is configured from the `Server Operations` tab and used by failure-pool retries that require the strongest fallback server.
+- `Server Operations` is an automation center for maintenance work that should run across every SSH-ready server, not a manual single-server uploader.
+- `Sync Code` starts a sync tmux session on each online enabled server. The remote command exports the solver proxy variables, runs `git stash`, then `git pull --rebase`.
+- Solver dispatch does not auto-sync merely because a server changes from offline to online. Before a solver command is sent, the backend checks whether the selected server's `~/solver` git checkout is code-ready: it must be a git repo with an upstream, no tracked working-tree changes, and at least contain the upstream commit. If the server is behind, diverged, missing root/upstream, or has tracked changes, the job stays queued and a sync tmux operation is started for that server. The queued job is retried by reconciliation after the sync completes.
+- `Scan All Results` inspects `~/solver/results/<dataset>/<job-id>` on every online enabled server and lists retained parquet/json result folders.
+- `Upload All` performs a fresh scan server-side before starting upload tmux sessions. Each server serially uploads every retained result folder assigned to that server through `python upload.py --results-dir <dir> --repo-id <repo> --file-format <format>`.
+- Upload uses `HF_TOKEN` only on the backend/remote command path. Frontend command previews redact it as `export HF_TOKEN=$HF_TOKEN`.
+- Operation records persist command, tmux session, log path, status, and structured result JSON. The UI summarizes sync latest/synced/failed counts and upload success/failed/no-file/file counts.
+
 ## API Shape
 
 Representative backend endpoints:
@@ -218,6 +233,11 @@ Representative backend endpoints:
 - `GET /api/settings/wechat/accounts`: list WeChat ClawBot recipient accounts and delivery state.
 - `POST /api/settings/wechat/accounts`: create a recipient and start QR login.
 - `POST /api/settings/wechat/accounts/:accountId/verify`: verify a target user from detected inbound messages.
+- `GET /api/server-operations`: list server operation records and events.
+- `GET /api/server-operations/upload-candidates`: scan all SSH-ready servers for retained result folders.
+- `POST /api/server-operations/sync`: start sync tmux sessions for online enabled servers.
+- `POST /api/server-operations/upload`: scan and start upload tmux sessions for online enabled servers.
+- `POST /api/server-operations/:id/stop`: stop one operation tmux session.
 
 The first version did not need API routes for editing server inventory. The current app includes a visual server inventory manager that syncs supported editable fields back to `config/servers.json`. Credentials stay out of the inventory and out of the frontend.
 

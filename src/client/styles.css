@@ -5952,7 +5952,7 @@ td .port-value {
 }
 
 .best-server-field {
-  margin: 8px 0 0;
+  margin: 0;
 }
 
 .parallel-preview-summary,
@@ -6271,6 +6271,400 @@ td .port-value {
   background: var(--red-bg);
 }
 
+.solver-job-status.deploying,
+.solver-job-status.running {
+  color: var(--green-text);
+  background: var(--green-bg);
+}
+
+.solver-job-status.queued {
+  color: var(--yellow-text);
+  background: var(--yellow-bg);
+}
+
+.solver-job-status.canceled {
+  color: var(--text-tertiary);
+  background: var(--bg-elevated);
+}
+
+.server-ops-shell {
+  display: grid;
+  gap: 14px;
+}
+
+.server-ops-command-center {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(180px, 260px);
+  gap: 12px;
+  align-items: end;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+  background: var(--bg-elevated);
+}
+
+.server-ops-command-copy {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.server-ops-command-copy strong {
+  color: var(--text-primary);
+  font-size: 15px;
+  font-weight: 900;
+}
+
+.server-ops-command-copy span,
+.server-ops-muted {
+  color: var(--text-tertiary);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.server-ops-overview-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.server-ops-overview-metric {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px;
+  background: var(--bg-elevated);
+}
+
+.server-ops-overview-metric span {
+  color: var(--text-tertiary);
+  font-size: 10px;
+  font-weight: 850;
+  text-transform: uppercase;
+}
+
+.server-ops-overview-metric strong {
+  color: var(--text-primary);
+  font-size: 20px;
+  font-weight: 900;
+}
+
+.server-ops-overview-metric em {
+  overflow: hidden;
+  color: var(--text-tertiary);
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.server-ops-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 0.9fr) minmax(360px, 1.1fr);
+  gap: 14px;
+  align-items: start;
+}
+
+.server-ops-card {
+  min-width: 0;
+  display: grid;
+  gap: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+  background: var(--bg-elevated);
+}
+
+.server-ops-target-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.server-ops-target-chip {
+  min-width: 0;
+  max-width: 100%;
+  min-height: 32px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  padding: 0 9px;
+  color: var(--text-secondary);
+  background: var(--bg-base);
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.server-ops-target-chip strong {
+  color: var(--text-primary);
+}
+
+.server-ops-target-chip em {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-tertiary);
+  font-size: 10px;
+  font-style: normal;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.server-ops-command-preview,
+.server-ops-operation-card pre {
+  margin: 0;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px;
+  color: var(--text-secondary);
+  background: var(--bg-base);
+  font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
+  font-size: 11px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.server-ops-upload-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: end;
+}
+
+.server-ops-upload-controls.auto {
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+}
+
+.server-ops-upload-list,
+.server-ops-operation-list {
+  display: grid;
+  gap: 9px;
+}
+
+.server-ops-upload-row {
+  display: grid;
+  grid-template-columns: minmax(160px, 0.7fr) minmax(180px, 0.8fr) minmax(180px, 0.8fr) 118px;
+  gap: 10px;
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px;
+  background: var(--bg-base);
+}
+
+.server-ops-upload-row.selected {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+  background: var(--accent-subtle);
+}
+
+.server-ops-upload-check {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 9px;
+  align-items: center;
+  cursor: pointer;
+}
+
+.server-ops-upload-check span {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.server-ops-upload-check strong,
+.server-ops-upload-check em,
+.server-ops-upload-meta code {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.server-ops-upload-check strong {
+  color: var(--text-primary);
+  font-size: 12px;
+}
+
+.server-ops-upload-check em {
+  color: var(--text-tertiary);
+  font-size: 10px;
+  font-style: normal;
+}
+
+.server-ops-upload-meta {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+  color: var(--text-tertiary);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.server-ops-upload-meta code {
+  color: var(--text-secondary);
+  font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
+  font-size: 10px;
+}
+
+.server-ops-repo-code {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.server-ops-format-pill {
+  min-height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  padding: 0 8px;
+  color: var(--accent);
+  background: var(--accent-subtle);
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.solver-job-field.compact {
+  gap: 4px;
+}
+
+.server-ops-operation-card {
+  min-width: 0;
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px;
+  background: var(--bg-base);
+}
+
+.server-ops-operation-card.running,
+.server-ops-operation-card.deploying,
+.server-ops-operation-card.queued {
+  border-color: color-mix(in srgb, var(--green) 35%, var(--border));
+}
+
+.server-ops-operation-card.failed {
+  border-color: color-mix(in srgb, var(--red) 36%, var(--border));
+}
+
+.server-ops-operation-card.completed {
+  border-color: color-mix(in srgb, var(--green) 28%, var(--border));
+}
+
+.server-ops-operation-card dl {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+}
+
+.server-ops-operation-card dl div {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px;
+  background: var(--bg-elevated);
+}
+
+.server-ops-operation-card dt {
+  color: var(--text-tertiary);
+  font-size: 10px;
+  font-weight: 850;
+  text-transform: uppercase;
+}
+
+.server-ops-operation-card dd {
+  margin: 3px 0 0;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.server-ops-result-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.server-ops-result-grid div {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px;
+  background: var(--bg-elevated);
+}
+
+.server-ops-result-grid span {
+  display: block;
+  color: var(--text-tertiary);
+  font-size: 10px;
+  font-weight: 850;
+  text-transform: uppercase;
+}
+
+.server-ops-result-grid strong {
+  display: block;
+  margin-top: 2px;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.server-ops-result-details {
+  display: grid;
+  gap: 6px;
+}
+
+.server-ops-result-details span {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(120px, 0.4fr) minmax(0, 0.6fr);
+  gap: 8px;
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 7px 8px;
+  background: var(--bg-elevated);
+}
+
+.server-ops-result-details strong,
+.server-ops-result-details em {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.server-ops-result-details strong {
+  color: var(--text-primary);
+  font-size: 11px;
+}
+
+.server-ops-result-details em {
+  color: var(--text-tertiary);
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 800;
+}
+
 .preflop-matrix-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -6517,6 +6911,14 @@ td .port-value {
 	  .parallel-allocation-row,
 	  .parallel-queue-item,
 	  .parallel-slice-row,
+	  .server-ops-command-center,
+	  .server-ops-overview-grid,
+	  .server-ops-grid,
+	  .server-ops-upload-controls,
+	  .server-ops-upload-row,
+	  .server-ops-operation-card dl,
+	  .server-ops-result-grid,
+	  .server-ops-result-details span,
 	  .solver-job-preview dl,
 	  .solver-job-card dl {
 	    grid-template-columns: 1fr;

@@ -41,6 +41,17 @@ import {
   datasetNameFromRangePath,
   scenarioFromRangePath
 } from "../shared/preflopDataset";
+import type {
+  ServerOperation,
+  ServerOperationEvent,
+  ServerOperationResult,
+  ServerOperationsResponse,
+  ServerSyncRequest,
+  ServerUploadCandidate,
+  ServerUploadCandidatesResponse,
+  ServerUploadItem,
+  ServerUploadRequest
+} from "../shared/serverOperations";
 import type { MonitorDatabase } from "./db";
 import { readPreflopRangeFile } from "./preflopRangeStore";
 import type { SshCredentials, SshExecutor } from "./sshCollector";
@@ -68,6 +79,11 @@ type DispatchPreflightResult = {
   reason: string | null;
 };
 
+type ServerCodeReadyResult = {
+  ready: boolean;
+  reason: string | null;
+};
+
 const ACTIVE_JOB_STATUSES = new Set<SolverJobStatus>(["deploying", "running", "stopping"]);
 const TERMINAL_PARALLEL_RUN_STATUSES = new Set<ParallelSolverRunStatus>([
   "completed",
@@ -76,6 +92,8 @@ const TERMINAL_PARALLEL_RUN_STATUSES = new Set<ParallelSolverRunStatus>([
   "canceled"
 ]);
 const DEFAULT_SOLVER_ROOT = "~/solver";
+const DEFAULT_REMOTE_PROXY_URL = "http://127.0.0.1:7890";
+const ACTIVE_SERVER_OPERATION_STATUSES = new Set(["queued", "deploying", "running"]);
 const ACTIVE_JOB_RECONCILE_GRACE_MS = 15_000;
 const HUGGING_FACE_ORIGIN = "https://huggingface.co";
 
@@ -364,12 +382,18 @@ export class SolverJobService {
     return this.requireJob(job.id);
   }
 
-  async start(id: string, options: { deferOnDispatchFailure?: boolean } = {}): Promise<SolverJob> {
+  async start(id: string, options: { deferOnDispatchFailure?: boolean; skipCodeReadyGate?: boolean } = {}): Promise<SolverJob> {
     const job = this.requireJob(id);
     const server = this.requireServer(job.serverId);
     this.ensureServerOnline(server);
     this.ensureNoActiveJob(server.id, job.id);
     this.ensureCredentials();
+    if (!options.skipCodeReadyGate) {
+      const codeReady = await this.ensureSolverCodeReadyForDispatch(server);
+      if (!codeReady.ready) {
+        return this.markJobDispatchPending(job, codeReady.reason ?? `Dispatch pending: solver code is not ready on ${server.id}.`);
+      }
+    }
     const executionCommand = this.buildExecutionCommand(job, server);
 
     this.options.db.updateSolverJob(job.id, { status: "deploying", lastError: null });
@@ -469,6 +493,163 @@ export class SolverJobService {
     return this.start(job.id);
   }
 
+  async listServerOperations(): Promise<ServerOperationsResponse> {
+    await this.reconcileServerOperations();
+    return {
+      operations: this.options.db.getServerOperations(),
+      events: this.options.db.getServerOperationEvents()
+    };
+  }
+
+  async scanUploadCandidates(serverId: string): Promise<ServerUploadCandidatesResponse> {
+    const server = this.requireServer(serverId);
+    this.ensureServerOnline(server);
+    this.ensureCredentials();
+    const output = await this.executor.run(
+      server,
+      this.options.credentials!,
+      buildScanUploadCandidatesCommand(effectiveSolverRoot(server), this.repoNamespace)
+    );
+    return {
+      server,
+      candidates: parseUploadCandidatesOutput(output, server.id, this.repoNamespace)
+    };
+  }
+
+  async scanAllUploadCandidates(serverIds?: string[]): Promise<ServerUploadCandidatesResponse> {
+    this.ensureCredentials();
+    const servers = this.operationTargetServers(serverIds);
+    const candidates: ServerUploadCandidate[] = [];
+    const failedServers: Array<{ serverId: string; message: string }> = [];
+    for (const server of servers) {
+      try {
+        const output = await this.executor.run(
+          server,
+          this.options.credentials!,
+          buildScanUploadCandidatesCommand(effectiveSolverRoot(server), this.repoNamespace)
+        );
+        candidates.push(...parseUploadCandidatesOutput(output, server.id, this.repoNamespace));
+      } catch (error) {
+        failedServers.push({
+          serverId: server.id,
+          message: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
+    return {
+      scannedServers: servers,
+      failedServers,
+      candidates: candidates.sort(compareUploadCandidates)
+    };
+  }
+
+  async startSyncOperations(input: ServerSyncRequest = {}): Promise<ServerOperationsResponse> {
+    this.ensureCredentials();
+    const servers = this.operationTargetServers(input.serverIds);
+    if (servers.length === 0) {
+      throw new Error("No online servers are available for sync.");
+    }
+    for (const server of servers) {
+      const operation = this.createSyncOperation(server);
+      this.options.db.insertServerOperation(operation);
+      this.recordOperationEvent(operation.id, "created", `Created sync operation for ${server.id}.`, operation.command);
+      await this.startServerOperation(operation, server);
+    }
+    return this.listServerOperations();
+  }
+
+  async startUploadOperation(input: ServerUploadRequest = {}): Promise<ServerOperationsResponse> {
+    this.ensureCredentials();
+    if (!this.hfToken) {
+      throw new Error("HF_TOKEN is required for upload operations.");
+    }
+    const explicitServer = input.serverId?.trim() ? this.requireServer(input.serverId) : null;
+    if (explicitServer) this.ensureServerOnline(explicitServer);
+    const targetServers = explicitServer ? [explicitServer] : this.operationTargetServers(input.serverIds);
+    if (targetServers.length === 0) {
+      throw new Error("No online servers are available for upload.");
+    }
+
+    let items = normalizeUploadItems(input.items);
+    const scanFailedServerIds = new Set<string>();
+    if (items.length === 0) {
+      const scan = await this.scanAllUploadCandidates(targetServers.map((server) => server.id));
+      items = normalizeUploadItems(scan.candidates.map((candidate) => ({
+        serverId: candidate.serverId,
+        datasetName: candidate.datasetName,
+        repoId: candidate.repoId,
+        jobId: candidate.jobId,
+        resultsDir: candidate.resultsDir,
+        fileFormat: candidate.fileFormat,
+        fileCount: candidate.fileCount
+      })));
+      for (const failed of scan.failedServers ?? []) {
+        scanFailedServerIds.add(failed.serverId);
+        const server = targetServers.find((candidate) => candidate.id === failed.serverId);
+        if (!server) continue;
+        const operation = this.createUploadOperation(server, [], {
+          summary: {
+            scanned: false,
+            upload_success: 0,
+            upload_failed: 0,
+            no_files: 0,
+            scan_failed: 1
+          },
+          details: [{ server_id: failed.serverId, error: failed.message }]
+        });
+        this.options.db.insertServerOperation(operation);
+        this.options.db.updateServerOperation(operation.id, {
+          status: "failed",
+          finishedAt: new Date().toISOString(),
+          lastError: failed.message,
+          result: operation.result
+        });
+        this.recordOperationEvent(operation.id, "scan_failed", `Upload scan failed for ${failed.serverId}: ${failed.message}`, null);
+      }
+    }
+
+    const itemsByServer = groupUploadItemsByServer(items, targetServers);
+    for (const server of targetServers) {
+      if (scanFailedServerIds.has(server.id)) continue;
+      const operationItems = itemsByServer.get(server.id) ?? [];
+      const operation = this.createUploadOperation(server, operationItems);
+      this.options.db.insertServerOperation(operation);
+      this.recordOperationEvent(
+        operation.id,
+        "created",
+        operationItems.length > 0
+          ? `Created upload operation for ${server.id} with ${operationItems.length} folder(s).`
+          : `Created upload operation for ${server.id}; no retained result folders were found.`,
+        operation.command
+      );
+      await this.startServerOperation(operation, server);
+    }
+    return this.listServerOperations();
+  }
+
+  async stopServerOperation(id: string): Promise<ServerOperationsResponse> {
+    const operation = this.requireServerOperation(id);
+    const server = this.requireServer(operation.serverId);
+    this.ensureServerOnline(server);
+    this.ensureCredentials();
+    const output = await this.executor.run(
+      server,
+      this.options.credentials!,
+      buildStopServerOperationCommand(operation.tmuxSession)
+    );
+    this.options.db.updateServerOperation(operation.id, {
+      status: "canceled",
+      finishedAt: new Date().toISOString(),
+      lastError: null
+    });
+    this.recordOperationEvent(operation.id, "canceled", "Operation tmux session was stopped.", output);
+    return this.listServerOperations();
+  }
+
+  clearServerOperationReports(): { cleared: number } {
+    return { cleared: this.options.db.clearTerminalServerOperations() };
+  }
+
   async switchTo(id: string): Promise<SolverJob> {
     const job = this.requireJob(id);
     this.ensureJobServerOnline(job);
@@ -512,6 +693,7 @@ export class SolverJobService {
   async reconcileAndStartQueuedJobs(): Promise<void> {
     this.reconcileCompletedJobs();
     this.reconcileParallelRuns();
+    await this.reconcileServerOperations();
     const servers = sortServersByNaturalId(this.options.db.getServerRows());
     for (const server of servers) {
       const queued = this.options.db.getQueuedSolverJobForServer(server.id);
@@ -944,6 +1126,174 @@ export class SolverJobService {
     return job;
   }
 
+  private requireServerOperation(id: string): ServerOperation {
+    const operation = this.options.db.getServerOperation(id);
+    if (!operation) {
+      throw new Error(`Server operation ${id} not found`);
+    }
+    return operation;
+  }
+
+  private operationTargetServers(serverIds?: string[]): ServerRow[] {
+    const servers = sortServersByNaturalId(this.options.db.getServerRows())
+      .filter((server) => server.enabled && server.latest?.connectionStatus === "online");
+    const requested = uniqueStringList(serverIds ?? []);
+    if (requested.length === 0) return servers;
+    const byId = new Map(servers.map((server) => [server.id, server]));
+    return requested.map((id) => {
+      const server = byId.get(id);
+      if (!server) throw new Error(`Server ${id} is not online or enabled.`);
+      return server;
+    });
+  }
+
+  private createSyncOperation(server: ServerRow): ServerOperation {
+    const id = randomUUID();
+    const solverRoot = effectiveSolverRoot(server);
+    const paths = serverOperationPaths(id);
+    const body = buildServerSyncCommand({
+      solverRoot,
+      proxyUrl: this.effectiveRemoteOperationProxyUrl()
+    });
+    const command = buildTrackedServerOperationCommand({
+      id,
+      type: "sync",
+      statusFilePath: paths.statusFilePath,
+      logFilePath: paths.logFilePath,
+      bodyCommand: body
+    });
+    const now = new Date().toISOString();
+    return {
+      id,
+      type: "sync",
+      serverId: server.id,
+      status: "queued",
+      tmuxSession: `sync-${safeTmuxName(server.id)}-${id.slice(0, 8)}`,
+      command,
+      items: [{ serverId: server.id, solverRoot }],
+      statusFilePath: paths.statusFilePath,
+      logFilePath: paths.logFilePath,
+      createdAt: now,
+      updatedAt: now,
+      startedAt: null,
+      finishedAt: null,
+      lastError: null,
+      result: null
+    };
+  }
+
+  private createUploadOperation(server: ServerRow, items: ServerUploadItem[], initialResult: ServerOperationResult | null = null): ServerOperation {
+    const id = randomUUID();
+    const solverRoot = effectiveSolverRoot(server);
+    const paths = serverOperationPaths(id);
+    const body = buildServerUploadCommand({
+      solverRoot,
+      items,
+      hfToken: this.hfToken,
+      proxyUrl: this.effectiveRemoteOperationProxyUrl(),
+      redactSecrets: false
+    });
+    const command = buildTrackedServerOperationCommand({
+      id,
+      type: "upload",
+      statusFilePath: paths.statusFilePath,
+      logFilePath: paths.logFilePath,
+      bodyCommand: body
+    });
+    const now = new Date().toISOString();
+    return {
+      id,
+      type: "upload",
+      serverId: server.id,
+      status: "queued",
+      tmuxSession: `upload-${safeTmuxName(server.id)}-${id.slice(0, 8)}`,
+      command,
+      items,
+      statusFilePath: paths.statusFilePath,
+      logFilePath: paths.logFilePath,
+      createdAt: now,
+      updatedAt: now,
+      startedAt: null,
+      finishedAt: null,
+      lastError: null,
+      result: initialResult
+    };
+  }
+
+  private async startServerOperation(operation: ServerOperation, server: ServerRow): Promise<void> {
+    this.options.db.updateServerOperation(operation.id, { status: "deploying", lastError: null });
+    this.recordOperationEvent(operation.id, "deploying", `Starting ${operation.type} tmux session ${operation.tmuxSession}.`, null);
+    try {
+      await this.executor.run(
+        server,
+        this.options.credentials!,
+        buildServerOperationTmuxStartCommand(operation, effectiveSolverRoot(server), operation.command)
+      );
+      const now = new Date().toISOString();
+      this.options.db.updateServerOperation(operation.id, {
+        status: "running",
+        startedAt: now,
+        finishedAt: null,
+        lastError: null,
+        updatedAt: now
+      });
+      this.recordOperationEvent(operation.id, "started", `Started ${operation.tmuxSession}.`, operation.command);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.options.db.updateServerOperation(operation.id, {
+        status: "failed",
+        finishedAt: new Date().toISOString(),
+        lastError: message
+      });
+      this.recordOperationEvent(operation.id, "failed", message, null);
+    }
+  }
+
+  private async reconcileServerOperations(): Promise<void> {
+    const activeOperations = this.options.db.getServerOperations()
+      .filter((operation) => ACTIVE_SERVER_OPERATION_STATUSES.has(operation.status));
+    if (activeOperations.length === 0 || !this.options.credentials) return;
+    const servers = new Map(this.options.db.getServerRows().map((server) => [server.id, server]));
+    for (const operation of activeOperations) {
+      const server = servers.get(operation.serverId);
+      if (!server || server.latest?.connectionStatus !== "online") continue;
+      try {
+        const output = await this.executor.run(
+          server,
+          this.options.credentials,
+          buildReadServerOperationStatusCommand(operation.statusFilePath)
+        );
+        const status = parseRemoteOperationStatus(output);
+        if (!status || status.id !== operation.id || status.status === operation.status) continue;
+        if (status.status === "completed" || status.status === "failed") {
+          this.options.db.updateServerOperation(operation.id, {
+            status: status.status,
+            startedAt: status.startedAt ?? operation.startedAt,
+            finishedAt: status.finishedAt ?? new Date().toISOString(),
+            lastError: status.status === "failed" ? status.error ?? `Exit code ${status.exitCode ?? "unknown"}` : null,
+            result: status.result,
+            updatedAt: status.updatedAt ?? new Date().toISOString()
+          });
+          this.recordOperationEvent(
+            operation.id,
+            status.status,
+            status.status === "completed" ? "Remote operation completed." : "Remote operation failed.",
+            output
+          );
+        } else if (status.status === "running" && operation.status !== "running") {
+          this.options.db.updateServerOperation(operation.id, {
+            status: "running",
+            startedAt: status.startedAt ?? operation.startedAt,
+            lastError: null,
+            updatedAt: status.updatedAt ?? new Date().toISOString()
+          });
+        }
+      } catch {
+        // Status file may not exist yet while the tmux command is starting.
+      }
+    }
+  }
+
   private ensureNoActiveJob(serverId: string, exceptJobId?: string): void {
     const active = this.options.db.getActiveSolverJobForServer(serverId, exceptJobId);
     if (active) {
@@ -1045,6 +1395,65 @@ export class SolverJobService {
     });
   }
 
+  private async ensureSolverCodeReadyForDispatch(server: ServerRow): Promise<ServerCodeReadyResult> {
+    await this.reconcileServerOperations();
+    const activeSync = this.activeServerSyncOperation(server.id);
+    if (activeSync) {
+      return {
+        ready: false,
+        reason: `Dispatch pending: solver code sync is already running on ${server.id} (${activeSync.tmuxSession}).`
+      };
+    }
+
+    try {
+      const output = await this.executor.run(
+        server,
+        this.options.credentials!,
+        buildServerCodeReadyCommand({
+          solverRoot: effectiveSolverRoot(server),
+          proxyUrl: this.effectiveRemoteOperationProxyUrl()
+        })
+      );
+      const status = parseServerCodeReadyOutput(output);
+      if (status.ready) return status;
+
+      const operation = this.createSyncOperation(server);
+      this.options.db.insertServerOperation(operation);
+      this.recordOperationEvent(
+        operation.id,
+        "created",
+        `Created solver code sync before dispatch for ${server.id}: ${status.reason ?? "not ready"}.`,
+        operation.command
+      );
+      await this.startServerOperation(operation, server);
+      const updated = this.options.db.getServerOperation(operation.id) ?? operation;
+      if (updated.status === "failed") {
+        return {
+          ready: false,
+          reason: `Dispatch pending: solver code sync failed on ${server.id}: ${updated.lastError ?? "unknown error"}.`
+        };
+      }
+      return {
+        ready: false,
+        reason: `Dispatch pending: solver code sync started on ${server.id} (${updated.tmuxSession}).`
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return {
+        ready: false,
+        reason: `Dispatch pending: solver code readiness check failed on ${server.id}: ${message}`
+      };
+    }
+  }
+
+  private activeServerSyncOperation(serverId: string): ServerOperation | null {
+    return this.options.db.getServerOperations().find((operation) =>
+      operation.serverId === serverId &&
+      operation.type === "sync" &&
+      ACTIVE_SERVER_OPERATION_STATUSES.has(operation.status)
+    ) ?? null;
+  }
+
   private async assignAndStartNextParallelSliceIfReady(server: ServerRow): Promise<boolean> {
     if (!server.enabled || !serverIsOnline(server)) return false;
     if (this.options.db.getActiveSolverJobForServer(server.id)) return false;
@@ -1139,6 +1548,10 @@ export class SolverJobService {
     return this.getHfProxySettings().solverHfProxyEnabled ? this.solverHfProxyUrl : null;
   }
 
+  private effectiveRemoteOperationProxyUrl(): string {
+    return this.effectiveSolverHfProxyUrl() ?? DEFAULT_REMOTE_PROXY_URL;
+  }
+
   private async readSolverCardsForServers(servers: ServerRow[]): Promise<string[]> {
     if (!this.options.credentials) {
       throw new Error("SSH credentials are required to read remote solver cards for parallel allocation.");
@@ -1169,6 +1582,17 @@ export class SolverJobService {
     this.options.db.insertSolverJobEvent({
       id: randomUUID(),
       jobId,
+      type,
+      message,
+      commandPreview,
+      createdAt: new Date().toISOString()
+    });
+  }
+
+  private recordOperationEvent(operationId: string, type: string, message: string, commandPreview: string | null): void {
+    this.options.db.insertServerOperationEvent({
+      id: randomUUID(),
+      operationId,
       type,
       message,
       commandPreview,
@@ -1519,6 +1943,297 @@ export function buildTmuxStartCommand(job: SolverJob, solverRoot: string, comman
   ].join("\n");
 }
 
+export function buildServerOperationTmuxStartCommand(operation: ServerOperation, solverRoot: string, command = operation.command): string {
+  return [
+    "set -e",
+    `tmux has-session -t ${shellQuote(operation.tmuxSession)} 2>/dev/null || tmux new-session -d -s ${shellQuote(operation.tmuxSession)} -c ${shellQuoteRemotePath(solverRoot)}`,
+    `tmux send-keys -t ${shellQuote(operation.tmuxSession)} ${shellQuote(command)} C-m`
+  ].join("\n");
+}
+
+export function buildServerSyncCommand({
+  solverRoot,
+  proxyUrl = DEFAULT_REMOTE_PROXY_URL
+}: {
+  solverRoot: string;
+  proxyUrl?: string;
+}): string {
+  return String.raw`set +e
+cd ${shellQuoteRemotePath(solverRoot)}
+export http_proxy=${shellQuote(proxyUrl)}
+export https_proxy=${shellQuote(proxyUrl)}
+SYNC_STARTED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+STASH_OUTPUT=$(git stash 2>&1)
+STASH_CODE=$?
+PULL_OUTPUT=$(git pull --rebase 2>&1)
+PULL_CODE=$?
+SYNC_FINISHED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+if [ "$STASH_CODE" -eq 0 ] && [ "$PULL_CODE" -eq 0 ]; then
+  if printf '%s\n' "$PULL_OUTPUT" | grep -qi "Already up to date"; then SYNC_KIND=latest; else SYNC_KIND=synced; fi
+else
+  SYNC_KIND=failed
+fi
+export STASH_OUTPUT PULL_OUTPUT
+python - "$OP_RESULT_FILE" "$SYNC_KIND" "$STASH_CODE" "$PULL_CODE" "$SYNC_STARTED_AT" "$SYNC_FINISHED_AT" <<'PY'
+import json
+import os
+import sys
+
+path, kind, stash_code, pull_code, started_at, finished_at = sys.argv[1:7]
+stash_output = os.environ.get("STASH_OUTPUT", "")
+pull_output = os.environ.get("PULL_OUTPUT", "")
+result = {
+    "summary": {
+        "latest": 1 if kind == "latest" else 0,
+        "synced": 1 if kind == "synced" else 0,
+        "failed": 1 if kind == "failed" else 0,
+        "stash_code": int(stash_code),
+        "pull_code": int(pull_code),
+    },
+    "details": [{
+        "kind": kind,
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "stash_output": stash_output[-800:],
+        "pull_output": pull_output[-1200:],
+    }],
+}
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(result, handle, ensure_ascii=True)
+PY
+printf '%s\n' "$STASH_OUTPUT"
+printf '%s\n' "$PULL_OUTPUT"
+if [ "$STASH_CODE" -ne 0 ] || [ "$PULL_CODE" -ne 0 ]; then exit 1; fi`;
+}
+
+export function buildServerCodeReadyCommand({
+  solverRoot,
+  proxyUrl = DEFAULT_REMOTE_PROXY_URL
+}: {
+  solverRoot: string;
+  proxyUrl?: string;
+}): string {
+  return String.raw`set +e
+cd ${shellQuoteRemotePath(solverRoot)} 2>/dev/null
+CD_CODE=$?
+if [ "$CD_CODE" -ne 0 ]; then
+  echo "CODE_READY=0"
+  echo "CODE_REASON=solver root missing"
+  exit 0
+fi
+export http_proxy=${shellQuote(proxyUrl)}
+export https_proxy=${shellQuote(proxyUrl)}
+git rev-parse --is-inside-work-tree >/dev/null 2>&1
+GIT_CODE=$?
+if [ "$GIT_CODE" -ne 0 ]; then
+  echo "CODE_READY=0"
+  echo "CODE_REASON=solver root is not a git repo"
+  exit 0
+fi
+UPSTREAM=$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null)
+if [ -z "$UPSTREAM" ]; then
+  echo "CODE_READY=0"
+  echo "CODE_REASON=no git upstream configured"
+  exit 0
+fi
+git fetch --quiet
+FETCH_CODE=$?
+if [ "$FETCH_CODE" -ne 0 ]; then
+  echo "CODE_READY=0"
+  echo "CODE_REASON=git fetch failed"
+  exit 0
+fi
+LOCAL=$(git rev-parse HEAD 2>/dev/null)
+REMOTE=$(git rev-parse '@{u}' 2>/dev/null)
+BASE=$(git merge-base HEAD '@{u}' 2>/dev/null)
+if ! git diff --quiet --ignore-submodules -- . || ! git diff --cached --quiet --ignore-submodules -- .; then
+  echo "CODE_READY=0"
+  echo "CODE_REASON=tracked working tree changes"
+  echo "CODE_LOCAL=$LOCAL"
+  echo "CODE_REMOTE=$REMOTE"
+  exit 0
+fi
+if [ "$LOCAL" = "$REMOTE" ]; then
+  echo "CODE_READY=1"
+  echo "CODE_REASON=up to date"
+elif [ "$LOCAL" = "$BASE" ]; then
+  echo "CODE_READY=0"
+  echo "CODE_REASON=behind upstream"
+elif [ "$REMOTE" = "$BASE" ]; then
+  echo "CODE_READY=1"
+  echo "CODE_REASON=local contains upstream"
+else
+  echo "CODE_READY=0"
+  echo "CODE_REASON=diverged from upstream"
+fi
+echo "CODE_LOCAL=$LOCAL"
+echo "CODE_REMOTE=$REMOTE"`;
+}
+
+export function buildServerUploadCommand({
+  solverRoot,
+  items,
+  hfToken,
+  proxyUrl = DEFAULT_REMOTE_PROXY_URL,
+  redactSecrets = false
+}: {
+  solverRoot: string;
+  items: ServerUploadItem[];
+  hfToken?: string | null;
+  proxyUrl?: string;
+  redactSecrets?: boolean;
+}): string {
+  const token = hfToken?.trim();
+  if (!token) throw new Error("HF_TOKEN is required for upload operations.");
+  const plan = JSON.stringify(items.map((item) => ({
+    datasetName: item.datasetName,
+    repoId: item.repoId,
+    jobId: item.jobId ?? "",
+    resultsDir: item.resultsDir,
+    fileFormat: item.fileFormat,
+    fileCount: item.fileCount ?? 0
+  })));
+  return String.raw`set -e
+cd ${shellQuoteRemotePath(solverRoot)}
+export http_proxy=${shellQuote(proxyUrl)}
+export https_proxy=${shellQuote(proxyUrl)}
+${redactSecrets ? "export HF_TOKEN=$HF_TOKEN" : `export HF_TOKEN=${shellQuote(token)}`}
+cat > "$OP_UPLOAD_PLAN_FILE" <<'SERVER_UPLOAD_PLAN_JSON'
+${plan}
+SERVER_UPLOAD_PLAN_JSON
+python - "$OP_UPLOAD_PLAN_FILE" "$OP_RESULT_FILE" <<'PY'
+import json
+import subprocess
+import sys
+import time
+
+plan_path, result_path = sys.argv[1:3]
+with open(plan_path, "r", encoding="utf-8") as handle:
+    items = json.load(handle)
+
+summary = {
+    "folders": len(items),
+    "upload_success": 0,
+    "upload_failed": 0,
+    "files_requested": 0,
+    "no_files": 1 if not items else 0,
+    "duration_seconds": 0,
+}
+details = []
+started = time.time()
+
+for item in items:
+    file_count = int(item.get("fileCount") or 0)
+    summary["files_requested"] += file_count
+    command = [
+        "python",
+        "upload.py",
+        "--results-dir",
+        item["resultsDir"],
+        "--repo-id",
+        item["repoId"],
+        "--file-format",
+        item.get("fileFormat") or "parquet",
+    ]
+    item_started = time.time()
+    print("[Upload]", item["repoId"], "<-", item["resultsDir"], flush=True)
+    process = subprocess.run(command, text=True, capture_output=True)
+    output = (process.stdout or "") + (process.stderr or "")
+    if output:
+        print(output, end="" if output.endswith("\n") else "\n", flush=True)
+    duration = max(0, round(time.time() - item_started))
+    success = process.returncode == 0
+    if success:
+        summary["upload_success"] += 1
+    else:
+        summary["upload_failed"] += 1
+    details.append({
+        "dataset_name": item.get("datasetName") or "",
+        "repo_id": item["repoId"],
+        "job_id": item.get("jobId") or "",
+        "results_dir": item["resultsDir"],
+        "file_format": item.get("fileFormat") or "parquet",
+        "file_count": file_count,
+        "exit_code": process.returncode,
+        "success": success,
+        "duration_seconds": duration,
+        "output_tail": output[-1600:],
+    })
+
+summary["duration_seconds"] = max(0, round(time.time() - started))
+with open(result_path, "w", encoding="utf-8") as handle:
+    json.dump({"summary": summary, "details": details}, handle, ensure_ascii=True)
+sys.exit(0 if summary["upload_failed"] == 0 else 1)
+PY`;
+}
+
+export function buildTrackedServerOperationCommand({
+  id,
+  type,
+  statusFilePath,
+  logFilePath,
+  bodyCommand
+}: {
+  id: string;
+  type: "sync" | "upload";
+  statusFilePath: string;
+  logFilePath: string;
+  bodyCommand: string;
+}): string {
+  return String.raw`set -u
+OP_ID=${shellQuote(id)}
+OP_TYPE=${shellQuote(type)}
+STATUS_FILE=${shellQuoteRemotePath(statusFilePath)}
+LOG_FILE=${shellQuoteRemotePath(logFilePath)}
+OP_RESULT_FILE="${"$"}{STATUS_FILE}.result"
+OP_UPLOAD_PLAN_FILE="${"$"}{STATUS_FILE}.upload-plan.json"
+mkdir -p "$(dirname "$STATUS_FILE")" "$(dirname "$LOG_FILE")"
+OP_STARTED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+printf '{"id":"%s","type":"%s","status":"running","started_at":"%s","updated_at":"%s","exit_code":null,"log_file":"%s","result":null}\n' "$OP_ID" "$OP_TYPE" "$OP_STARTED_AT" "$OP_STARTED_AT" "$LOG_FILE" > "$STATUS_FILE"
+set +e
+(
+${bodyCommand}
+) > "$LOG_FILE" 2>&1
+OP_CODE=$?
+OP_FINISHED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+if [ "$OP_CODE" -eq 0 ]; then OP_STATUS=completed; else OP_STATUS=failed; fi
+if [ -s "$OP_RESULT_FILE" ]; then OP_RESULT_JSON=$(cat "$OP_RESULT_FILE"); else OP_RESULT_JSON='{"summary":{},"details":[]}'; fi
+printf '{"id":"%s","type":"%s","status":"%s","started_at":"%s","finished_at":"%s","updated_at":"%s","exit_code":%s,"log_file":"%s","result":%s}\n' "$OP_ID" "$OP_TYPE" "$OP_STATUS" "$OP_STARTED_AT" "$OP_FINISHED_AT" "$OP_FINISHED_AT" "$OP_CODE" "$LOG_FILE" "$OP_RESULT_JSON" > "$STATUS_FILE"
+exit "$OP_CODE"`;
+}
+
+export function buildScanUploadCandidatesCommand(solverRoot: string, repoNamespace = "Tsumugii"): string {
+  const resultsRoot = joinRemotePath(solverRoot, "results");
+  return String.raw`set -e
+RESULTS_ROOT=${shellQuoteRemotePath(resultsRoot)}
+REPO_NAMESPACE=${shellQuote(repoNamespace)}
+[ -d "$RESULTS_ROOT" ] || exit 0
+find "$RESULTS_ROOT" -mindepth 2 -maxdepth 2 -type d -print | sort | while IFS= read -r DIR; do
+  PARQUET_COUNT=$(find "$DIR" -maxdepth 1 -type f -name '*.parquet' | wc -l | tr -d ' ')
+  JSON_COUNT=$(find "$DIR" -maxdepth 1 -type f -name '*.json' | wc -l | tr -d ' ')
+  if [ "$PARQUET_COUNT" -gt 0 ] || [ "$JSON_COUNT" -gt 0 ]; then
+    DATASET=$(basename "$(dirname "$DIR")")
+    JOB_ID=$(basename "$DIR")
+    printf 'CANDIDATE\t%s\t%s\t%s\t%s\t%s\t%s/%s\n' "$DATASET" "$JOB_ID" "$DIR" "$PARQUET_COUNT" "$JSON_COUNT" "$REPO_NAMESPACE" "$DATASET"
+  fi
+done`;
+}
+
+export function buildReadServerOperationStatusCommand(statusFilePath: string): string {
+  return [
+    "set -e",
+    `cat ${shellQuoteRemotePath(statusFilePath)}`
+  ].join("\n");
+}
+
+export function buildStopServerOperationCommand(tmuxSession: string): string {
+  return [
+    "set -u",
+    `SESSION=${shellQuote(tmuxSession)}`,
+    `tmux has-session -t "$SESSION" 2>/dev/null && tmux kill-session -t "$SESSION" || true`
+  ].join("\n");
+}
+
 export function buildDispatchPreflightCommand(statusFilePath: string): string {
   return String.raw`set -e
 STATUS_FILE=${shellQuoteRemotePath(statusFilePath)}
@@ -1629,6 +2344,7 @@ function playerForPosition(document: PreflopRangeDocument, position: "OOP" | "IP
 function completedStatusFromPipeline(pipeline: PipelineStatusSnapshot | null): SolverJobStatus {
   if (!pipeline) return "interrupted";
   if (pipeline.displayStatus === "completed" || pipeline.displayStatus === "completed_with_upload_failures") {
+    if (pipelineBoardFailureCount(pipeline) > 0) return "failed";
     return "completed";
   }
   if (
@@ -1641,6 +2357,10 @@ function completedStatusFromPipeline(pipeline: PipelineStatusSnapshot | null): S
     return "failed";
   }
   return "interrupted";
+}
+
+function pipelineBoardFailureCount(pipeline: PipelineStatusSnapshot): number {
+  return pipeline.failedCount ?? pipeline.failedIndices.length;
 }
 
 function pipelineBelongsToJob(pipeline: PipelineStatusSnapshot, job: SolverJob): boolean {
@@ -1665,6 +2385,16 @@ function parseDispatchPreflightOutput(output: string): DispatchPreflightResult {
   };
 }
 
+function parseServerCodeReadyOutput(output: string): ServerCodeReadyResult {
+  const lines = output.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const readyLine = lines.find((line) => line.startsWith("CODE_READY="));
+  const reasonLine = lines.find((line) => line.startsWith("CODE_REASON="));
+  return {
+    ready: readyLine === "CODE_READY=1",
+    reason: reasonLine ? reasonLine.slice("CODE_REASON=".length).trim() || null : null
+  };
+}
+
 function pipelineIsNewEnoughForJob(pipeline: PipelineStatusSnapshot, job: SolverJob): boolean {
   const reference = Date.parse(job.startedAt ?? job.updatedAt ?? job.createdAt);
   const collected = Date.parse(pipeline.collectedAt);
@@ -1686,6 +2416,11 @@ function pipelineCanSettleActiveJob(pipeline: PipelineStatusSnapshot, job: Solve
 }
 
 function pipelineReconciliationError(pipeline: PipelineStatusSnapshot, job: SolverJob): string {
+  const failedBoards = pipelineBoardFailureCount(pipeline);
+  if (failedBoards > 0) {
+    const skippedBoards = pipeline.skippedCount ?? pipeline.skippedIndices.length;
+    return `${failedBoards} board(s) failed or skipped in solver output (${skippedBoards} skipped).`;
+  }
   if (pipeline.errorMessage) return pipeline.errorMessage;
   if (pipeline.error) return pipeline.error;
   if (!pipelineBelongsToJob(pipeline, job) && isPipelineActive(pipeline)) {
@@ -1779,6 +2514,148 @@ function parseSolverCards(raw: string): string[] {
     throw new Error("solver cards.txt is empty.");
   }
   return cards;
+}
+
+export function parseUploadCandidatesOutput(output: string, serverId: string, repoNamespace = "Tsumugii"): ServerUploadCandidate[] {
+  return output
+    .split(/\r?\n/)
+    .flatMap((line) => {
+      const parts = line.split("\t");
+      if (parts[0] !== "CANDIDATE" || parts.length < 6) return [];
+      const datasetName = parts[1]?.trim() ?? "";
+      const jobId = parts[2]?.trim() ?? "";
+      const resultsDir = parts[3]?.trim() ?? "";
+      const parquetCount = Number(parts[4] ?? 0);
+      const jsonCount = Number(parts[5] ?? 0);
+      const repoId = (parts[6]?.trim() || `${repoNamespace}/${datasetName}`).replace(/\/+/g, "/");
+      if (!datasetName || !jobId || !resultsDir) return [];
+      const fileFormat = parquetCount > 0 ? "parquet" : "json";
+      return [{
+        id: `${serverId}:${resultsDir}`,
+        serverId,
+        datasetName,
+        repoId,
+        jobId,
+        resultsDir,
+        parquetCount: Number.isFinite(parquetCount) ? parquetCount : 0,
+        jsonCount: Number.isFinite(jsonCount) ? jsonCount : 0,
+        fileFormat,
+        fileCount: fileFormat === "parquet" ? parquetCount : jsonCount
+      }];
+    });
+}
+
+function normalizeUploadItems(items: ServerUploadItem[] | undefined): ServerUploadItem[] {
+  if (!Array.isArray(items)) return [];
+  const normalized: ServerUploadItem[] = [];
+  const seen = new Set<string>();
+  for (const item of items) {
+    const resultsDir = typeof item.resultsDir === "string" ? item.resultsDir.trim() : "";
+    const repoId = typeof item.repoId === "string" ? item.repoId.trim() : "";
+    const datasetName = typeof item.datasetName === "string" && item.datasetName.trim()
+      ? item.datasetName.trim()
+      : repoId.split("/").pop() ?? "";
+    const fileFormat = (SOLVER_UPLOAD_FORMATS as readonly string[]).includes(item.fileFormat) ? item.fileFormat : "parquet";
+    if (!resultsDir || !repoId || !datasetName) continue;
+    const key = `${resultsDir}:${repoId}:${fileFormat}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    normalized.push({
+      serverId: typeof item.serverId === "string" ? item.serverId.trim() || undefined : undefined,
+      datasetName,
+      repoId,
+      jobId: typeof item.jobId === "string" ? item.jobId.trim() || undefined : undefined,
+      resultsDir,
+      fileFormat,
+      fileCount: typeof item.fileCount === "number" && Number.isFinite(item.fileCount) ? Math.max(0, Math.trunc(item.fileCount)) : undefined
+    });
+  }
+  return normalized;
+}
+
+function groupUploadItemsByServer(items: ServerUploadItem[], servers: ServerRow[]): Map<string, ServerUploadItem[]> {
+  const byServer = new Map(servers.map((server) => [server.id, [] as ServerUploadItem[]]));
+  if (servers.length === 1) {
+    byServer.set(servers[0].id, items.map((item) => ({ ...item, serverId: servers[0].id })));
+    return byServer;
+  }
+  for (const item of items) {
+    const serverId = item.serverId?.trim();
+    if (!serverId || !byServer.has(serverId)) continue;
+    byServer.get(serverId)!.push(item);
+  }
+  return byServer;
+}
+
+function compareUploadCandidates(left: ServerUploadCandidate, right: ServerUploadCandidate): number {
+  const serverDelta = left.serverId.localeCompare(right.serverId, undefined, { numeric: true, sensitivity: "base" });
+  if (serverDelta !== 0) return serverDelta;
+  const datasetDelta = left.datasetName.localeCompare(right.datasetName, undefined, { numeric: true, sensitivity: "base" });
+  if (datasetDelta !== 0) return datasetDelta;
+  return left.jobId.localeCompare(right.jobId, undefined, { numeric: true, sensitivity: "base" });
+}
+
+function parseRemoteOperationStatus(output: string): {
+  id: string;
+  status: "running" | "completed" | "failed";
+  startedAt: string | null;
+  finishedAt: string | null;
+  updatedAt: string | null;
+  exitCode: number | null;
+  error: string | null;
+  result: ServerOperationResult | null;
+} | null {
+  try {
+    const parsed = JSON.parse(output.trim()) as unknown;
+    if (!isRecord(parsed) || typeof parsed.id !== "string") return null;
+    if (parsed.status !== "running" && parsed.status !== "completed" && parsed.status !== "failed") return null;
+    return {
+      id: parsed.id,
+      status: parsed.status,
+      startedAt: typeof parsed.started_at === "string" ? parsed.started_at : null,
+      finishedAt: typeof parsed.finished_at === "string" ? parsed.finished_at : null,
+      updatedAt: typeof parsed.updated_at === "string" ? parsed.updated_at : null,
+      exitCode: typeof parsed.exit_code === "number" && Number.isFinite(parsed.exit_code) ? Math.trunc(parsed.exit_code) : null,
+      error: typeof parsed.error === "string" ? parsed.error : null,
+      result: parseServerOperationResult(parsed.result)
+    };
+  } catch {
+    return null;
+  }
+}
+
+function parseServerOperationResult(value: unknown): ServerOperationResult | null {
+  if (!isRecord(value)) return null;
+  const summary = isRecord(value.summary) ? normalizeOperationResultRecord(value.summary) : {};
+  const details = Array.isArray(value.details)
+    ? value.details.filter(isRecord).map(normalizeOperationResultRecord)
+    : [];
+  return {
+    summary,
+    details,
+    raw: typeof value.raw === "string" ? value.raw : null
+  };
+}
+
+function normalizeOperationResultRecord(value: Record<string, unknown>): Record<string, number | string | boolean | null> {
+  const result: Record<string, number | string | boolean | null> = {};
+  for (const [key, raw] of Object.entries(value)) {
+    if (typeof raw === "string" || typeof raw === "number" || typeof raw === "boolean" || raw === null) {
+      result[key] = raw;
+    }
+  }
+  return result;
+}
+
+function serverOperationPaths(id: string): { statusFilePath: string; logFilePath: string } {
+  return {
+    statusFilePath: `~/run/server_operation_${id}.json`,
+    logFilePath: `~/run/server_operation_${id}.log`
+  };
+}
+
+function safeTmuxName(value: string): string {
+  return value.replace(/[^A-Za-z0-9_.-]+/g, "-").replace(/^-+|-+$/g, "") || "server";
 }
 
 async function fetchMissingBoardIndices(
@@ -1938,12 +2815,10 @@ function failureEntriesForSlice(
   job: SolverJob,
   previousFailurePoolEntries: Map<number, ParallelFailurePoolEntry>
 ): Array<{ index: number; failureReason: ParallelFailureReason }> {
-  const completed = new Set(job.pipeline?.completedIndices ?? []);
-  const skipped = new Set(
-    job.status === "failed"
-      ? (job.pipeline?.failedIndices ?? []).filter((index) => slice.assignedIndices.includes(index))
-      : []
-  );
+  const assigned = new Set(slice.assignedIndices);
+  const completed = new Set((job.pipeline?.completedIndices ?? []).filter((index) => assigned.has(index)));
+  const skipped = new Set((job.pipeline?.skippedIndices ?? []).filter((index) => assigned.has(index)));
+  const failed = new Set((job.pipeline?.failedIndices ?? []).filter((index) => assigned.has(index)));
   const failures: Array<{ index: number; failureReason: ParallelFailureReason }> = [];
   for (const index of skipped) {
     const previousReason = previousFailurePoolEntries.get(index)?.failureReason;
@@ -1954,8 +2829,12 @@ function failureEntriesForSlice(
         : "skipped"
     });
   }
+  for (const index of failed) {
+    if (skipped.has(index)) continue;
+    failures.push({ index, failureReason: "abnormal_end" });
+  }
   for (const index of slice.assignedIndices) {
-    if (completed.has(index) || skipped.has(index)) continue;
+    if (completed.has(index) || skipped.has(index) || failed.has(index)) continue;
     failures.push({ index, failureReason: "abnormal_end" });
   }
   if (failures.length === 0) {

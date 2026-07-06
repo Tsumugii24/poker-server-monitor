@@ -66,6 +66,10 @@ import {
   type SolverJobPreviewRequest,
   type SolverScenarioLibraryItem
 } from "../shared/solverJobs";
+import type {
+  ServerSyncRequest,
+  ServerUploadRequest
+} from "../shared/serverOperations";
 import {
   addSolverScenario,
   deleteSolverScenario,
@@ -759,6 +763,68 @@ export function createApp({
       response.status(201).json({ run, ...solverJobService.listParallelJobs() });
     } catch (error) {
       respondSolverJobError(response, error, "parallel_failure_pool_submit_failed");
+    }
+  });
+
+  app.get("/api/server-operations", async (_request, response) => {
+    try {
+      response.json(await solverJobService.listServerOperations());
+    } catch (error) {
+      respondSolverJobError(response, error, "server_operations_list_failed");
+    }
+  });
+
+  app.post("/api/server-operations/sync", async (request, response) => {
+    if (!isServerSyncRequest(request.body)) {
+      response.status(400).json({ error: "invalid_server_sync_operation" });
+      return;
+    }
+
+    try {
+      response.status(201).json(await solverJobService.startSyncOperations(request.body));
+    } catch (error) {
+      respondSolverJobError(response, error, "server_sync_operation_failed");
+    }
+  });
+
+  app.get("/api/server-operations/upload-candidates", async (request, response) => {
+    const serverId = typeof request.query.serverId === "string" ? request.query.serverId.trim() : "";
+    try {
+      response.json(serverId
+        ? await solverJobService.scanUploadCandidates(serverId)
+        : await solverJobService.scanAllUploadCandidates()
+      );
+    } catch (error) {
+      respondSolverJobError(response, error, "server_upload_candidates_failed");
+    }
+  });
+
+  app.post("/api/server-operations/upload", async (request, response) => {
+    if (!isServerUploadRequest(request.body)) {
+      response.status(400).json({ error: "invalid_server_upload_operation" });
+      return;
+    }
+
+    try {
+      response.status(201).json(await solverJobService.startUploadOperation(request.body));
+    } catch (error) {
+      respondSolverJobError(response, error, "server_upload_operation_failed");
+    }
+  });
+
+  app.post("/api/server-operations/:id/stop", async (request, response) => {
+    try {
+      response.json(await solverJobService.stopServerOperation(request.params.id));
+    } catch (error) {
+      respondSolverJobError(response, error, "server_operation_stop_failed");
+    }
+  });
+
+  app.delete("/api/server-operations/reports", (_request, response) => {
+    try {
+      response.json({ ...solverJobService.clearServerOperationReports() });
+    } catch (error) {
+      respondSolverJobError(response, error, "server_operation_reports_clear_failed");
     }
   });
 
@@ -1503,6 +1569,37 @@ function isParallelFailurePoolSubmitRequest(value: unknown): value is ParallelFa
 function isParallelSolverQueueReorderRequest(value: unknown): value is ParallelSolverQueueReorderRequest {
   if (!isRecord(value)) return false;
   return Array.isArray(value.runIds) && value.runIds.every((id) => typeof id === "string" && id.trim() !== "");
+}
+
+function isServerSyncRequest(value: unknown): value is ServerSyncRequest {
+  if (!isRecord(value)) return false;
+  return value.serverIds == null || (
+    Array.isArray(value.serverIds) &&
+    value.serverIds.every((id) => typeof id === "string" && id.trim() !== "")
+  );
+}
+
+function isServerUploadRequest(value: unknown): value is ServerUploadRequest {
+  if (!isRecord(value)) return false;
+  if (value.serverId != null && typeof value.serverId !== "string") return false;
+  if (value.serverIds != null && (
+    !Array.isArray(value.serverIds) ||
+    !value.serverIds.every((id) => typeof id === "string" && id.trim() !== "")
+  )) return false;
+  if (value.items == null) return true;
+  if (!Array.isArray(value.items)) return false;
+  return value.items.every((item) => {
+    if (!isRecord(item)) return false;
+    return (
+      (item.serverId == null || typeof item.serverId === "string") &&
+      typeof item.datasetName === "string" &&
+      typeof item.repoId === "string" &&
+      typeof item.resultsDir === "string" &&
+      (item.fileFormat === "json" || item.fileFormat === "parquet") &&
+      (item.jobId == null || typeof item.jobId === "string") &&
+      (item.fileCount == null || typeof item.fileCount === "number")
+    );
+  });
 }
 
 function alertStatus(settings: AlertSettings): { enabled: boolean; configured: boolean } {

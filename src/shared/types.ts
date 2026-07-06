@@ -192,8 +192,10 @@ export type PipelineStatusSnapshot = {
   assignedIndices: number[];
   completedIndices: number[];
   failedIndices: number[];
+  skippedIndices: number[];
   completedCount: number | null;
   failedCount: number | null;
+  skippedCount: number | null;
   resultPath: string | null;
   pid: number | null;
   startedAt: string | null;

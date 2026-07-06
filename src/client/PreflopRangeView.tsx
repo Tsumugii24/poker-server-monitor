@@ -70,6 +70,14 @@ import {
   type SolverUploadFormat
 } from "../shared/solverJobs";
 import type {
+  ServerOperation,
+  ServerOperationEvent,
+  ServerOperationsResponse,
+  ServerUploadCandidate,
+  ServerUploadCandidatesResponse,
+  ServerUploadItem
+} from "../shared/serverOperations";
+import type {
   ConnectionStatus,
   OverviewResponse,
   PipelineDisplayStatus,
@@ -129,6 +137,14 @@ type PendingParallelReportsAction = {
   clearableCount: number;
 };
 
+type PendingServerOperationAction = {
+  action: "sync" | "upload" | "clear";
+  serverCount: number;
+  itemCount: number;
+  serverIds?: string[];
+  itemIds?: string[];
+};
+
 const EXPANDED_FOLDERS_KEY = "preflop-range-expanded-folders";
 const PARALLEL_BEST_SERVER_ID_KEY = "preflop-range-parallel-best-server-id";
 const DEFAULT_SELECTED_HAND = "AA";
@@ -185,8 +201,11 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
   const [parallelQueueDragId, setParallelQueueDragId] = useState<string | null>(null);
   const [parallelServerTab, setParallelServerTab] = useState<"available" | "unavailable">("available");
   const [parallelBestServerId, setParallelBestServerId] = useState(() => localStorage.getItem(PARALLEL_BEST_SERVER_ID_KEY) ?? "");
-  const [activeSolverJobTab, setActiveSolverJobTab] = useState<"single" | "parallel">("single");
+  const [activeSolverJobTab, setActiveSolverJobTab] = useState<"single" | "parallel" | "operations">("single");
   const [selectedServerId, setSelectedServerId] = useState("");
+  const [serverOperations, setServerOperations] = useState<ServerOperation[]>([]);
+  const [serverOperationEvents, setServerOperationEvents] = useState<ServerOperationEvent[]>([]);
+  const [uploadCandidates, setUploadCandidates] = useState<ServerUploadCandidate[]>([]);
   const [jobSettings, setJobSettings] = useState<SolverJobSettings>(DEFAULT_SOLVER_JOB_SETTINGS);
   const [jobPreview, setJobPreview] = useState<SolverJobPreview | null>(null);
   const [selectedJobScenario, setSelectedJobScenario] = useState<SolverScenario | "">("");
@@ -205,6 +224,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
   const [scenarioCopied, setScenarioCopied] = useState(false);
   const [pendingScenarioAction, setPendingScenarioAction] = useState<PendingScenarioLibraryAction | null>(null);
   const [pendingParallelReportsAction, setPendingParallelReportsAction] = useState<PendingParallelReportsAction | null>(null);
+  const [pendingServerOperationAction, setPendingServerOperationAction] = useState<PendingServerOperationAction | null>(null);
   const [offlineServerNotice, setOfflineServerNotice] = useState<OfflineServerNotice | null>(null);
   const [datasetRepoStatus, setDatasetRepoStatus] = useState<SolverDatasetRepoStatus | null>(null);
   const [datasetRepoDialog, setDatasetRepoDialog] = useState<SolverDatasetRepoStatus | null>(null);
@@ -257,16 +277,19 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
   const loadJobContext = useCallback(async () => {
     setJobError(null);
     try {
-      const [overviewResponse, jobsResponse] = await Promise.all([
+      const [overviewResponse, jobsResponse, parallelResponse, operationsResponse] = await Promise.all([
         fetchPreflopJson<OverviewResponse>("/api/overview"),
-        fetchPreflopJson<SolverJobsResponse>("/api/jobs")
+        fetchPreflopJson<SolverJobsResponse>("/api/jobs"),
+        fetchPreflopJson<ParallelSolverJobsResponse>("/api/parallel-jobs"),
+        fetchPreflopJson<ServerOperationsResponse>("/api/server-operations")
       ]);
-      const parallelResponse = await fetchPreflopJson<ParallelSolverJobsResponse>("/api/parallel-jobs");
       setServers(overviewResponse.servers);
       setJobs(jobsResponse.jobs);
       setJobEvents(jobsResponse.events);
       setParallelRuns(parallelResponse.runs);
       setFailurePool(parallelResponse.failurePool);
+      setServerOperations(operationsResponse.operations);
+      setServerOperationEvents(operationsResponse.events);
       setSelectedParallelServerIds((current) => {
         const availableIds = overviewResponse.servers
           .slice()
@@ -381,7 +404,6 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
     () => scenarioLibrary.find((scenario) => scenario.id === selectedScenarioLibraryId) ?? scenarioLibrary[0] ?? null,
     [scenarioLibrary, selectedScenarioLibraryId]
   );
-
   useEffect(() => {
     if (!scenarioManageMode && selectedScenarioLibraryItem) {
       setScenarioDraft(selectedScenarioLibraryItem);
@@ -1011,6 +1033,128 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
       setParallelRuns(response.runs);
       setFailurePool(response.failurePool);
       setPendingParallelReportsAction(null);
+    } catch (caught) {
+      setJobError(caught instanceof Error ? caught.message : String(caught));
+      await loadJobContext();
+    } finally {
+      setJobBusy(null);
+    }
+  };
+
+  const applyServerOperationsResponse = (response: ServerOperationsResponse) => {
+    setServerOperations(response.operations);
+    setServerOperationEvents(response.events);
+  };
+
+  const scanUploadCandidates = async () => {
+    setJobBusy("operation-scan");
+    setJobError(null);
+    try {
+      const response = await fetchPreflopJson<ServerUploadCandidatesResponse>(
+        "/api/server-operations/upload-candidates"
+      );
+      setUploadCandidates(response.candidates);
+    } catch (caught) {
+      setJobError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setJobBusy(null);
+    }
+  };
+
+  const requestSyncOperations = () => {
+    const targetServers = servers
+      .slice()
+      .sort(compareServersByNaturalId)
+      .filter((server) => server.enabled && serverIsOnlineForJob(server));
+    if (targetServers.length === 0) {
+      setJobError("No online enabled servers are available for sync.");
+      return;
+    }
+    setPendingServerOperationAction({
+      action: "sync",
+      serverCount: targetServers.length,
+      itemCount: targetServers.length,
+      serverIds: targetServers.map((server) => server.id)
+    });
+  };
+
+  const requestUploadOperation = () => {
+    const targetServers = servers
+      .slice()
+      .sort(compareServersByNaturalId)
+      .filter((server) => server.enabled && serverIsOnlineForJob(server));
+    if (targetServers.length === 0) {
+      setJobError("No online enabled servers are available for upload.");
+      return;
+    }
+    setPendingServerOperationAction({
+      action: "upload",
+      serverCount: targetServers.length,
+      itemCount: uploadCandidates.length,
+      serverIds: targetServers.map((server) => server.id)
+    });
+  };
+
+  const requestClearServerOperations = () => {
+    const clearableCount = serverOperations.filter((operation) => serverOperationIsTerminal(operation)).length;
+    if (clearableCount === 0) return;
+    setPendingServerOperationAction({
+      action: "clear",
+      serverCount: 0,
+      itemCount: clearableCount
+    });
+  };
+
+  const confirmServerOperationAction = async () => {
+    if (!pendingServerOperationAction) return;
+    const pending = pendingServerOperationAction;
+    setJobBusy(`operation-${pending.action}`);
+    setJobError(null);
+    try {
+      if (pending.action === "sync") {
+        const response = await fetchPreflopJson<ServerOperationsResponse>("/api/server-operations/sync", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ serverIds: pending.serverIds ?? [] })
+        });
+        applyServerOperationsResponse(response);
+      } else if (pending.action === "upload") {
+        const response = await fetchPreflopJson<ServerOperationsResponse>("/api/server-operations/upload", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            serverIds: pending.serverIds ?? []
+          })
+        });
+        applyServerOperationsResponse(response);
+      } else {
+        await fetchPreflopJson<{ cleared: number }>("/api/server-operations/reports", { method: "DELETE" });
+        const response = await fetchPreflopJson<ServerOperationsResponse>("/api/server-operations");
+        applyServerOperationsResponse(response);
+      }
+      setPendingServerOperationAction(null);
+    } catch (caught) {
+      setJobError(caught instanceof Error ? caught.message : String(caught));
+      await loadJobContext();
+    } finally {
+      setJobBusy(null);
+    }
+  };
+
+  const stopServerOperation = async (operation: ServerOperation) => {
+    const server = servers.find((candidate) => candidate.id === operation.serverId) ?? null;
+    if (!serverIsOnlineForJob(server)) {
+      showOfflineServerNotice(server, operation.serverId, `stop ${operation.type} operation`);
+      return;
+    }
+    setJobBusy(`operation-stop:${operation.id}`);
+    setJobError(null);
+    try {
+      const response = await fetchPreflopJson<ServerOperationsResponse>(
+        `/api/server-operations/${encodeURIComponent(operation.id)}/stop`,
+        { method: "POST" }
+      );
+      applyServerOperationsResponse(response);
     } catch (caught) {
       setJobError(caught instanceof Error ? caught.message : String(caught));
       await loadJobContext();
@@ -1891,6 +2035,9 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
           selectedRangeLearned={Boolean(draft?.learned)}
           settings={jobSettings}
           preview={jobPreview}
+          serverOperations={serverOperations}
+          serverOperationEvents={serverOperationEvents}
+          uploadCandidates={uploadCandidates}
           datasetName={jobDatasetName}
           datasetRepoStatus={datasetRepoStatus}
           selectedScenario={selectedJobScenario}
@@ -1909,6 +2056,11 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
             setJobPreview(null);
             clearDatasetRepoGate();
           }}
+          onOperationScanUploads={() => void scanUploadCandidates()}
+          onOperationSync={requestSyncOperations}
+          onOperationUpload={requestUploadOperation}
+          onOperationStop={(operation) => void stopServerOperation(operation)}
+          onOperationClear={requestClearServerOperations}
           onParallelServerToggle={(serverId) => {
             setSelectedParallelServerIds((current) =>
               current.includes(serverId)
@@ -2150,6 +2302,43 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
         </div>
       ) : null}
 
+      {pendingServerOperationAction ? (
+        <div className="modal-backdrop preflop-confirm-backdrop" role="presentation" onClick={() => setPendingServerOperationAction(null)}>
+          <section
+            className="preflop-confirm-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="server-operation-confirm-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="preflop-confirm-icon">
+              {pendingServerOperationAction.action === "clear" ? <Trash2 size={18} /> : (
+                pendingServerOperationAction.action === "sync" ? <RefreshCw size={18} /> : <Upload size={18} />
+              )}
+            </div>
+            <div>
+              <h3 id="server-operation-confirm-title">
+                {serverOperationConfirmTitle(pendingServerOperationAction.action)}
+              </h3>
+              <p>{serverOperationConfirmCopy(pendingServerOperationAction)}</p>
+            </div>
+            <div className="preflop-confirm-actions">
+              <button className="icon-button compact" onClick={() => setPendingServerOperationAction(null)} disabled={jobBusy?.startsWith("operation-")}>
+                Cancel
+              </button>
+              <button
+                className={`icon-button compact ${pendingServerOperationAction.action === "clear" ? "danger" : "primary"}`}
+                onClick={() => void confirmServerOperationAction()}
+                disabled={jobBusy?.startsWith("operation-")}
+              >
+                {pendingServerOperationAction.action === "clear" ? <Trash2 size={15} /> : <Check size={15} />}
+                Confirm
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
       {pendingStatusChange ? (
         <div className="modal-backdrop preflop-confirm-backdrop" role="presentation" onClick={() => setPendingStatusChange(null)}>
           <section
@@ -2314,6 +2503,9 @@ function SolverJobPanel({
   selectedRangeLearned,
   settings,
   preview,
+  serverOperations,
+  serverOperationEvents,
+  uploadCandidates,
   datasetName,
   datasetRepoStatus,
   selectedScenario,
@@ -2328,6 +2520,11 @@ function SolverJobPanel({
   error,
   onRefresh,
   onServerChange,
+  onOperationScanUploads,
+  onOperationSync,
+  onOperationUpload,
+  onOperationStop,
+  onOperationClear,
   onParallelServerToggle,
   onParallelServerTabChange,
   onParallelBestServerChange,
@@ -2368,13 +2565,16 @@ function SolverJobPanel({
   selectedParallelServerIds: string[];
   parallelServerTab: "available" | "unavailable";
   parallelBestServerId: string;
-  activeTab: "single" | "parallel";
+  activeTab: "single" | "parallel" | "operations";
   selectedServerId: string;
   selectedRangePath: string;
   selectedRangeName: string;
   selectedRangeLearned: boolean;
   settings: SolverJobSettings;
   preview: SolverJobPreview | null;
+  serverOperations: ServerOperation[];
+  serverOperationEvents: ServerOperationEvent[];
+  uploadCandidates: ServerUploadCandidate[];
   datasetName: string;
   datasetRepoStatus: SolverDatasetRepoStatus | null;
   selectedScenario: SolverScenario | "";
@@ -2389,10 +2589,15 @@ function SolverJobPanel({
   error: string | null;
   onRefresh: () => void;
   onServerChange: (serverId: string) => void;
+  onOperationScanUploads: () => void;
+  onOperationSync: () => void;
+  onOperationUpload: () => void;
+  onOperationStop: (operation: ServerOperation) => void;
+  onOperationClear: () => void;
   onParallelServerToggle: (serverId: string) => void;
   onParallelServerTabChange: (tab: "available" | "unavailable") => void;
   onParallelBestServerChange: (serverId: string) => void;
-  onTabChange: (tab: "single" | "parallel") => void;
+  onTabChange: (tab: "single" | "parallel" | "operations") => void;
   onDatasetNameChange: (datasetName: string) => void;
   onSettingsChange: (patch: Partial<SolverJobSettings>) => void;
   onScenarioChange: (scenario: SolverScenario | "") => void;
@@ -2460,6 +2665,9 @@ function SolverJobPanel({
         <button className={activeTab === "parallel" ? "active" : ""} onClick={() => onTabChange("parallel")}>
           Parallel Job System
         </button>
+        <button className={activeTab === "operations" ? "active" : ""} onClick={() => onTabChange("operations")}>
+          Server Operations
+        </button>
       </div>
 
       {activeTab === "single" ? (
@@ -2478,7 +2686,7 @@ function SolverJobPanel({
               <span>Server</span>
               <select value={selectedServerId} onChange={(event) => onServerChange(event.target.value)}>
                 <option value="">Select server</option>
-                {servers.map((server) => (
+                {servers.slice().sort(compareServersByNaturalId).map((server) => (
                   <option key={server.id} value={server.id}>
                     {server.id}
                   </option>
@@ -2738,7 +2946,7 @@ function SolverJobPanel({
           />
         </div>
       </div>
-      ) : (
+      ) : activeTab === "parallel" ? (
         <ParallelSolverJobPanel
           servers={servers}
           selectedServerIds={selectedParallelServerIds}
@@ -2757,7 +2965,6 @@ function SolverJobPanel({
           busy={busy}
           onServerToggle={onParallelServerToggle}
           onServerTabChange={onParallelServerTabChange}
-          onBestServerChange={onParallelBestServerChange}
           onDatasetNameChange={onDatasetNameChange}
           onSettingsChange={onSettingsChange}
           onScenarioChange={onScenarioChange}
@@ -2772,6 +2979,21 @@ function SolverJobPanel({
           onQueueDragStart={onParallelQueueDragStart}
           onQueueDragEnd={onParallelQueueDragEnd}
           onQueueDrop={onParallelQueueDrop}
+        />
+      ) : (
+        <ServerOperationsPanel
+          servers={servers}
+          bestServerId={parallelBestServerId}
+          operations={serverOperations}
+          events={serverOperationEvents}
+          uploadCandidates={uploadCandidates}
+          busy={busy}
+          onScanUploads={onOperationScanUploads}
+          onSync={onOperationSync}
+          onUpload={onOperationUpload}
+          onStop={onOperationStop}
+          onClear={onOperationClear}
+          onBestServerChange={onParallelBestServerChange}
         />
       )}
     </section>
@@ -2944,7 +3166,6 @@ function ParallelSolverJobPanel({
   busy,
   onServerToggle,
   onServerTabChange,
-  onBestServerChange,
   onDatasetNameChange,
   onSettingsChange,
   onScenarioChange,
@@ -2977,7 +3198,6 @@ function ParallelSolverJobPanel({
   busy: string | null;
   onServerToggle: (serverId: string) => void;
   onServerTabChange: (tab: "available" | "unavailable") => void;
-  onBestServerChange: (serverId: string) => void;
   onDatasetNameChange: (datasetName: string) => void;
   onSettingsChange: (patch: Partial<SolverJobSettings>) => void;
   onScenarioChange: (scenario: SolverScenario | "") => void;
@@ -3018,7 +3238,6 @@ function ParallelSolverJobPanel({
   const normalFailurePoolCount = visibleFailurePool.filter((entry) =>
     failurePoolEntryIsRetryable(entry) && entry.failureReason !== "skipped"
   ).length;
-  const bestServer = orderedServers.find((server) => server.id === bestServerId) ?? null;
   const failurePoolSubmitDisabled =
     baseSubmitDisabled ||
     retryableFailurePoolCount === 0 ||
@@ -3202,20 +3421,6 @@ function ParallelSolverJobPanel({
             <strong>Failure Pool</strong>
             <span>{retryableFailurePoolCount}/{visibleFailurePool.length} retryable</span>
           </div>
-          <label className="solver-job-field compact best-server-field">
-            <span>Best Server</span>
-            <select value={bestServerId} onChange={(event) => onBestServerChange(event.target.value)}>
-              <option value="">Select</option>
-              {orderedServers.map((server) => (
-                <option key={server.id} value={server.id}>
-                  {server.id}{server.latest?.connectionStatus ? ` · ${server.latest.connectionStatus}` : ""}
-                </option>
-              ))}
-            </select>
-          </label>
-          {bestServerId && !bestServer ? (
-            <div className="notice warning compact-notice">Best Server ID is not in the current server inventory.</div>
-          ) : null}
           {failurePoolReasons.length > 0 ? (
             <div className="failure-pool-reason-list">
               {failurePoolReasons.map((item) => (
@@ -3415,6 +3620,272 @@ function ParallelQueueBoard({
         </div>
       )}
     </section>
+  );
+}
+
+function ServerOperationsPanel({
+  servers,
+  bestServerId,
+  operations,
+  events,
+  uploadCandidates,
+  busy,
+  onScanUploads,
+  onSync,
+  onUpload,
+  onStop,
+  onClear,
+  onBestServerChange
+}: {
+  servers: ServerRow[];
+  bestServerId: string;
+  operations: ServerOperation[];
+  events: ServerOperationEvent[];
+  uploadCandidates: ServerUploadCandidate[];
+  busy: string | null;
+  onScanUploads: () => void;
+  onSync: () => void;
+  onUpload: () => void;
+  onStop: (operation: ServerOperation) => void;
+  onClear: () => void;
+  onBestServerChange: (serverId: string) => void;
+}) {
+  const orderedServers = servers.slice().sort(compareServersByNaturalId);
+  const onlineServers = orderedServers.filter((server) => server.enabled && serverIsOnlineForJob(server));
+  const offlineServers = orderedServers.filter((server) => server.enabled && !serverIsOnlineForJob(server));
+  const bestServer = orderedServers.find((server) => server.id === bestServerId) ?? null;
+  const terminalCount = operations.filter((operation) => serverOperationIsTerminal(operation)).length;
+  const operationSummary = summarizeServerOperations(operations);
+  const candidateSummary = summarizeUploadCandidates(uploadCandidates);
+  const activeOperations = operations
+    .filter((operation) => !serverOperationIsTerminal(operation))
+    .sort(compareServerOperations);
+  const recentOperations = operations
+    .filter(serverOperationIsTerminal)
+    .sort(compareServerOperations)
+    .slice(0, 8);
+  const latestEventByOperationId = latestServerOperationEvents(events);
+  const operationBusy = busy?.startsWith("operation-") ?? false;
+
+  return (
+    <div className="server-ops-shell">
+      <section className="server-ops-command-center">
+        <div className="server-ops-command-copy">
+          <strong>Server Operations</strong>
+          <span>{onlineServers.length} SSH-ready · {offlineServers.length} unavailable · {operations.length} tracked operations</span>
+        </div>
+        <label className="solver-job-field best-server-field">
+          <span>Best Server</span>
+          <select value={bestServerId} onChange={(event) => onBestServerChange(event.target.value)} disabled={operationBusy}>
+            <option value="">Select</option>
+            {orderedServers.map((server) => (
+              <option key={server.id} value={server.id}>
+                {server.id}{server.latest?.connectionStatus ? ` · ${server.latest.connectionStatus}` : ""}
+              </option>
+            ))}
+          </select>
+        </label>
+      </section>
+      {bestServerId && !bestServer ? (
+        <div className="notice warning compact-notice">Best Server ID is not in the current server inventory.</div>
+      ) : null}
+
+      <div className="server-ops-overview-grid">
+        <ServerOperationMetric label="Sync Success" value={operationSummary.syncSuccess} detail={`${operationSummary.syncLatest} latest`} />
+        <ServerOperationMetric label="Sync Failed" value={operationSummary.syncFailed} detail="terminal sync failures" />
+        <ServerOperationMetric label="Upload Success" value={operationSummary.uploadSuccess} detail={`${operationSummary.filesRequested} requested files`} />
+        <ServerOperationMetric label="Upload Failed" value={operationSummary.uploadFailed} detail={`${operationSummary.noFiles} no-file server(s)`} />
+      </div>
+
+      <div className="server-ops-grid">
+        <section className="server-ops-card">
+          <div className="parallel-section-title">
+            <div>
+              <strong>Sync Code</strong>
+              <span>{onlineServers.length} online enabled target{onlineServers.length === 1 ? "" : "s"}</span>
+            </div>
+            <button className="icon-button compact primary" type="button" onClick={onSync} disabled={operationBusy || onlineServers.length === 0}>
+              <RefreshCw size={14} />
+              New Sync Tmux
+            </button>
+          </div>
+          <div className="server-ops-target-list">
+            {onlineServers.length === 0 ? <p className="solver-job-empty">No online enabled server.</p> : null}
+            {onlineServers.map((server) => (
+              <span key={server.id} className="server-ops-target-chip">
+                <strong>{server.id}</strong>
+                <ConnectionBadge status={server.latest?.connectionStatus ?? "unknown"} />
+                <em>{server.solverRoot || "~/solver"}</em>
+              </span>
+            ))}
+          </div>
+          <pre className="server-ops-command-preview">
+export http_proxy="http://127.0.0.1:7890"
+export https_proxy="http://127.0.0.1:7890"
+git stash
+git pull --rebase</pre>
+        </section>
+
+        <section className="server-ops-card">
+          <div className="parallel-section-title">
+            <div>
+              <strong>Scan + Upload All</strong>
+              <span>{candidateSummary.folders} folders · {candidateSummary.files} files found in last scan</span>
+            </div>
+            <button className="icon-button compact primary" type="button" onClick={onUpload} disabled={operationBusy || onlineServers.length === 0}>
+              <Upload size={14} />
+              Upload All
+            </button>
+          </div>
+
+          <div className="server-ops-upload-controls auto">
+            <button className="icon-button compact" type="button" onClick={onScanUploads} disabled={operationBusy || onlineServers.length === 0}>
+              <Search size={14} />
+              Scan All Results
+            </button>
+            <span className="server-ops-muted">Upload All performs a fresh scan before starting tmux sessions.</span>
+          </div>
+
+          <div className="server-ops-upload-list">
+            {uploadCandidates.length === 0 ? (
+              <p className="solver-job-empty">Scan all SSH-ready servers to preview retained result folders under results/&lt;dataset&gt;/&lt;job-id&gt;.</p>
+            ) : null}
+            {uploadCandidates.map((candidate) => {
+              return (
+                <article key={candidate.id} className="server-ops-upload-row selected">
+                  <div className="server-ops-upload-check">
+                    <strong>{candidate.serverId}</strong>
+                    <span>
+                      <strong>{candidate.datasetName}</strong>
+                      <em>{candidate.jobId}</em>
+                    </span>
+                  </div>
+                  <div className="server-ops-upload-meta">
+                    <span>{candidate.parquetCount} parquet</span>
+                    <span>{candidate.jsonCount} json</span>
+                    <code>{candidate.resultsDir}</code>
+                  </div>
+                  <code className="server-ops-repo-code">{candidate.repoId}</code>
+                  <span className="server-ops-format-pill">{candidate.fileFormat}</span>
+                </article>
+              );
+            })}
+          </div>
+        </section>
+      </div>
+
+      <section className="server-ops-card">
+        <div className="parallel-section-title parallel-section-title-with-actions">
+          <div>
+            <strong>Operation History</strong>
+            <span>{activeOperations.length} active · {recentOperations.length} recent · {terminalCount} clearable</span>
+          </div>
+          <button className="icon-button compact danger" type="button" onClick={onClear} disabled={operationBusy || terminalCount === 0}>
+            <Trash2 size={14} />
+            Clear
+          </button>
+        </div>
+        {activeOperations.length === 0 ? <p className="solver-job-empty">No active server operation.</p> : null}
+        <div className="server-ops-operation-list">
+          {activeOperations.map((operation) => (
+            <ServerOperationCard
+              key={operation.id}
+              operation={operation}
+              latestEvent={latestEventByOperationId.get(operation.id) ?? null}
+              busy={busy}
+              onStop={onStop}
+            />
+          ))}
+          {recentOperations.map((operation) => (
+            <ServerOperationCard
+              key={operation.id}
+              operation={operation}
+              latestEvent={latestEventByOperationId.get(operation.id) ?? null}
+              busy={busy}
+              onStop={onStop}
+            />
+          ))}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function ServerOperationCard({
+  operation,
+  latestEvent,
+  busy,
+  onStop
+}: {
+  operation: ServerOperation;
+  latestEvent: ServerOperationEvent | null;
+  busy: string | null;
+  onStop: (operation: ServerOperation) => void;
+}) {
+  const active = !serverOperationIsTerminal(operation);
+  const stopping = busy === `operation-stop:${operation.id}`;
+  const resultDetails = operation.result?.details ?? [];
+  return (
+    <article className={`server-ops-operation-card ${operation.status} ${operation.type}`}>
+      <div className="parallel-run-head">
+        <div>
+          <strong>{serverOperationTypeLabel(operation.type)} · {operation.serverId}</strong>
+          <span>{operationItemsSummary(operation)} · {formatShortDateTime(operation.createdAt)}</span>
+        </div>
+        <em className={`solver-job-status ${operation.status}`}>{formatServerOperationStatus(operation.status)}</em>
+      </div>
+      <dl>
+        <div>
+          <dt>Tmux</dt>
+          <dd>{operation.tmuxSession}</dd>
+        </div>
+        <div>
+          <dt>Log</dt>
+          <dd>{operation.logFilePath}</dd>
+        </div>
+      </dl>
+      {operation.result ? (
+        <div className="server-ops-result-grid">
+          {serverOperationResultMetrics(operation).map((metric) => (
+            <div key={metric.label}>
+              <span>{metric.label}</span>
+              <strong>{metric.value}</strong>
+            </div>
+          ))}
+        </div>
+      ) : null}
+      {resultDetails.length > 0 ? (
+        <div className="server-ops-result-details">
+          {resultDetails.slice(0, 4).map((detail, index) => (
+            <span key={`${operation.id}:detail:${index}`}>
+              <strong>{String(detail.repo_id ?? detail.kind ?? detail.dataset_name ?? `item ${index + 1}`)}</strong>
+              <em>{serverOperationDetailText(detail)}</em>
+            </span>
+          ))}
+        </div>
+      ) : null}
+      {latestEvent ? <p className="solver-job-event">{latestEvent.message}</p> : null}
+      {operation.lastError ? <p className="solver-job-error">{operation.lastError}</p> : null}
+      <pre>{operation.command}</pre>
+      {active ? (
+        <div className="solver-job-card-actions">
+          <button className="inventory-confirm-button danger" type="button" onClick={() => onStop(operation)} disabled={stopping}>
+            <Square size={14} />
+            {stopping ? "Stopping" : "Stop"}
+          </button>
+        </div>
+      ) : null}
+    </article>
+  );
+}
+
+function ServerOperationMetric({ label, value, detail }: { label: string; value: number | string; detail: string }) {
+  return (
+    <div className="server-ops-overview-metric">
+      <span>{label}</span>
+      <strong>{value}</strong>
+      <em>{detail}</em>
+    </div>
   );
 }
 
@@ -3788,9 +4259,10 @@ function preferredActivePlayer(summary: PreflopRangeSummary): PreflopPlayerKey {
 }
 
 function defaultSolverServerId(servers: ServerRow[]): string {
+  const orderedServers = servers.slice().sort(compareServersByNaturalId);
   return (
-    servers.find((server) => server.enabled)?.id ??
-    servers[0]?.id ??
+    orderedServers.find((server) => server.enabled)?.id ??
+    orderedServers[0]?.id ??
     ""
   );
 }
@@ -3828,6 +4300,138 @@ function formatJobStatus(status: SolverJob["status"]): string {
 
 function formatParallelRunStatus(status: ParallelSolverRun["status"]): string {
   return status.replace(/_/g, " ");
+}
+
+function formatServerOperationStatus(status: ServerOperation["status"]): string {
+  return status.replace(/_/g, " ");
+}
+
+function serverOperationTypeLabel(type: ServerOperation["type"]): string {
+  return type === "sync" ? "Sync" : "Upload";
+}
+
+function serverOperationIsTerminal(operation: ServerOperation): boolean {
+  return operation.status === "completed" || operation.status === "failed" || operation.status === "canceled";
+}
+
+function compareServerOperations(left: ServerOperation, right: ServerOperation): number {
+  const activeDelta = Number(serverOperationIsTerminal(left)) - Number(serverOperationIsTerminal(right));
+  if (activeDelta !== 0) return activeDelta;
+  return Date.parse(right.createdAt) - Date.parse(left.createdAt);
+}
+
+function latestServerOperationEvents(events: ServerOperationEvent[]): Map<string, ServerOperationEvent> {
+  const latest = new Map<string, ServerOperationEvent>();
+  for (const event of events) {
+    const current = latest.get(event.operationId);
+    if (!current || event.createdAt > current.createdAt) {
+      latest.set(event.operationId, event);
+    }
+  }
+  return latest;
+}
+
+function operationItemsSummary(operation: ServerOperation): string {
+  if (operation.type === "sync") return "git stash + pull";
+  const uploadItems = operation.items.filter((item): item is ServerUploadItem => "resultsDir" in item);
+  if (uploadItems.length === 0) return "no upload folders";
+  const fileCount = uploadItems.reduce((total, item) => total + (item.fileCount ?? 0), 0);
+  return `${uploadItems.length} folder${uploadItems.length === 1 ? "" : "s"} · ${fileCount} file${fileCount === 1 ? "" : "s"}`;
+}
+
+function summarizeUploadCandidates(candidates: ServerUploadCandidate[]): { folders: number; files: number; servers: number } {
+  return {
+    folders: candidates.length,
+    files: candidates.reduce((total, candidate) => total + candidate.fileCount, 0),
+    servers: new Set(candidates.map((candidate) => candidate.serverId)).size
+  };
+}
+
+function summarizeServerOperations(operations: ServerOperation[]): {
+  syncSuccess: number;
+  syncLatest: number;
+  syncFailed: number;
+  uploadSuccess: number;
+  uploadFailed: number;
+  filesRequested: number;
+  noFiles: number;
+} {
+  const summary = {
+    syncSuccess: 0,
+    syncLatest: 0,
+    syncFailed: 0,
+    uploadSuccess: 0,
+    uploadFailed: 0,
+    filesRequested: 0,
+    noFiles: 0
+  };
+  for (const operation of operations) {
+    const result = operation.result?.summary ?? {};
+    if (operation.type === "sync") {
+      summary.syncLatest += numericResult(result.latest);
+      summary.syncSuccess += numericResult(result.latest) + numericResult(result.synced);
+      summary.syncFailed += operation.status === "failed" ? 1 : numericResult(result.failed);
+    } else {
+      summary.uploadSuccess += numericResult(result.upload_success);
+      summary.uploadFailed += operation.status === "failed" ? Math.max(1, numericResult(result.upload_failed)) : numericResult(result.upload_failed);
+      summary.filesRequested += numericResult(result.files_requested);
+      summary.noFiles += numericResult(result.no_files);
+    }
+  }
+  return summary;
+}
+
+function serverOperationResultMetrics(operation: ServerOperation): Array<{ label: string; value: string | number }> {
+  const summary = operation.result?.summary ?? {};
+  if (operation.type === "sync") {
+    return [
+      { label: "Latest", value: numericResult(summary.latest) },
+      { label: "Synced", value: numericResult(summary.synced) },
+      { label: "Failed", value: numericResult(summary.failed) }
+    ];
+  }
+  return [
+    { label: "Success", value: numericResult(summary.upload_success) },
+    { label: "Failed", value: numericResult(summary.upload_failed) },
+    { label: "Files", value: numericResult(summary.files_requested) },
+    { label: "Duration", value: formatDuration(numericResult(summary.duration_seconds)) }
+  ];
+}
+
+function serverOperationDetailText(detail: Record<string, number | string | boolean | null>): string {
+  if (typeof detail.success === "boolean") {
+    const duration = typeof detail.duration_seconds === "number" ? ` · ${formatDuration(detail.duration_seconds)}` : "";
+    const files = typeof detail.file_count === "number" ? ` · ${detail.file_count} files` : "";
+    return `${detail.success ? "uploaded" : "failed"}${files}${duration}`;
+  }
+  if (typeof detail.kind === "string") {
+    return detail.kind;
+  }
+  if (typeof detail.error === "string") {
+    return detail.error;
+  }
+  return "recorded";
+}
+
+function numericResult(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function serverOperationConfirmTitle(action: PendingServerOperationAction["action"]): string {
+  if (action === "sync") return "Start sync tmux?";
+  if (action === "upload") return "Start upload tmux?";
+  return "Clear operation history?";
+}
+
+function serverOperationConfirmCopy(action: PendingServerOperationAction): string {
+  if (action.action === "sync") {
+    return `This will start sync tmux sessions on ${action.serverCount} online enabled server${action.serverCount === 1 ? "" : "s"}.`;
+  }
+  if (action.action === "upload") {
+    const preview = action.itemCount > 0 ? ` Last scan found ${action.itemCount} retained folder${action.itemCount === 1 ? "" : "s"}.` : "";
+    return `This will scan ${action.serverCount} online enabled server${action.serverCount === 1 ? "" : "s"} and start upload tmux sessions for retained results.${preview}`;
+  }
+  return `This will remove ${action.itemCount} completed, failed, or canceled server operation record${action.itemCount === 1 ? "" : "s"}. Active operations stay visible.`;
 }
 
 function parallelDispatchState(run: ParallelSolverRun): {
