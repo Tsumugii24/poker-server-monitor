@@ -5,12 +5,14 @@ import {
   DEFAULT_SOLVER_SCENARIO_LIBRARY,
   SOLVER_UPLOAD_FORMATS,
   type ParallelFailurePoolEntry,
+  type ParallelFailureReason,
   type ParallelFailurePoolPreviewRequest,
   type ParallelFailurePoolSubmitRequest,
   type ParallelSolverJobCreateRequest,
   type ParallelSolverJobPreview,
   type ParallelSolverJobPreviewRequest,
   type ParallelSolverRun,
+  type ParallelSolverServerAllocation,
   type ParallelSolverRunStatus,
   type ParallelSolverSlice,
   type ParallelSolverSliceStatus,
@@ -200,15 +202,16 @@ export class SolverJobService {
   async cancelParallelRun(id: string): Promise<ParallelSolverRun> {
     const run = this.getParallelRun(id);
     for (const slice of run.slices) {
-      if (!slice.job) continue;
-      if (slice.job.status === "queued") {
-        this.options.db.updateSolverJob(slice.job.id, {
-          status: "canceled",
-          finishedAt: new Date().toISOString()
-        });
-        this.recordEvent(slice.job.id, "canceled", "Parallel run canceled.", null);
-      } else if (ACTIVE_JOB_STATUSES.has(slice.job.status)) {
-        await this.stop(slice.job.id);
+      if (slice.job) {
+        if (slice.job.status === "queued") {
+          this.options.db.updateSolverJob(slice.job.id, {
+            status: "canceled",
+            finishedAt: new Date().toISOString()
+          });
+          this.recordEvent(slice.job.id, "canceled", "Parallel run canceled.", null);
+        } else if (ACTIVE_JOB_STATUSES.has(slice.job.status)) {
+          await this.stop(slice.job.id);
+        }
       }
       this.options.db.updateParallelSolverSlice(slice.id, {
         status: "canceled",
@@ -225,19 +228,15 @@ export class SolverJobService {
   }
 
   async previewFailurePool(input: ParallelFailurePoolPreviewRequest): Promise<ParallelSolverJobPreview> {
-    const base = await this.buildParallelPreview(input, {
-      explicitIndices: this.failurePoolIndices(input)
-    });
-    return base;
+    return this.buildFailurePoolPreview(input);
   }
 
   async submitFailurePool(input: ParallelFailurePoolSubmitRequest): Promise<ParallelSolverRun> {
-    const indices = this.failurePoolIndices(input);
-    if (indices.length === 0) {
+    const entries = this.failurePoolEntries(input);
+    if (entries.length === 0) {
       throw new Error("Failure pool has no pending boards for this range.");
     }
-    const preview = await this.buildParallelPreview(input, {
-      explicitIndices: indices,
+    const preview = await this.buildFailurePoolPreview(input, {
       createRepoIfConfirmed: Boolean(input.confirmDatasetName)
     });
     if (!preview.repoExists) {
@@ -513,11 +512,14 @@ export class SolverJobService {
   async reconcileAndStartQueuedJobs(): Promise<void> {
     this.reconcileCompletedJobs();
     this.reconcileParallelRuns();
-    const servers = this.options.db.getServerRows();
+    const servers = sortServersByNaturalId(this.options.db.getServerRows());
     for (const server of servers) {
       const queued = this.options.db.getQueuedSolverJobForServer(server.id);
-      if (!queued) continue;
-      await this.startQueuedJobIfDispatchReady(queued);
+      if (queued) {
+        await this.startQueuedJobIfDispatchReady(queued);
+        continue;
+      }
+      await this.assignAndStartNextParallelSliceIfReady(server);
     }
     this.reconcileCompletedJobs();
     this.reconcileParallelRuns();
@@ -573,7 +575,8 @@ export class SolverJobService {
       : repoExists
         ? await fetchMissingBoardIndices(basePreview.repoId, allBoards, this.hfToken, this.effectiveHfProxyUrl())
         : [];
-    const allocations = allocateRoundRobin(indices, selectedServers).map((allocation) => {
+    const allocationServerCount = Math.max(1, enabledServers.length, selectedServers.length);
+    const allocations = allocateRoundRobinChunks(indices, selectedServers, allocationServerCount).map((allocation) => {
       const settings = { ...basePreview.settings, rangeExpr: allocation.rangeExpr };
       const solverRoot = effectiveSolverRoot(allocation.server);
       const commandPreview = buildRunPipelineCommand({
@@ -590,6 +593,7 @@ export class SolverJobService {
       });
       return {
         server: allocation.server,
+        candidateServerIds: allocation.candidateServerIds,
         rangeExpr: allocation.rangeExpr,
         indices: allocation.indices,
         boardNames: allocation.indices.map((index) => allBoards[index - 1] ?? String(index)),
@@ -618,6 +622,129 @@ export class SolverJobService {
         ...basePreview.warnings,
         ...(!repoExists ? ["Dataset repo is missing. Confirm the dataset name before creating it."] : []),
         ...(indices.length === 0 && repoExists ? ["No missing boards remain for this dataset."] : [])
+      ]
+    };
+  }
+
+  private async buildFailurePoolPreview(
+    input: ParallelFailurePoolPreviewRequest,
+    options: { createRepoIfConfirmed?: boolean } = {}
+  ): Promise<ParallelSolverJobPreview> {
+    const entries = this.failurePoolEntries(input);
+    const servers = sortServersByNaturalId(this.options.db.getServerRows());
+    const enabledServers = servers.filter((server) => server.enabled);
+    const availableServers = enabledServers.filter((server) =>
+      serverIsReadyForParallelSelection(server, this.options.db.getActiveSolverJobForServer(server.id))
+    );
+    const selectedServerIds = normalizeSelectedServerIds(input.serverIds, availableServers, enabledServers);
+    const selectedServers = selectedServerIds.map((serverId) => {
+      const server = enabledServers.find((candidate) => candidate.id === serverId);
+      if (!server) throw new Error(`Server ${serverId} is not enabled or does not exist.`);
+      return server;
+    });
+    const skippedEntries = entries.filter((entry) => entry.failureReason === "skipped");
+    const normalEntries = entries.filter((entry) => entry.failureReason !== "skipped");
+    const bestServerId = input.bestServerId?.trim();
+    const bestServer = bestServerId
+      ? enabledServers.find((server) => server.id === bestServerId)
+      : null;
+    if (skippedEntries.length > 0 && !bestServer) {
+      throw new Error("Best Server ID is required to retry skipped failure-pool boards.");
+    }
+    if (normalEntries.length > 0 && selectedServers.length === 0) {
+      throw new Error("At least one online idle enabled server is required to retry abnormal failure-pool boards.");
+    }
+    const baseServer = selectedServers[0] ?? bestServer;
+    if (!baseServer) {
+      throw new Error("Failure pool has no retryable boards for this range.");
+    }
+
+    const basePreview = buildSolverJobPreview({
+      input: {
+        ...input,
+        serverId: baseServer.id
+      },
+      server: baseServer,
+      preflopRangesPath: this.options.preflopRangesPath,
+      defaultPipelineStatusFilePath: this.defaultPipelineStatusFilePath,
+      repoNamespace: this.repoNamespace,
+      hfToken: this.hfToken,
+      solverHfProxyUrl: this.effectiveSolverHfProxyUrl(),
+      scenarioLibrary: this.getScenarioLibrary()
+    });
+
+    let repoExists = await huggingFaceDatasetRepoExists(basePreview.repoId, this.hfToken, this.effectiveHfProxyUrl());
+    if (!repoExists && options.createRepoIfConfirmed) {
+      if (!this.hfToken) throw new Error("HF_TOKEN is required to create a missing Hugging Face dataset repo.");
+      await createHuggingFaceDatasetRepo(basePreview.repoId, this.hfToken, this.effectiveHfProxyUrl());
+      repoExists = true;
+    }
+
+    const allBoards = await this.readSolverCardsForServers(uniqueServersById([
+      ...selectedServers,
+      ...(bestServer ? [bestServer] : []),
+      ...availableServers,
+      ...enabledServers
+    ]));
+    const allocationServerCount = Math.max(1, enabledServers.length, selectedServers.length, bestServer ? 1 : 0);
+    const normalIndices = normalizeBoardIndices(normalEntries.map((entry) => entry.boardIndex), allBoards.length);
+    const skippedIndices = normalizeBoardIndices(skippedEntries.map((entry) => entry.boardIndex), allBoards.length);
+    const normalAllocations = allocateRoundRobinChunks(normalIndices, selectedServers, allocationServerCount);
+    const skippedAllocations = bestServer && skippedIndices.length > 0
+      ? allocateRoundRobinChunks(skippedIndices, [bestServer], 1)
+      : [];
+    const rawAllocations = [...normalAllocations, ...skippedAllocations];
+    const allocations: ParallelSolverServerAllocation[] = rawAllocations.map((allocation) => {
+      const settings = { ...basePreview.settings, rangeExpr: allocation.rangeExpr };
+      const solverRoot = effectiveSolverRoot(allocation.server);
+      const commandPreview = buildRunPipelineCommand({
+        solverRoot,
+        repoId: basePreview.repoId,
+        scenario: basePreview.scenario,
+        rangePath: jobScopedRemoteRangePath("<job-id>", basePreview.datasetName, solverRoot),
+        resultPath: jobScopedRemoteResultPath("<job-id>", basePreview.datasetName, solverRoot),
+        settings,
+        statusFilePath: allocation.server.pipelineStatusFilePath?.trim() || this.defaultPipelineStatusFilePath,
+        hfToken: this.hfToken,
+        hfProxyUrl: this.effectiveSolverHfProxyUrl(),
+        redactSecrets: true
+      });
+      return {
+        server: allocation.server,
+        candidateServerIds: allocation.candidateServerIds,
+        rangeExpr: allocation.rangeExpr,
+        indices: allocation.indices,
+        boardNames: allocation.indices.map((index) => allBoards[index - 1] ?? String(index)),
+        commandPreview
+      };
+    });
+    const indices = normalizeBoardIndices(entries.map((entry) => entry.boardIndex), allBoards.length);
+    const selectedIds = uniqueStringList([
+      ...selectedServerIds,
+      ...(bestServer && skippedIndices.length > 0 ? [bestServer.id] : [])
+    ]);
+
+    return {
+      rangePath: basePreview.rangePath,
+      rangeName: basePreview.rangeName,
+      learned: basePreview.learned,
+      datasetName: basePreview.datasetName,
+      repoId: basePreview.repoId,
+      scenario: basePreview.scenario,
+      solverRangeText: basePreview.solverRangeText,
+      settings: basePreview.settings,
+      selectedServerIds: selectedIds,
+      availableServers,
+      missingIndices: indices,
+      missingBoardNames: indices.map((index) => allBoards[index - 1] ?? String(index)),
+      allocations,
+      repoExists,
+      tokenConfigured: Boolean(this.hfToken),
+      requiresConfirmation: !basePreview.learned || !repoExists,
+      warnings: [
+        ...basePreview.warnings,
+        ...(!repoExists ? ["Dataset repo is missing. Confirm the dataset name before creating it."] : []),
+        ...(entries.length === 0 ? ["Failure pool has no retryable boards for this range."] : [])
       ]
     };
   }
@@ -662,60 +789,16 @@ export class SolverJobService {
     };
     this.options.db.insertParallelSolverRun(run);
 
-    for (const allocation of preview.allocations) {
+    for (const [allocationIndex, allocation] of preview.allocations.entries()) {
       if (allocation.indices.length === 0) continue;
+      const allocationCreatedAt = new Date(Date.parse(now) + allocationIndex).toISOString();
       const sliceId = randomUUID();
-      const jobId = randomUUID();
-      const settings = { ...preview.settings, rangeExpr: allocation.rangeExpr };
-      const solverRoot = effectiveSolverRoot(allocation.server);
-      const remoteRangePath = jobScopedRemoteRangePath(jobId, preview.datasetName, solverRoot);
-      const remoteResultPath = jobScopedRemoteResultPath(jobId, preview.datasetName, solverRoot);
-      const statusFilePath = allocation.server.pipelineStatusFilePath?.trim() || this.defaultPipelineStatusFilePath;
-      const command = buildRunPipelineCommand({
-        solverRoot,
-        repoId: preview.repoId,
-        scenario: preview.scenario,
-        rangePath: remoteRangePath,
-        resultPath: remoteResultPath,
-        settings,
-        statusFilePath,
-        hfToken: this.hfToken,
-        hfProxyUrl: this.effectiveSolverHfProxyUrl(),
-        redactSecrets: true
-      });
-      const job: SolverJob = {
-        id: jobId,
-        serverId: allocation.server.id,
-        rangePath: preview.rangePath,
-        rangeName: preview.rangeName,
-        datasetName: preview.datasetName,
-        scenario: preview.scenario,
-        repoId: preview.repoId,
-        settings,
-        command,
-        solverRangeText: preview.solverRangeText,
-        status: "queued",
-        queueMode: "parallel",
-        confirmUnstudied: false,
-        tmuxSession: allocation.server.tmuxSession?.trim() || "solver",
-        remoteRangePath,
-        remoteResultPath,
-        parallelRunId: runId,
-        parallelSliceId: sliceId,
-        assignedIndices: allocation.indices,
-        sourceType,
-        createdAt: now,
-        updatedAt: now,
-        startedAt: null,
-        finishedAt: null,
-        lastError: null,
-        pipeline: allocation.server.pipeline
-      };
       const slice: ParallelSolverSlice = {
         id: sliceId,
         runId,
-        serverId: allocation.server.id,
-        jobId,
+        serverId: "",
+        candidateServerIds: allocation.candidateServerIds,
+        jobId: null,
         rangeExpr: allocation.rangeExpr,
         assignedIndices: allocation.indices,
         assignedBoardNames: allocation.boardNames,
@@ -724,24 +807,16 @@ export class SolverJobService {
         failedCount: 0,
         startedAt: null,
         finishedAt: null,
-        createdAt: now,
-        updatedAt: now,
+        createdAt: allocationCreatedAt,
+        updatedAt: allocationCreatedAt,
         lastError: null,
-        job
+        job: null
       };
-      this.options.db.insertSolverJob(job);
       this.options.db.insertParallelSolverSlice(slice);
-      this.recordEvent(job.id, "parallel_created", `Queued parallel slice ${allocation.rangeExpr} for ${allocation.server.id}.`, job.command);
     }
 
     if (autoStart) {
-      const inserted = this.options.db.getParallelSolverRun(runId);
-      if (!inserted) throw new Error(`Parallel solver run ${runId} not found`);
-      for (const slice of inserted.slices) {
-        if (slice.jobId) {
-          await this.startQueuedJobIfDispatchReady(this.requireJob(slice.jobId));
-        }
-      }
+      await this.reconcileAndStartQueuedJobs();
     }
     this.reconcileCompletedJobs();
     this.reconcileParallelRuns();
@@ -774,8 +849,13 @@ export class SolverJobService {
           this.options.db.updateParallelFailurePoolEntries(run.rangePath, run.datasetName, slice.assignedIndices, "solved");
         }
         if (becameFailed) {
-          const failedIndices = failedIndicesForSlice(slice, slice.job);
-          for (const index of failedIndices) {
+          const existingFailurePoolEntries = new Map(
+            this.options.db
+              .getParallelFailurePoolEntries(run.rangePath, run.datasetName)
+              .map((entry) => [entry.boardIndex, entry])
+          );
+          for (const failure of failureEntriesForSlice(slice, slice.job, existingFailurePoolEntries)) {
+            const index = failure.index;
             const assignedPosition = slice.assignedIndices.indexOf(index);
             const boardName = assignedPosition >= 0
               ? slice.assignedBoardNames[assignedPosition] ?? String(index)
@@ -789,7 +869,8 @@ export class SolverJobService {
               boardIndex: index,
               boardName,
               boardKey: boardKeyFromName(boardName),
-              status: "pending",
+              status: failure.failureReason === "best_server_skipped" ? "failed" : "pending",
+              failureReason: failure.failureReason,
               attemptCount: 1,
               lastRunId: run.id,
               lastSliceId: slice.id,
@@ -815,17 +896,19 @@ export class SolverJobService {
     }
   }
 
-  private failurePoolIndices(input: ParallelFailurePoolPreviewRequest): number[] {
+  private failurePoolEntries(input: ParallelFailurePoolPreviewRequest): ParallelFailurePoolEntry[] {
     const datasetName = input.datasetName?.trim()
       || datasetNameFromRangePath(input.rangePath, input.scenario ?? scenarioFromRangePath(input.rangePath));
     const entries = this.options.db.getParallelFailurePoolEntries(input.rangePath, datasetName)
-      .filter((entry) => entry.status === "pending" || entry.status === "failed");
+      .filter((entry) =>
+        (entry.status === "pending" || entry.status === "failed") &&
+        failureReasonIsRetryable(entry.failureReason)
+      );
     const selected = input.indices?.length
       ? new Set(normalizePositiveIndices(input.indices))
       : null;
     return entries
-      .map((entry) => entry.boardIndex)
-      .filter((index) => selected == null || selected.has(index));
+      .filter((entry) => selected == null || selected.has(entry.boardIndex));
   }
 
   private reconcileCompletedJobs(): void {
@@ -960,6 +1043,92 @@ export class SolverJobService {
       finishedAt: null,
       lastError: message
     });
+  }
+
+  private async assignAndStartNextParallelSliceIfReady(server: ServerRow): Promise<boolean> {
+    if (!server.enabled || !serverIsOnline(server)) return false;
+    if (this.options.db.getActiveSolverJobForServer(server.id)) return false;
+    if (isPipelineActive(server.pipeline)) return false;
+    const sliceWithRun = this.nextQueuedParallelSliceForServer(server.id);
+    if (!sliceWithRun) return false;
+    const job = this.createJobForParallelSlice(sliceWithRun.run, sliceWithRun.slice, server);
+    return this.startQueuedJobIfDispatchReady(job);
+  }
+
+  private nextQueuedParallelSliceForServer(serverId: string): { run: ParallelSolverRun; slice: ParallelSolverSlice } | null {
+    const runs = this.options.db.getParallelSolverRuns()
+      .filter((run) => run.status === "queued" || run.status === "running")
+      .sort(compareParallelRunQueue);
+    for (const run of runs) {
+      const slices = [...run.slices].sort(compareParallelSliceQueue);
+      for (const slice of slices) {
+        if (slice.status !== "queued") continue;
+        if (slice.jobId) continue;
+        if (!slice.candidateServerIds.includes(serverId)) continue;
+        return { run, slice };
+      }
+    }
+    return null;
+  }
+
+  private createJobForParallelSlice(run: ParallelSolverRun, slice: ParallelSolverSlice, server: ServerRow): SolverJob {
+    const now = new Date().toISOString();
+    const jobId = randomUUID();
+    const settings = { ...run.settings, rangeExpr: slice.rangeExpr };
+    const solverRoot = effectiveSolverRoot(server);
+    const remoteRangePath = jobScopedRemoteRangePath(jobId, run.datasetName, solverRoot);
+    const remoteResultPath = jobScopedRemoteResultPath(jobId, run.datasetName, solverRoot);
+    const statusFilePath = server.pipelineStatusFilePath?.trim() || this.defaultPipelineStatusFilePath;
+    const command = buildRunPipelineCommand({
+      solverRoot,
+      repoId: run.repoId,
+      scenario: run.scenario,
+      rangePath: remoteRangePath,
+      resultPath: remoteResultPath,
+      settings,
+      statusFilePath,
+      hfToken: this.hfToken,
+      hfProxyUrl: this.effectiveSolverHfProxyUrl(),
+      redactSecrets: true
+    });
+    const job: SolverJob = {
+      id: jobId,
+      serverId: server.id,
+      rangePath: run.rangePath,
+      rangeName: run.rangeName,
+      datasetName: run.datasetName,
+      scenario: run.scenario,
+      repoId: run.repoId,
+      settings,
+      command,
+      solverRangeText: run.solverRangeText,
+      status: "queued",
+      queueMode: "parallel",
+      confirmUnstudied: false,
+      tmuxSession: server.tmuxSession?.trim() || "solver",
+      remoteRangePath,
+      remoteResultPath,
+      parallelRunId: run.id,
+      parallelSliceId: slice.id,
+      assignedIndices: slice.assignedIndices,
+      sourceType: run.sourceType,
+      createdAt: now,
+      updatedAt: now,
+      startedAt: null,
+      finishedAt: null,
+      lastError: null,
+      pipeline: server.pipeline
+    };
+    this.options.db.insertSolverJob(job);
+    this.options.db.updateParallelSolverSlice(slice.id, {
+      serverId: server.id,
+      jobId,
+      status: "queued",
+      lastError: null,
+      updatedAt: now
+    });
+    this.recordEvent(job.id, "parallel_assigned", `Assigned parallel chunk ${slice.rangeExpr} to ${server.id}.`, job.command);
+    return this.requireJob(job.id);
   }
 
   private effectiveHfProxyUrl(): string | null {
@@ -1582,6 +1751,18 @@ function uniqueServersById(servers: ServerRow[]): ServerRow[] {
   return result;
 }
 
+function uniqueStringList(values: string[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const value of values) {
+    const trimmed = value.trim();
+    if (!trimmed || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    result.push(trimmed);
+  }
+  return result;
+}
+
 function buildReadSolverCardsCommand(solverRoot: string): string {
   return [
     "set -e",
@@ -1675,10 +1856,22 @@ function normalizePositiveIndices(indices: number[]): number[] {
   return normalized.sort((a, b) => a - b);
 }
 
-function allocateRoundRobin(indices: number[], servers: ServerRow[]): Array<{ server: ServerRow; indices: number[]; rangeExpr: string }> {
-  const buckets = servers.map((server) => ({ server, indices: [] as number[] }));
-  indices.forEach((index, position) => {
-    buckets[position % buckets.length]!.indices.push(index);
+function allocateRoundRobinChunks(
+  indices: number[],
+  servers: ServerRow[],
+  denominatorServerCount: number
+): Array<{ server: ServerRow; candidateServerIds: string[]; indices: number[]; rangeExpr: string }> {
+  if (indices.length === 0 || servers.length === 0) return [];
+  const sorted = [...indices].sort((a, b) => a - b);
+  const bucketCount = Math.min(sorted.length, Math.max(1, denominatorServerCount));
+  const candidateServerIds = servers.map((server) => server.id);
+  const buckets = Array.from({ length: bucketCount }, (_value, index) => ({
+    server: servers[index % servers.length]!,
+    candidateServerIds,
+    indices: [] as number[]
+  }));
+  sorted.forEach((index, position) => {
+    buckets[position % bucketCount]!.indices.push(index);
   });
   return buckets.map((bucket) => ({
     ...bucket,
@@ -1740,12 +1933,39 @@ function sliceStateFromJob(
   };
 }
 
-function failedIndicesForSlice(slice: ParallelSolverSlice, job: SolverJob): number[] {
-  const failed = job.pipeline?.failedIndices ?? [];
-  if (failed.length > 0) return failed.filter((index) => slice.assignedIndices.includes(index));
+function failureEntriesForSlice(
+  slice: ParallelSolverSlice,
+  job: SolverJob,
+  previousFailurePoolEntries: Map<number, ParallelFailurePoolEntry>
+): Array<{ index: number; failureReason: ParallelFailureReason }> {
   const completed = new Set(job.pipeline?.completedIndices ?? []);
-  const remaining = slice.assignedIndices.filter((index) => !completed.has(index));
-  return remaining.length > 0 ? remaining : slice.assignedIndices;
+  const skipped = new Set(
+    job.status === "failed"
+      ? (job.pipeline?.failedIndices ?? []).filter((index) => slice.assignedIndices.includes(index))
+      : []
+  );
+  const failures: Array<{ index: number; failureReason: ParallelFailureReason }> = [];
+  for (const index of skipped) {
+    const previousReason = previousFailurePoolEntries.get(index)?.failureReason;
+    failures.push({
+      index,
+      failureReason: job.sourceType === "failure_pool" && previousReason === "skipped"
+        ? "best_server_skipped"
+        : "skipped"
+    });
+  }
+  for (const index of slice.assignedIndices) {
+    if (completed.has(index) || skipped.has(index)) continue;
+    failures.push({ index, failureReason: "abnormal_end" });
+  }
+  if (failures.length === 0) {
+    return slice.assignedIndices.map((index) => ({ index, failureReason: "abnormal_end" }));
+  }
+  return failures;
+}
+
+function failureReasonIsRetryable(reason: ParallelFailureReason): boolean {
+  return reason !== "best_server_skipped";
 }
 
 function parallelRunState(
@@ -1784,6 +2004,10 @@ function parallelRunLocked(run: ParallelSolverRun): boolean {
 function compareParallelRunQueue(left: ParallelSolverRun, right: ParallelSolverRun): number {
   const orderDelta = left.queueOrder - right.queueOrder;
   if (orderDelta !== 0) return orderDelta;
+  return Date.parse(left.createdAt) - Date.parse(right.createdAt);
+}
+
+function compareParallelSliceQueue(left: ParallelSolverSlice, right: ParallelSolverSlice): number {
   return Date.parse(left.createdAt) - Date.parse(right.createdAt);
 }
 

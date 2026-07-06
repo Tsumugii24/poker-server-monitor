@@ -698,8 +698,10 @@ describe("solver job API", () => {
     expect(preview.body.allocations).toHaveLength(2);
     expect(preview.body.allocations[0].indices).toHaveLength(878);
     expect(preview.body.allocations[1].indices).toHaveLength(877);
-    expect(preview.body.allocations[0].rangeExpr).toContain("1,3,5");
-    expect(preview.body.allocations[1].rangeExpr).toContain("2,4,6");
+    expect(preview.body.allocations[0].indices.slice(0, 3)).toEqual([1, 3, 5]);
+    expect(preview.body.allocations[1].indices.slice(0, 3)).toEqual([2, 4, 6]);
+    expect(preview.body.allocations[0].candidateServerIds).toEqual(["solver-01", "solver-02"]);
+    expect(preview.body.allocations[1].candidateServerIds).toEqual(["solver-01", "solver-02"]);
     expect(executor.run).toHaveBeenCalledWith(
       expect.objectContaining({ id: "solver-01" }),
       { username: "root", password: "secret" },
@@ -731,7 +733,190 @@ describe("solver job API", () => {
       rangePath,
       datasetName: "3ia-4.2-3od-4.3",
       status: "pending",
+      failureReason: "abnormal_end",
       lastServerId: "solver-01"
+    });
+  });
+
+  it("sizes parallel chunks from the full enabled server count", async () => {
+    db.syncServers([
+      ...servers,
+      {
+        id: "solver-02",
+        name: "Solver 02",
+        host: "10.0.0.2",
+        port: 22,
+        enabled: true,
+        note: "TBD",
+        solverRoot: "/srv/solver",
+        tmuxSession: "solver",
+        pipelineStatusFilePath: "~/run/status.json"
+      },
+      {
+        id: "solver-03",
+        name: "Solver 03",
+        host: "10.0.0.3",
+        port: 22,
+        enabled: true,
+        note: "TBD",
+        solverRoot: "/srv/solver",
+        tmuxSession: "solver",
+        pipelineStatusFilePath: "~/run/status.json"
+      },
+      {
+        id: "solver-04",
+        name: "Solver 04",
+        host: "10.0.0.4",
+        port: 22,
+        enabled: true,
+        note: "TBD",
+        solverRoot: "/srv/solver",
+        tmuxSession: "solver",
+        pipelineStatusFilePath: "~/run/status.json"
+      }
+    ]);
+    db.insertSnapshot(metricSnapshot("solver-02", "online"));
+    const executor: SshExecutor = {
+      run: vi.fn(async (_server, _credentials, command) => {
+        if (command.includes("cards/cards.txt")) return solverCardsText();
+        if (command.includes("DISPATCH_READY")) return "DISPATCH_READY=1\n";
+        return "ok";
+      })
+    };
+    const solverJobService = new SolverJobService({
+      db,
+      preflopRangesPath,
+      credentials: { username: "root", password: "secret" },
+      executor,
+      defaultPipelineStatusFilePath: "~/run/solver_running_status.json",
+      repoNamespace: "Tsumugii",
+      hfToken: "hf_test_token"
+    });
+    const app = createApp({ db, refreshService, preflopRangesPath, solverJobService });
+    const rangePath = "3OD-EP/3OD-4.3 vs 3IA-4.2.json";
+    await approveRange(app, rangePath);
+
+    const preview = await request(app)
+      .post("/api/parallel-jobs/preview")
+      .send({ rangePath, serverIds: ["solver-01", "solver-02"], settings: { uploadEnabled: false } });
+
+    expect(preview.status).toBe(200);
+    expect(preview.body.allocations).toHaveLength(4);
+    expect(preview.body.allocations.map((allocation: { server: { id: string }; candidateServerIds: string[]; indices: number[] }) => ({
+      serverId: allocation.server.id,
+      candidateServerIds: allocation.candidateServerIds,
+      firstIndices: allocation.indices.slice(0, 4)
+    }))).toEqual([
+      { serverId: "solver-01", candidateServerIds: ["solver-01", "solver-02"], firstIndices: [1, 5, 9, 13] },
+      { serverId: "solver-02", candidateServerIds: ["solver-01", "solver-02"], firstIndices: [2, 6, 10, 14] },
+      { serverId: "solver-01", candidateServerIds: ["solver-01", "solver-02"], firstIndices: [3, 7, 11, 15] },
+      { serverId: "solver-02", candidateServerIds: ["solver-01", "solver-02"], firstIndices: [4, 8, 12, 16] }
+    ]);
+  });
+
+  it("routes skipped failure-pool boards to the configured best server", async () => {
+    db.syncServers([
+      ...servers,
+      {
+        id: "solver-02",
+        name: "Solver 02",
+        host: "10.0.0.2",
+        port: 22,
+        enabled: true,
+        note: "TBD",
+        solverRoot: "/srv/solver",
+        tmuxSession: "solver",
+        pipelineStatusFilePath: "~/run/status.json"
+      },
+      {
+        id: "solver-03",
+        name: "Solver 03",
+        host: "10.0.0.3",
+        port: 22,
+        enabled: true,
+        note: "TBD",
+        solverRoot: "/srv/solver",
+        tmuxSession: "solver",
+        pipelineStatusFilePath: "~/run/status.json"
+      }
+    ]);
+    db.insertSnapshot(metricSnapshot("solver-02", "online"));
+    db.insertSnapshot(metricSnapshot("solver-03", "online"));
+    const executor: SshExecutor = {
+      run: vi.fn(async (_server, _credentials, command) => {
+        if (command.includes("cards/cards.txt")) return solverCardsText();
+        if (command.includes("DISPATCH_READY")) return "DISPATCH_READY=1\n";
+        commands.push(command);
+        return "ok";
+      })
+    };
+    const solverJobService = new SolverJobService({
+      db,
+      preflopRangesPath,
+      credentials: { username: "root", password: "secret" },
+      executor,
+      defaultPipelineStatusFilePath: "~/run/solver_running_status.json",
+      repoNamespace: "Tsumugii",
+      hfToken: "hf_test_token"
+    });
+    const app = createApp({ db, refreshService, preflopRangesPath, solverJobService });
+    const rangePath = "3OD-EP/3OD-4.3 vs 3IA-4.2.json";
+    await approveRange(app, rangePath);
+
+    const created = await request(app)
+      .post("/api/parallel-jobs")
+      .send({ rangePath, serverIds: ["solver-01", "solver-02"], settings: { uploadEnabled: false }, confirmDatasetName: true });
+    expect(created.status).toBe(201);
+    const failedSlice = created.body.run.slices[0];
+    const skippedIndex = failedSlice.assignedIndices[0];
+    db.insertPipelineSnapshot(failedPipelineSnapshot({
+      serverId: failedSlice.serverId,
+      repoId: created.body.run.repoId,
+      datasetName: created.body.run.datasetName,
+      assignedIndices: failedSlice.assignedIndices,
+      completedIndices: [],
+      failedIndices: [skippedIndex]
+    }));
+    db.updateSolverJob(failedSlice.jobId, {
+      status: "failed",
+      finishedAt: new Date().toISOString(),
+      lastError: "board skipped"
+    });
+
+    const listed = await request(app).get("/api/parallel-jobs");
+    expect(listed.body.failurePool.find((entry: { boardIndex: number }) => entry.boardIndex === skippedIndex)).toMatchObject({
+      failureReason: "skipped",
+      status: "pending"
+    });
+
+    const retry = await request(app)
+      .post("/api/parallel-jobs/failure-pool/submit")
+      .send({
+        rangePath,
+        indices: [skippedIndex],
+        serverIds: ["solver-01"],
+        bestServerId: "solver-03",
+        settings: { uploadEnabled: false },
+        confirmDatasetName: true,
+        queueMode: "queue_next"
+      });
+
+    expect(retry.status).toBe(201);
+    expect(retry.body.run.sourceType).toBe("failure_pool");
+    expect(retry.body.run.slices).toHaveLength(1);
+    expect(retry.body.run.slices[0]).toMatchObject({
+      serverId: "",
+      candidateServerIds: ["solver-03"],
+      rangeExpr: String(skippedIndex)
+    });
+
+    await solverJobService.reconcileAndStartQueuedJobs();
+    const afterDispatch = await request(app).get("/api/parallel-jobs");
+    const retryRun = afterDispatch.body.runs.find((run: { id: string }) => run.id === retry.body.run.id);
+    expect(retryRun.slices[0]).toMatchObject({
+      serverId: "solver-03",
+      candidateServerIds: ["solver-03"],
+      status: "running"
     });
   });
 
@@ -987,7 +1172,7 @@ describe("solver job API", () => {
       .post("/api/jobs")
       .send({ serverId: "solver-01", rangePath: "3OD-EP/3OD-4.3 vs 3IA-4.2.json" });
     const started = await request(app).post(`/api/jobs/${created.body.job.id}/start`);
-    db.insertSnapshot(metricSnapshot("solver-01", "offline", new Date(Date.now() + 1000).toISOString()));
+    db.insertSnapshot(metricSnapshot("solver-01", "offline", new Date(Date.now() + 60_000).toISOString()));
 
     const stopped = await request(app).post(`/api/jobs/${created.body.job.id}/stop`);
 
@@ -1057,6 +1242,55 @@ function idlePipelineSnapshot(serverId: string, collectedAt: string): PipelineSt
     error: null,
     errorCode: null,
     errorMessage: null
+  };
+}
+
+function failedPipelineSnapshot({
+  serverId,
+  repoId,
+  datasetName,
+  assignedIndices,
+  completedIndices,
+  failedIndices
+}: {
+  serverId: string;
+  repoId: string;
+  datasetName: string;
+  assignedIndices: number[];
+  completedIndices: number[];
+  failedIndices: number[];
+}): PipelineStatusSnapshot {
+  const collectedAt = new Date().toISOString();
+  return {
+    id: `${serverId}-failed-${collectedAt}`,
+    serverId,
+    collectedAt,
+    available: true,
+    processAlive: false,
+    fileStatus: "failed",
+    displayStatus: "failed",
+    phase: null,
+    repoId,
+    datasetName,
+    scenario: "3ia-3od",
+    currentBatch: null,
+    totalBatches: null,
+    totalTasks: assignedIndices.length,
+    batchExpr: null,
+    assignedIndices,
+    completedIndices,
+    failedIndices,
+    completedCount: completedIndices.length,
+    failedCount: failedIndices.length,
+    resultPath: null,
+    pid: null,
+    startedAt: collectedAt,
+    updatedAt: collectedAt,
+    finishedAt: collectedAt,
+    command: null,
+    error: "board skipped",
+    errorCode: "solver_failed",
+    errorMessage: "board skipped"
   };
 }
 

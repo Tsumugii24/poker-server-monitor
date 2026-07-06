@@ -12,6 +12,7 @@ import type {
 } from "../shared/types";
 import type {
   ParallelFailurePoolEntry,
+  ParallelFailureReason,
   ParallelFailurePoolStatus,
   ParallelSolverRun,
   ParallelSolverRunStatus,
@@ -538,13 +539,14 @@ export class MonitorDatabase {
   insertParallelSolverSlice(slice: ParallelSolverSlice): void {
     this.database.run(
       `INSERT INTO parallel_solver_slices (
-        id, run_id, server_id, job_id, range_expr, assigned_indices_json, assigned_board_names_json,
+        id, run_id, server_id, candidate_server_ids_json, job_id, range_expr, assigned_indices_json, assigned_board_names_json,
         status, completed_count, failed_count, started_at, finished_at, created_at, updated_at, last_error
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         slice.id,
         slice.runId,
         slice.serverId,
+        JSON.stringify(slice.candidateServerIds),
         slice.jobId,
         slice.rangeExpr,
         JSON.stringify(slice.assignedIndices),
@@ -564,16 +566,18 @@ export class MonitorDatabase {
 
   updateParallelSolverSlice(
     id: string,
-    patch: Partial<Pick<ParallelSolverSlice, "status" | "jobId" | "completedCount" | "failedCount" | "startedAt" | "finishedAt" | "lastError" | "updatedAt">>
+    patch: Partial<Pick<ParallelSolverSlice, "serverId" | "candidateServerIds" | "status" | "jobId" | "completedCount" | "failedCount" | "startedAt" | "finishedAt" | "lastError" | "updatedAt">>
   ): ParallelSolverSlice {
     const current = this.getParallelSolverSlice(id);
     if (!current) throw new Error(`Parallel solver slice ${id} not found`);
     const updatedAt = patch.updatedAt ?? new Date().toISOString();
     this.database.run(
       `UPDATE parallel_solver_slices
-       SET status = ?, job_id = ?, completed_count = ?, failed_count = ?, started_at = ?, finished_at = ?, last_error = ?, updated_at = ?
+       SET server_id = ?, candidate_server_ids_json = ?, status = ?, job_id = ?, completed_count = ?, failed_count = ?, started_at = ?, finished_at = ?, last_error = ?, updated_at = ?
        WHERE id = ?`,
       [
+        patch.serverId !== undefined ? patch.serverId : current.serverId,
+        patch.candidateServerIds !== undefined ? JSON.stringify(patch.candidateServerIds) : JSON.stringify(current.candidateServerIds),
         patch.status ?? current.status,
         patch.jobId !== undefined ? patch.jobId : current.jobId,
         patch.completedCount !== undefined ? patch.completedCount : current.completedCount,
@@ -695,7 +699,7 @@ export class MonitorDatabase {
     if (existing) {
       this.database.run(
         `UPDATE parallel_failure_pool_entries
-         SET repo_id = ?, scenario = ?, board_name = ?, board_key = ?, status = ?, attempt_count = ?,
+         SET repo_id = ?, scenario = ?, board_name = ?, board_key = ?, status = ?, failure_reason = ?, attempt_count = ?,
              last_run_id = ?, last_slice_id = ?, last_server_id = ?, last_error = ?, updated_at = ?
          WHERE id = ?`,
         [
@@ -704,6 +708,7 @@ export class MonitorDatabase {
           entry.boardName,
           entry.boardKey,
           entry.status,
+          entry.failureReason,
           Math.max(existing.attemptCount + 1, entry.attemptCount),
           entry.lastRunId,
           entry.lastSliceId,
@@ -717,8 +722,8 @@ export class MonitorDatabase {
       this.database.run(
         `INSERT INTO parallel_failure_pool_entries (
           id, range_path, dataset_name, repo_id, scenario, board_index, board_name, board_key,
-          status, attempt_count, last_run_id, last_slice_id, last_server_id, last_error, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          status, failure_reason, attempt_count, last_run_id, last_slice_id, last_server_id, last_error, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           entry.id,
           entry.rangePath,
@@ -729,6 +734,7 @@ export class MonitorDatabase {
           entry.boardName,
           entry.boardKey,
           entry.status,
+          entry.failureReason,
           entry.attemptCount,
           entry.lastRunId,
           entry.lastSliceId,
@@ -970,6 +976,7 @@ export class MonitorDatabase {
         id TEXT PRIMARY KEY,
         run_id TEXT NOT NULL,
         server_id TEXT NOT NULL,
+        candidate_server_ids_json TEXT NOT NULL DEFAULT '[]',
         job_id TEXT,
         range_expr TEXT NOT NULL,
         assigned_indices_json TEXT NOT NULL,
@@ -997,6 +1004,7 @@ export class MonitorDatabase {
         board_name TEXT NOT NULL,
         board_key TEXT NOT NULL,
         status TEXT NOT NULL,
+        failure_reason TEXT NOT NULL DEFAULT 'unclassified',
         attempt_count INTEGER NOT NULL,
         last_run_id TEXT,
         last_slice_id TEXT,
@@ -1015,8 +1023,32 @@ export class MonitorDatabase {
     this.ensurePipelineDetailColumns();
     this.ensureSolverJobParallelColumns();
     this.ensureParallelSolverRunQueueOrderColumn();
+    this.ensureParallelSolverSliceCandidateServerColumn();
+    this.ensureParallelFailurePoolReasonColumn();
     this.ensureSolverJobResultPathColumn();
     this.persist();
+  }
+
+  private ensureParallelSolverSliceCandidateServerColumn(): void {
+    const columns = this.query<{ name: string }>(
+      "PRAGMA table_info(parallel_solver_slices)",
+      [],
+      (row) => ({ name: String(row.name) })
+    );
+    if (!columns.some((column) => column.name === "candidate_server_ids_json")) {
+      this.database.run("ALTER TABLE parallel_solver_slices ADD COLUMN candidate_server_ids_json TEXT NOT NULL DEFAULT '[]'");
+    }
+  }
+
+  private ensureParallelFailurePoolReasonColumn(): void {
+    const columns = this.query<{ name: string }>(
+      "PRAGMA table_info(parallel_failure_pool_entries)",
+      [],
+      (row) => ({ name: String(row.name) })
+    );
+    if (!columns.some((column) => column.name === "failure_reason")) {
+      this.database.run("ALTER TABLE parallel_failure_pool_entries ADD COLUMN failure_reason TEXT NOT NULL DEFAULT 'unclassified'");
+    }
   }
 
   private ensureSolverJobResultPathColumn(): void {
@@ -1259,10 +1291,13 @@ function mapParallelSolverRun(row: Record<string, SqlValue>, slices: ParallelSol
 
 function mapParallelSolverSlice(row: Record<string, SqlValue>, job: SolverJob | null): ParallelSolverSlice {
   const assignedIndices = parseNumberArray(row.assigned_indices_json);
+  const serverId = String(row.server_id ?? "");
+  const candidateServerIds = parseStringArray(row.candidate_server_ids_json);
   return {
     id: String(row.id),
     runId: String(row.run_id),
-    serverId: String(row.server_id),
+    serverId,
+    candidateServerIds: candidateServerIds.length > 0 ? candidateServerIds : (serverId ? [serverId] : []),
     jobId: row.job_id == null ? null : String(row.job_id),
     rangeExpr: String(row.range_expr),
     assignedIndices,
@@ -1290,6 +1325,7 @@ function mapParallelFailurePoolEntry(row: Record<string, SqlValue>): ParallelFai
     boardName: String(row.board_name),
     boardKey: String(row.board_key),
     status: String(row.status) as ParallelFailurePoolStatus,
+    failureReason: normalizeParallelFailureReason(row.failure_reason),
     attemptCount: Number(row.attempt_count),
     lastRunId: row.last_run_id == null ? null : String(row.last_run_id),
     lastSliceId: row.last_slice_id == null ? null : String(row.last_slice_id),
@@ -1298,6 +1334,18 @@ function mapParallelFailurePoolEntry(row: Record<string, SqlValue>): ParallelFai
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at)
   };
+}
+
+function normalizeParallelFailureReason(value: SqlValue): ParallelFailureReason {
+  if (
+    value === "abnormal_end" ||
+    value === "skipped" ||
+    value === "best_server_skipped" ||
+    value === "unclassified"
+  ) {
+    return value;
+  }
+  return "unclassified";
 }
 
 function mapSolverJobEvent(row: Record<string, SqlValue>): SolverJobEvent {

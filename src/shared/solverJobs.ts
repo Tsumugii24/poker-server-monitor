@@ -38,6 +38,9 @@ export type ParallelSolverSliceStatus = (typeof PARALLEL_SOLVER_SLICE_STATUSES)[
 export const PARALLEL_FAILURE_POOL_STATUSES = ["pending", "queued", "running", "solved", "failed"] as const;
 export type ParallelFailurePoolStatus = (typeof PARALLEL_FAILURE_POOL_STATUSES)[number];
 
+export const PARALLEL_FAILURE_REASONS = ["abnormal_end", "skipped", "best_server_skipped", "unclassified"] as const;
+export type ParallelFailureReason = (typeof PARALLEL_FAILURE_REASONS)[number];
+
 export const SOLVER_SCENARIOS = [
   "sia-sod",
   "sia-sod-open2",
@@ -250,6 +253,7 @@ export type SolverDatasetRepoEnsureRequest = SolverJobPreviewRequest & {
 
 export type ParallelSolverServerAllocation = {
   server: ServerRow;
+  candidateServerIds: string[];
   rangeExpr: string;
   indices: number[];
   boardNames: string[];
@@ -272,6 +276,7 @@ export type ParallelSolverJobCreateRequest = ParallelSolverJobPreviewRequest & {
 
 export type ParallelFailurePoolPreviewRequest = ParallelSolverJobPreviewRequest & {
   indices?: number[];
+  bestServerId?: string;
 };
 
 export type ParallelFailurePoolSubmitRequest = ParallelFailurePoolPreviewRequest & {
@@ -303,6 +308,7 @@ export type ParallelSolverSlice = {
   id: string;
   runId: string;
   serverId: string;
+  candidateServerIds: string[];
   jobId: string | null;
   rangeExpr: string;
   assignedIndices: number[];
@@ -360,6 +366,7 @@ export type ParallelFailurePoolEntry = {
   boardName: string;
   boardKey: string;
   status: ParallelFailurePoolStatus;
+  failureReason: ParallelFailureReason;
   attemptCount: number;
   lastRunId: string | null;
   lastSliceId: string | null;

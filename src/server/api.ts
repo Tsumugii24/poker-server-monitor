@@ -1480,6 +1480,9 @@ function isParallelFailurePoolPreviewRequest(value: unknown): value is ParallelF
   if (candidate.indices != null && (!Array.isArray(candidate.indices) || candidate.indices.some((index) => typeof index !== "number"))) {
     return false;
   }
+  if (candidate.bestServerId != null && typeof candidate.bestServerId !== "string") {
+    return false;
+  }
   return true;
 }
 

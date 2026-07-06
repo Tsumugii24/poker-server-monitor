@@ -50,6 +50,7 @@ import {
   SOLVER_EXPORT_FORMATS,
   SOLVER_UPLOAD_FORMATS,
   type ParallelFailurePoolEntry,
+  type ParallelFailureReason,
   type ParallelSolverJobPreview,
   type ParallelSolverJobPreviewRequest,
   type ParallelSolverJobsResponse,
@@ -113,6 +114,7 @@ type PendingDatasetRepoAction = {
   request: SolverJobPreviewRequest;
   parallelRequest?: ParallelSolverJobPreviewRequest;
   parallelQueueMode?: "start_now" | "queue_next";
+  parallelBestServerId?: string;
 };
 
 type PendingScenarioLibraryAction = {
@@ -128,6 +130,7 @@ type PendingParallelReportsAction = {
 };
 
 const EXPANDED_FOLDERS_KEY = "preflop-range-expanded-folders";
+const PARALLEL_BEST_SERVER_ID_KEY = "preflop-range-parallel-best-server-id";
 const DEFAULT_SELECTED_HAND = "AA";
 const REVIEW_STATUS_LABELS: Record<PreflopReviewStatus, string> = {
   under_review: "Under review",
@@ -181,6 +184,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
   const [selectedParallelServerIds, setSelectedParallelServerIds] = useState<string[]>([]);
   const [parallelQueueDragId, setParallelQueueDragId] = useState<string | null>(null);
   const [parallelServerTab, setParallelServerTab] = useState<"available" | "unavailable">("available");
+  const [parallelBestServerId, setParallelBestServerId] = useState(() => localStorage.getItem(PARALLEL_BEST_SERVER_ID_KEY) ?? "");
   const [activeSolverJobTab, setActiveSolverJobTab] = useState<"single" | "parallel">("single");
   const [selectedServerId, setSelectedServerId] = useState("");
   const [jobSettings, setJobSettings] = useState<SolverJobSettings>(DEFAULT_SOLVER_JOB_SETTINGS);
@@ -326,6 +330,19 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
       // ignore storage failures
     }
   }, [expandedFolders]);
+
+  useEffect(() => {
+    try {
+      const trimmed = parallelBestServerId.trim();
+      if (trimmed) {
+        localStorage.setItem(PARALLEL_BEST_SERVER_ID_KEY, trimmed);
+      } else {
+        localStorage.removeItem(PARALLEL_BEST_SERVER_ID_KEY);
+      }
+    } catch {
+      // ignore storage failures
+    }
+  }, [parallelBestServerId]);
 
   useEffect(() => {
     setJobPreview(null);
@@ -882,14 +899,21 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
           action: "pool-submit",
           request: gateRequest,
           parallelRequest: requestPayload,
-          parallelQueueMode: queueMode
+          parallelQueueMode: queueMode,
+          parallelBestServerId
         });
         return;
       }
       await fetchPreflopJson<{ run: ParallelSolverRun }>("/api/parallel-jobs/failure-pool/submit", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...requestPayload, datasetName: repoStatus.datasetName, confirmDatasetName: true, queueMode })
+        body: JSON.stringify({
+          ...requestPayload,
+          datasetName: repoStatus.datasetName,
+          confirmDatasetName: true,
+          queueMode,
+          bestServerId: parallelBestServerId.trim() || undefined
+        })
       });
       await loadJobContext();
       await loadTree();
@@ -1138,7 +1162,8 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
             ...pending.parallelRequest,
             datasetName: ensured.datasetName,
             confirmDatasetName: true,
-            queueMode: pending.parallelQueueMode ?? "queue_next"
+            queueMode: pending.parallelQueueMode ?? "queue_next",
+            bestServerId: pending.parallelBestServerId?.trim() || undefined
           })
         });
         await loadJobContext();
@@ -1858,6 +1883,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
           parallelPreview={parallelPreview}
           selectedParallelServerIds={selectedParallelServerIds}
           parallelServerTab={parallelServerTab}
+          parallelBestServerId={parallelBestServerId}
           activeTab={activeSolverJobTab}
           selectedServerId={selectedServerId}
           selectedRangePath={selectedRangePathForJob}
@@ -1893,6 +1919,11 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
             clearDatasetRepoGate();
           }}
           onParallelServerTabChange={setParallelServerTab}
+          onParallelBestServerChange={(serverId) => {
+            setParallelBestServerId(serverId);
+            setParallelPreview(null);
+            clearDatasetRepoGate();
+          }}
           onTabChange={setActiveSolverJobTab}
           onDatasetNameChange={(datasetName) => {
             setJobDatasetName(datasetName);
@@ -2275,6 +2306,7 @@ function SolverJobPanel({
   parallelPreview,
   selectedParallelServerIds,
   parallelServerTab,
+  parallelBestServerId,
   activeTab,
   selectedServerId,
   selectedRangePath,
@@ -2298,6 +2330,7 @@ function SolverJobPanel({
   onServerChange,
   onParallelServerToggle,
   onParallelServerTabChange,
+  onParallelBestServerChange,
   onTabChange,
   onDatasetNameChange,
   onSettingsChange,
@@ -2334,6 +2367,7 @@ function SolverJobPanel({
   parallelPreview: ParallelSolverJobPreview | null;
   selectedParallelServerIds: string[];
   parallelServerTab: "available" | "unavailable";
+  parallelBestServerId: string;
   activeTab: "single" | "parallel";
   selectedServerId: string;
   selectedRangePath: string;
@@ -2357,6 +2391,7 @@ function SolverJobPanel({
   onServerChange: (serverId: string) => void;
   onParallelServerToggle: (serverId: string) => void;
   onParallelServerTabChange: (tab: "available" | "unavailable") => void;
+  onParallelBestServerChange: (serverId: string) => void;
   onTabChange: (tab: "single" | "parallel") => void;
   onDatasetNameChange: (datasetName: string) => void;
   onSettingsChange: (patch: Partial<SolverJobSettings>) => void;
@@ -2708,6 +2743,7 @@ function SolverJobPanel({
           servers={servers}
           selectedServerIds={selectedParallelServerIds}
           serverTab={parallelServerTab}
+          bestServerId={parallelBestServerId}
           selectedRangePath={selectedRangePath}
           selectedRangeName={selectedRangeName}
           selectedRangeLearned={selectedRangeLearned}
@@ -2721,6 +2757,7 @@ function SolverJobPanel({
           busy={busy}
           onServerToggle={onParallelServerToggle}
           onServerTabChange={onParallelServerTabChange}
+          onBestServerChange={onParallelBestServerChange}
           onDatasetNameChange={onDatasetNameChange}
           onSettingsChange={onSettingsChange}
           onScenarioChange={onScenarioChange}
@@ -2893,6 +2930,7 @@ function ParallelSolverJobPanel({
   servers,
   selectedServerIds,
   serverTab,
+  bestServerId,
   selectedRangePath,
   selectedRangeName,
   selectedRangeLearned,
@@ -2906,6 +2944,7 @@ function ParallelSolverJobPanel({
   busy,
   onServerToggle,
   onServerTabChange,
+  onBestServerChange,
   onDatasetNameChange,
   onSettingsChange,
   onScenarioChange,
@@ -2924,6 +2963,7 @@ function ParallelSolverJobPanel({
   servers: ServerRow[];
   selectedServerIds: string[];
   serverTab: "available" | "unavailable";
+  bestServerId: string;
   selectedRangePath: string;
   selectedRangeName: string;
   selectedRangeLearned: boolean;
@@ -2937,6 +2977,7 @@ function ParallelSolverJobPanel({
   busy: string | null;
   onServerToggle: (serverId: string) => void;
   onServerTabChange: (tab: "available" | "unavailable") => void;
+  onBestServerChange: (serverId: string) => void;
   onDatasetNameChange: (datasetName: string) => void;
   onSettingsChange: (patch: Partial<SolverJobSettings>) => void;
   onScenarioChange: (scenario: SolverScenario | "") => void;
@@ -2963,13 +3004,26 @@ function ParallelSolverJobPanel({
     (!activeDatasetName || entry.datasetName === activeDatasetName) &&
     (entry.status === "pending" || entry.status === "failed")
   );
-  const submitDisabled = !selectedRangePath || !selectedRangeLearned || selectedServers.length === 0 || busy != null;
+  const baseSubmitDisabled = !selectedRangePath || !selectedRangeLearned || busy != null;
+  const submitDisabled = baseSubmitDisabled || selectedServers.length === 0;
   const latestRuns = runs
     .slice()
     .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))
     .slice(0, 6);
   const clearableRuns = terminalParallelReportRuns(runs);
   const failurePoolDatasets = summarizeFailurePoolDatasets(visibleFailurePool);
+  const failurePoolReasons = summarizeFailurePoolReasons(visibleFailurePool);
+  const retryableFailurePoolCount = visibleFailurePool.filter((entry) => failurePoolEntryIsRetryable(entry)).length;
+  const skippedFailurePoolCount = visibleFailurePool.filter((entry) => entry.failureReason === "skipped").length;
+  const normalFailurePoolCount = visibleFailurePool.filter((entry) =>
+    failurePoolEntryIsRetryable(entry) && entry.failureReason !== "skipped"
+  ).length;
+  const bestServer = orderedServers.find((server) => server.id === bestServerId) ?? null;
+  const failurePoolSubmitDisabled =
+    baseSubmitDisabled ||
+    retryableFailurePoolCount === 0 ||
+    (normalFailurePoolCount > 0 && selectedServers.length === 0) ||
+    (skippedFailurePoolCount > 0 && !bestServerId.trim());
 
   return (
     <div className="parallel-job-shell">
@@ -3024,7 +3078,7 @@ function ParallelSolverJobPanel({
             {visibleServers.map((server) => {
               const selected = selectedServerIds.includes(server.id);
               const available = parallelServerIsAvailable(server);
-              const displayIndex = orderedServers.findIndex((candidate) => candidate.id === server.id) + 1;
+              const isBestServer = server.id === bestServerId;
               return (
                 <button
                   key={server.id}
@@ -3036,9 +3090,9 @@ function ParallelSolverJobPanel({
                   onClick={() => available && onServerToggle(server.id)}
                   disabled={busy != null || !available}
                 >
-                  <strong className="parallel-server-index">{displayIndex}</strong>
-                  <span>{server.id}</span>
+                  <strong className="parallel-server-id">{server.id}</strong>
                   <ConnectionBadge status={server.latest?.connectionStatus ?? "unknown"} />
+                  {isBestServer ? <small className="parallel-server-best-badge">Best</small> : null}
                   <em>{available ? "Idle" : parallelServerUnavailableReason(server)}</em>
                 </button>
               );
@@ -3109,7 +3163,7 @@ function ParallelSolverJobPanel({
             <Send size={15} />
             Queue Next
           </button>
-          <button className="icon-button compact" onClick={onFailurePoolSubmit} disabled={submitDisabled || visibleFailurePool.length === 0}>
+          <button className="icon-button compact" onClick={onFailurePoolSubmit} disabled={failurePoolSubmitDisabled}>
             <RotateCcw size={15} />
             Queue Failure Pool
           </button>
@@ -3124,15 +3178,15 @@ function ParallelSolverJobPanel({
             <div className="parallel-preview-summary">
               <div><span>Repo</span><strong>{preview.repoId}</strong></div>
               <div><span>Missing</span><strong>{preview.missingIndices.length}</strong></div>
-              <div><span>Servers</span><strong>{preview.allocations.filter((item) => item.indices.length > 0).length}</strong></div>
+              <div><span>Chunks</span><strong>{preview.allocations.filter((item) => item.indices.length > 0).length}</strong></div>
               <div><span>Repo Status</span><strong>{preview.repoExists ? "Exists" : "Missing"}</strong></div>
             </div>
             <div className="parallel-allocation-list">
-              {preview.allocations.map((allocation) => (
-                <article key={allocation.server.id} className="parallel-allocation-row">
+              {preview.allocations.map((allocation, index) => (
+                <article key={`${allocation.server.id}:${allocation.rangeExpr}:${index}`} className="parallel-allocation-row">
                   <div>
-                    <strong>{allocation.server.id}</strong>
-                    <span>{allocation.indices.length} boards</span>
+                    <strong>Chunk {index + 1}</strong>
+                    <span>{allocation.indices.length} boards · Pool {allocation.candidateServerIds.join(", ")}</span>
                   </div>
                   <code>{allocation.rangeExpr || "-"}</code>
                 </article>
@@ -3146,8 +3200,32 @@ function ParallelSolverJobPanel({
         <div className="parallel-report-block">
           <div className="parallel-section-title">
             <strong>Failure Pool</strong>
-            <span>{visibleFailurePool.length}</span>
+            <span>{retryableFailurePoolCount}/{visibleFailurePool.length} retryable</span>
           </div>
+          <label className="solver-job-field compact best-server-field">
+            <span>Best Server</span>
+            <select value={bestServerId} onChange={(event) => onBestServerChange(event.target.value)}>
+              <option value="">Select</option>
+              {orderedServers.map((server) => (
+                <option key={server.id} value={server.id}>
+                  {server.id}{server.latest?.connectionStatus ? ` · ${server.latest.connectionStatus}` : ""}
+                </option>
+              ))}
+            </select>
+          </label>
+          {bestServerId && !bestServer ? (
+            <div className="notice warning compact-notice">Best Server ID is not in the current server inventory.</div>
+          ) : null}
+          {failurePoolReasons.length > 0 ? (
+            <div className="failure-pool-reason-list">
+              {failurePoolReasons.map((item) => (
+                <span key={item.reason} className={`failure-reason-chip ${item.reason}`}>
+                  <strong>{failureReasonLabel(item.reason)}</strong>
+                  <em>{item.count}</em>
+                </span>
+              ))}
+            </div>
+          ) : null}
           {failurePoolDatasets.length > 0 ? (
             <div className="failure-pool-dataset-list">
               {failurePoolDatasets.map((item) => (
@@ -3163,9 +3241,10 @@ function ParallelSolverJobPanel({
           ) : (
             <div className="failure-pool-list">
               {visibleFailurePool.slice(0, 24).map((entry) => (
-                <span key={entry.id} className={`failure-pool-chip ${entry.status}`}>
+                <span key={entry.id} className={`failure-pool-chip ${entry.status} ${entry.failureReason}`}>
                   <em>{entry.datasetName}</em>
                   {entry.boardIndex}. {entry.boardName}
+                  <small>{failureReasonLabel(entry.failureReason)}</small>
                 </span>
               ))}
             </div>
@@ -3219,7 +3298,7 @@ function ParallelSolverJobPanel({
               <div className="parallel-slice-list">
                 {run.slices.map((slice) => (
                   <div key={slice.id} className={`parallel-slice-row ${slice.status}`}>
-                    <span>{slice.serverId}</span>
+                    <span>{formatSliceServerId(slice)}</span>
                     <strong>{slice.assignedIndices.length}</strong>
                     <em>{slice.status}</em>
                     <small>{slice.status === "queued" ? slice.lastError ?? slice.job?.lastError ?? "Pending dispatch" : slice.rangeExpr}</small>
@@ -3276,7 +3355,7 @@ function ParallelQueueBoard({
             const isDragging = dragId === run.id;
             const canDrop = movable && dragId != null && dragId !== run.id;
             const dispatch = parallelDispatchState(run);
-            const runningServers = run.slices.filter((slice) => slice.status === "running").map((slice) => slice.serverId);
+            const runningServers = run.slices.filter((slice) => slice.status === "running").map((slice) => formatSliceServerId(slice));
             const serverText = runningServers.length > 0
               ? `${runningServers.length} running: ${runningServers.join(", ")}`
               : `${run.serverIds.length} server${run.serverIds.length === 1 ? "" : "s"}`;
@@ -3823,6 +3902,10 @@ function parallelRunIsLocked(run: ParallelSolverRun): boolean {
   );
 }
 
+function formatSliceServerId(slice: ParallelSolverRun["slices"][number]): string {
+  return slice.serverId || "Pending";
+}
+
 function formatRatio(value: number): string {
   if (!Number.isFinite(value)) return "-";
   return `${Math.round(value * 100)}%`;
@@ -3836,6 +3919,34 @@ function summarizeFailurePoolDatasets(entries: ParallelFailurePoolEntry[]): Arra
   return [...counts.entries()]
     .map(([datasetName, count]) => ({ datasetName, count }))
     .sort((left, right) => left.datasetName.localeCompare(right.datasetName));
+}
+
+function summarizeFailurePoolReasons(entries: ParallelFailurePoolEntry[]): Array<{ reason: ParallelFailureReason; count: number }> {
+  const order: ParallelFailureReason[] = ["abnormal_end", "skipped", "best_server_skipped", "unclassified"];
+  const counts = new Map<ParallelFailureReason, number>();
+  for (const entry of entries) {
+    counts.set(entry.failureReason, (counts.get(entry.failureReason) ?? 0) + 1);
+  }
+  return order
+    .map((reason) => ({ reason, count: counts.get(reason) ?? 0 }))
+    .filter((item) => item.count > 0);
+}
+
+function failurePoolEntryIsRetryable(entry: ParallelFailurePoolEntry): boolean {
+  return entry.failureReason !== "best_server_skipped";
+}
+
+function failureReasonLabel(reason: ParallelFailureReason): string {
+  switch (reason) {
+    case "abnormal_end":
+      return "Abnormal";
+    case "skipped":
+      return "Skipped";
+    case "best_server_skipped":
+      return "Terminal";
+    default:
+      return "Unclassified";
+  }
 }
 
 function buildParallelReportsMarkdown(
@@ -3884,7 +3995,7 @@ function buildParallelReportsMarkdown(
     );
     for (const slice of run.slices) {
       lines.push(
-        `| ${markdownCell(slice.serverId)} | ${markdownCell(slice.status)} | ${slice.assignedIndices.length} | ${slice.completedCount} | ${slice.failedCount} | ${markdownCell(slice.rangeExpr || "-")} |`
+        `| ${markdownCell(formatSliceServerId(slice))} | ${markdownCell(slice.status)} | ${slice.assignedIndices.length} | ${slice.completedCount} | ${slice.failedCount} | ${markdownCell(slice.rangeExpr || "-")} |`
       );
     }
     if (run.lastError) {

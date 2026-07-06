@@ -5922,16 +5922,22 @@ td .port-value {
   background: var(--accent-subtle);
 }
 
-.parallel-server-index {
-  width: 22px;
-  height: 22px;
+.parallel-server-id {
+  color: var(--text-primary);
+  font-size: 12px;
+  letter-spacing: 0;
+}
+
+.parallel-server-best-badge {
+  height: 18px;
   display: inline-flex;
   align-items: center;
-  justify-content: center;
-  border-radius: var(--radius-sm);
-  color: var(--text-primary);
-  background: var(--bg-elevated);
-  font-size: 11px;
+  border-radius: var(--radius-pill);
+  padding: 0 7px;
+  color: var(--accent);
+  background: var(--accent-subtle);
+  font-size: 10px;
+  font-weight: 900;
 }
 
 .parallel-server-tag em {
@@ -5943,6 +5949,10 @@ td .port-value {
 
 .parallel-config-grid {
   grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.best-server-field {
+  margin: 8px 0 0;
 }
 
 .parallel-preview-summary,
@@ -6034,6 +6044,57 @@ td .port-value {
   gap: 7px;
 }
 
+.failure-pool-reason-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.failure-reason-chip {
+  min-height: 26px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  padding: 0 8px;
+  color: var(--text-secondary);
+  background: var(--bg-base);
+  font-size: 11px;
+  font-weight: 850;
+}
+
+.failure-reason-chip.abnormal_end {
+  border-color: color-mix(in srgb, var(--red) 28%, var(--border));
+  color: var(--red-text);
+  background: var(--red-bg);
+}
+
+.failure-reason-chip.skipped {
+  border-color: color-mix(in srgb, var(--yellow) 38%, var(--border));
+  color: var(--yellow-text);
+  background: var(--yellow-bg);
+}
+
+.failure-reason-chip.best_server_skipped {
+  border-color: color-mix(in srgb, var(--accent) 34%, var(--border));
+  color: var(--accent);
+  background: var(--accent-subtle);
+}
+
+.failure-reason-chip em {
+  min-width: 20px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  background: color-mix(in srgb, currentColor 10%, transparent);
+  font-style: normal;
+  font-size: 10px;
+}
+
 .failure-pool-dataset-chip {
   display: inline-flex;
   align-items: center;
@@ -6092,6 +6153,13 @@ td .port-value {
   font-style: normal;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.failure-pool-chip small {
+  color: currentColor;
+  font-size: 10px;
+  font-weight: 900;
+  opacity: 0.82;
 }
 
 .parallel-run-card {
