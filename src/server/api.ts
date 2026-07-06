@@ -723,6 +723,15 @@ export function createApp({
     }
   });
 
+  app.delete("/api/parallel-jobs/failure-pool", (_request, response) => {
+    try {
+      const cleared = solverJobService.clearFailurePool();
+      response.json({ ...cleared, ...solverJobService.listParallelJobs() });
+    } catch (error) {
+      respondSolverJobError(response, error, "parallel_failure_pool_clear_failed");
+    }
+  });
+
   app.get("/api/parallel-jobs/:id", (request, response) => {
     try {
       response.json({ run: solverJobService.getParallelRun(request.params.id) });

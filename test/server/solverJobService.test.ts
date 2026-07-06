@@ -911,6 +911,13 @@ describe("solver job API", () => {
       failureReason: "abnormal_end",
       lastServerId: "solver-01"
     });
+
+    const cleared = await request(app).delete("/api/parallel-jobs/failure-pool");
+
+    expect(cleared.status).toBe(200);
+    expect(cleared.body.deletedCount).toBe(failedSlice.assignedIndices.length);
+    expect(cleared.body.failurePool).toEqual([]);
+    expect(cleared.body.runs).toHaveLength(1);
   });
 
   it("sizes parallel chunks from the full enabled server count", async () => {

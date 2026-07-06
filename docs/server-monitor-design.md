@@ -208,6 +208,7 @@ The current implementation also includes solver job orchestration for the shared
 
 - Single solver jobs submit one reviewed range to one selected server.
 - Parallel solver jobs split remaining board indices across available servers and keep a queue for follow-up chunks.
+- The parallel failure pool can be cleared from the UI after confirmation. This removes failure-pool records only; it does not stop active solver jobs or delete parallel runs.
 - `Best Server` is treated as an operations-level setting. It is configured from the `Server Operations` tab and used by failure-pool retries that require the strongest fallback server.
 - `Server Operations` is an automation center for maintenance work that should run across every SSH-ready server, not a manual single-server uploader.
 - `Sync Code` starts a sync tmux session on each online enabled server. The remote command exports the solver proxy variables, runs `git stash`, then `git pull --rebase`.
@@ -233,6 +234,7 @@ Representative backend endpoints:
 - `GET /api/settings/wechat/accounts`: list WeChat ClawBot recipient accounts and delivery state.
 - `POST /api/settings/wechat/accounts`: create a recipient and start QR login.
 - `POST /api/settings/wechat/accounts/:accountId/verify`: verify a target user from detected inbound messages.
+- `DELETE /api/parallel-jobs/failure-pool`: clear all recorded failure-pool entries without stopping parallel runs.
 - `GET /api/server-operations`: list server operation records and events.
 - `GET /api/server-operations/upload-candidates`: scan all SSH-ready servers for retained result folders.
 - `POST /api/server-operations/sync`: start sync tmux sessions for online enabled servers.

@@ -386,6 +386,10 @@ export type ParallelSolverReportsClearResponse = ParallelSolverJobsResponse & {
   deletedRunIds: string[];
 };
 
+export type ParallelFailurePoolClearResponse = ParallelSolverJobsResponse & {
+  deletedCount: number;
+};
+
 export type ParallelSolverQueueReorderRequest = {
   runIds: string[];
 };

@@ -217,6 +217,14 @@ export class SolverJobService {
     };
   }
 
+  clearFailurePool(): { deletedCount: number } {
+    this.reconcileCompletedJobs();
+    this.reconcileParallelRuns();
+    return {
+      deletedCount: this.options.db.clearParallelFailurePoolEntries()
+    };
+  }
+
   async cancelParallelRun(id: string): Promise<ParallelSolverRun> {
     const run = this.getParallelRun(id);
     for (const slice of run.slices) {

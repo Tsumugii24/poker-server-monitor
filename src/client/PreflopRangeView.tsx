@@ -49,6 +49,7 @@ import {
   DEFAULT_SOLVER_SCENARIO_LIBRARY,
   SOLVER_EXPORT_FORMATS,
   SOLVER_UPLOAD_FORMATS,
+  type ParallelFailurePoolClearResponse,
   type ParallelFailurePoolEntry,
   type ParallelFailureReason,
   type ParallelSolverJobPreview,
@@ -134,6 +135,10 @@ type PendingParallelReportsAction = {
   action: "download" | "clear";
   runCount: number;
   clearableCount: number;
+};
+
+type PendingFailurePoolClearAction = {
+  entryCount: number;
 };
 
 type PendingServerOperationAction = {
@@ -222,6 +227,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
   const [scenarioCopied, setScenarioCopied] = useState(false);
   const [pendingScenarioAction, setPendingScenarioAction] = useState<PendingScenarioLibraryAction | null>(null);
   const [pendingParallelReportsAction, setPendingParallelReportsAction] = useState<PendingParallelReportsAction | null>(null);
+  const [pendingFailurePoolClearAction, setPendingFailurePoolClearAction] = useState<PendingFailurePoolClearAction | null>(null);
   const [pendingServerOperationAction, setPendingServerOperationAction] = useState<PendingServerOperationAction | null>(null);
   const [offlineServerNotice, setOfflineServerNotice] = useState<OfflineServerNotice | null>(null);
   const [datasetRepoStatus, setDatasetRepoStatus] = useState<SolverDatasetRepoStatus | null>(null);
@@ -1030,6 +1036,30 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
       setParallelRuns(response.runs);
       setFailurePool(response.failurePool);
       setPendingParallelReportsAction(null);
+    } catch (caught) {
+      setJobError(caught instanceof Error ? caught.message : String(caught));
+      await loadJobContext();
+    } finally {
+      setJobBusy(null);
+    }
+  };
+
+  const requestClearFailurePool = () => {
+    if (failurePool.length === 0) return;
+    setPendingFailurePoolClearAction({ entryCount: failurePool.length });
+  };
+
+  const confirmClearFailurePool = async () => {
+    if (!pendingFailurePoolClearAction) return;
+    setJobBusy("parallel-clear-failure-pool");
+    setJobError(null);
+    try {
+      const response = await fetchPreflopJson<ParallelFailurePoolClearResponse>("/api/parallel-jobs/failure-pool", {
+        method: "DELETE"
+      });
+      setParallelRuns(response.runs);
+      setFailurePool(response.failurePool);
+      setPendingFailurePoolClearAction(null);
     } catch (caught) {
       setJobError(caught instanceof Error ? caught.message : String(caught));
       await loadJobContext();
@@ -2108,6 +2138,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
           onParallelStart={() => void createParallelJob("start_now")}
           onParallelQueueNext={() => void createParallelJob("queue_next")}
           onFailurePoolSubmit={() => void submitFailurePool("queue_next")}
+          onFailurePoolClear={requestClearFailurePool}
           onParallelCancel={(run) => void cancelParallelRun(run)}
           onParallelReportsDownload={requestDownloadParallelReports}
           onParallelReportsClear={requestClearParallelReports}
@@ -2290,6 +2321,46 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
                 disabled={jobBusy === "parallel-clear-reports"}
               >
                 {pendingParallelReportsAction.action === "clear" ? <Trash2 size={15} /> : <Download size={15} />}
+                Confirm
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {pendingFailurePoolClearAction ? (
+        <div className="modal-backdrop preflop-confirm-backdrop" role="presentation" onClick={() => setPendingFailurePoolClearAction(null)}>
+          <section
+            className="preflop-confirm-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="failure-pool-clear-confirm-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="preflop-confirm-icon">
+              <Trash2 size={18} />
+            </div>
+            <div>
+              <h3 id="failure-pool-clear-confirm-title">Clear failure pool?</h3>
+              <p>
+                This will remove <strong>{pendingFailurePoolClearAction.entryCount}</strong> failure pool
+                entr{pendingFailurePoolClearAction.entryCount === 1 ? "y" : "ies"}. Parallel runs and active solver jobs will not be stopped.
+              </p>
+            </div>
+            <div className="preflop-confirm-actions">
+              <button
+                className="icon-button compact"
+                onClick={() => setPendingFailurePoolClearAction(null)}
+                disabled={jobBusy === "parallel-clear-failure-pool"}
+              >
+                Cancel
+              </button>
+              <button
+                className="icon-button compact danger"
+                onClick={() => void confirmClearFailurePool()}
+                disabled={jobBusy === "parallel-clear-failure-pool"}
+              >
+                <Trash2 size={15} />
                 Confirm
               </button>
             </div>
@@ -2541,6 +2612,7 @@ function SolverJobPanel({
   onParallelStart,
   onParallelQueueNext,
   onFailurePoolSubmit,
+  onFailurePoolClear,
   onParallelCancel,
   onParallelReportsDownload,
   onParallelReportsClear,
@@ -2609,6 +2681,7 @@ function SolverJobPanel({
   onParallelStart: () => void;
   onParallelQueueNext: () => void;
   onFailurePoolSubmit: () => void;
+  onFailurePoolClear: () => void;
   onParallelCancel: (run: ParallelSolverRun) => void;
   onParallelReportsDownload: () => void;
   onParallelReportsClear: () => void;
@@ -2965,6 +3038,7 @@ function SolverJobPanel({
           onStart={onParallelStart}
           onQueueNext={onParallelQueueNext}
           onFailurePoolSubmit={onFailurePoolSubmit}
+          onFailurePoolClear={onFailurePoolClear}
           onCancelRun={onParallelCancel}
           onReportsDownload={onParallelReportsDownload}
           onReportsClear={onParallelReportsClear}
@@ -3165,6 +3239,7 @@ function ParallelSolverJobPanel({
   onStart,
   onQueueNext,
   onFailurePoolSubmit,
+  onFailurePoolClear,
   onCancelRun,
   onReportsDownload,
   onReportsClear,
@@ -3197,6 +3272,7 @@ function ParallelSolverJobPanel({
   onStart: () => void;
   onQueueNext: () => void;
   onFailurePoolSubmit: () => void;
+  onFailurePoolClear: () => void;
   onCancelRun: (run: ParallelSolverRun) => void;
   onReportsDownload: () => void;
   onReportsClear: () => void;
@@ -3409,9 +3485,20 @@ function ParallelSolverJobPanel({
 
       <div className="parallel-job-report-panel">
         <div className="parallel-report-block">
-          <div className="parallel-section-title">
-            <strong>Failure Pool</strong>
-            <span>{retryableFailurePoolCount}/{visibleFailurePool.length} retryable</span>
+          <div className="parallel-section-title parallel-section-title-with-actions">
+            <div>
+              <strong>Failure Pool</strong>
+              <span>{retryableFailurePoolCount}/{visibleFailurePool.length} retryable · {failurePool.length} total</span>
+            </div>
+            <button
+              className="icon-button compact danger"
+              type="button"
+              onClick={onFailurePoolClear}
+              disabled={failurePool.length === 0 || busy != null}
+            >
+              <Trash2 size={14} />
+              Clear
+            </button>
           </div>
           {failurePoolReasons.length > 0 ? (
             <div className="failure-pool-reason-list">

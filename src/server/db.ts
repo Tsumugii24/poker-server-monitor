@@ -776,6 +776,18 @@ export class MonitorDatabase {
     this.persist();
   }
 
+  clearParallelFailurePoolEntries(): number {
+    const count = this.query<{ count: number }>(
+      "SELECT COUNT(*) AS count FROM parallel_failure_pool_entries",
+      [],
+      (row) => ({ count: Number(row.count) })
+    )[0]?.count ?? 0;
+    if (count === 0) return 0;
+    this.database.run("DELETE FROM parallel_failure_pool_entries");
+    this.persist();
+    return count;
+  }
+
   getParallelFailurePoolEntries(rangePath?: string, datasetName?: string): ParallelFailurePoolEntry[] {
     if (rangePath && datasetName) {
       return this.query<ParallelFailurePoolEntry>(
