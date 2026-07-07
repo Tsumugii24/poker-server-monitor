@@ -665,9 +665,10 @@ export function createApp({
     }
   });
 
-  app.get("/api/parallel-jobs", (_request, response) => {
+  app.get("/api/parallel-jobs", async (request, response) => {
     try {
-      response.json(solverJobService.listParallelJobs());
+      const shouldReconcile = request.query.reconcile === "1" || request.query.reconcile === "true";
+      response.json(shouldReconcile ? await solverJobService.refreshParallelJobs() : solverJobService.listParallelJobs());
     } catch (error) {
       respondSolverJobError(response, error, "parallel_solver_jobs_list_failed");
     }

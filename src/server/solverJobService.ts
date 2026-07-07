@@ -147,6 +147,11 @@ export class SolverJobService {
     };
   }
 
+  async refreshParallelJobs() {
+    await this.reconcileAndStartQueuedJobs();
+    return this.listParallelJobs();
+  }
+
   getParallelRun(id: string): ParallelSolverRun {
     this.reconcileCompletedJobs();
     this.reconcileParallelRuns();
@@ -724,9 +729,9 @@ export class SolverJobService {
     const availableServers = enabledServers.filter((server) =>
       serverIsReadyForParallelSelection(server, this.options.db.getActiveSolverJobForServer(server.id))
     );
-    const selectedServerIds = normalizeSelectedServerIds(input.serverIds, availableServers, enabledServers);
+    const selectedServerIds = normalizeSelectedServerIds(input.serverIds, enabledServers);
     if (selectedServerIds.length === 0) {
-      throw new Error("At least one online idle enabled server is required for parallel solver jobs.");
+      throw new Error("At least one enabled server is required for parallel solver jobs.");
     }
     const selectedServers = selectedServerIds.map((serverId) => {
       const server = enabledServers.find((candidate) => candidate.id === serverId);
@@ -826,7 +831,7 @@ export class SolverJobService {
     const availableServers = enabledServers.filter((server) =>
       serverIsReadyForParallelSelection(server, this.options.db.getActiveSolverJobForServer(server.id))
     );
-    const selectedServerIds = normalizeSelectedServerIds(input.serverIds, availableServers, enabledServers);
+    const selectedServerIds = normalizeSelectedServerIds(input.serverIds, enabledServers);
     const selectedServers = selectedServerIds.map((serverId) => {
       const server = enabledServers.find((candidate) => candidate.id === serverId);
       if (!server) throw new Error(`Server ${serverId} is not enabled or does not exist.`);
@@ -842,7 +847,7 @@ export class SolverJobService {
       throw new Error("Best Server ID is required to retry skipped failure-pool boards.");
     }
     if (normalEntries.length > 0 && selectedServers.length === 0) {
-      throw new Error("At least one online idle enabled server is required to retry abnormal failure-pool boards.");
+      throw new Error("At least one enabled server is required to retry abnormal failure-pool boards.");
     }
     const baseServer = selectedServers[0] ?? bestServer;
     if (!baseServer) {
@@ -2469,7 +2474,7 @@ function normalizeSelectedServerIds(
   const unique: string[] = [];
   for (const id of selected) {
     if (!allowedIds.includes(id)) {
-      throw new Error(`Server ${id} is not enabled or available for parallel jobs.`);
+      throw new Error(`Server ${id} is not enabled for parallel jobs.`);
     }
     if (!unique.includes(id)) unique.push(id);
   }

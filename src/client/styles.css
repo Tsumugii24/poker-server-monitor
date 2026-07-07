@@ -5673,6 +5673,7 @@ td .port-value {
   border-radius: var(--radius-sm);
   padding: 10px;
   background: var(--bg-base);
+  cursor: pointer;
   transition: border-color 0.16s ease, box-shadow 0.16s ease, transform 0.16s ease, opacity 0.16s ease;
 }
 
@@ -5687,6 +5688,17 @@ td .port-value {
 
 .parallel-queue-item.failure_pool {
   border-color: color-mix(in srgb, var(--red) 26%, var(--border));
+}
+
+.parallel-queue-item.active {
+  border-color: color-mix(in srgb, var(--accent) 62%, var(--border));
+  background: color-mix(in srgb, var(--accent) 7%, var(--bg-base));
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 16%, transparent), 0 14px 30px color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.parallel-queue-item.active .parallel-queue-rank {
+  color: var(--accent-strong);
+  background: color-mix(in srgb, var(--accent) 14%, var(--bg-elevated));
 }
 
 .parallel-queue-item.movable {
@@ -5705,7 +5717,12 @@ td .port-value {
 }
 
 .parallel-queue-item.locked {
-  cursor: default;
+  cursor: pointer;
+}
+
+.parallel-queue-item:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 68%, transparent);
+  outline-offset: 2px;
 }
 
 .parallel-queue-rank {
@@ -5735,6 +5752,10 @@ td .port-value {
 
 .parallel-queue-item.failure_pool .parallel-queue-marker {
   background: var(--red);
+}
+
+.parallel-queue-item.active .parallel-queue-marker {
+  background: var(--accent);
 }
 
 .parallel-queue-copy {
@@ -5833,9 +5854,13 @@ td .port-value {
 }
 
 .parallel-section-title span {
+  min-width: 0;
   color: var(--text-tertiary);
   font-size: 11px;
   font-weight: 800;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .parallel-report-actions {
@@ -6195,6 +6220,12 @@ td .port-value {
 .parallel-run-card.completed_with_failures,
 .parallel-run-card.failed {
   border-color: color-mix(in srgb, var(--red) 34%, var(--border));
+}
+
+.parallel-run-card.active {
+  border-color: color-mix(in srgb, var(--accent) 60%, var(--border));
+  background: color-mix(in srgb, var(--accent) 5%, var(--bg-elevated));
+  box-shadow: inset 3px 0 0 var(--accent);
 }
 
 .parallel-run-head {
