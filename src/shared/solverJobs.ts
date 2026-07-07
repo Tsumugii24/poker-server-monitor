@@ -265,6 +265,7 @@ export type ParallelSolverJobPreviewRequest = {
   scenario?: SolverScenario;
   datasetName?: string;
   serverIds?: string[];
+  chunkCount?: number;
   settings?: Partial<SolverJobSettings>;
   confirmUnstudied?: boolean;
 };

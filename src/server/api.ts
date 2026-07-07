@@ -749,6 +749,14 @@ export function createApp({
     }
   });
 
+  app.delete("/api/parallel-jobs/:id", (request, response) => {
+    try {
+      response.json({ ...solverJobService.deleteQueuedParallelRun(request.params.id), ...solverJobService.listParallelJobs() });
+    } catch (error) {
+      respondSolverJobError(response, error, "parallel_solver_job_delete_failed");
+    }
+  });
+
   app.post("/api/parallel-jobs/failure-pool/preview", async (request, response) => {
     if (!isParallelFailurePoolPreviewRequest(request.body)) {
       response.status(400).json({ error: "invalid_parallel_failure_pool_preview" });
@@ -1530,6 +1538,9 @@ function isParallelSolverJobPreviewRequest(value: unknown): value is ParallelSol
   if (value.datasetName != null && typeof value.datasetName !== "string") return false;
   if (value.settings != null && !isRecord(value.settings)) return false;
   if (value.confirmUnstudied != null && typeof value.confirmUnstudied !== "boolean") return false;
+  if (value.chunkCount != null && (typeof value.chunkCount !== "number" || !Number.isInteger(value.chunkCount) || value.chunkCount < 1)) {
+    return false;
+  }
   if (value.serverIds != null && (!Array.isArray(value.serverIds) || value.serverIds.some((id) => typeof id !== "string"))) {
     return false;
   }
@@ -1761,7 +1772,7 @@ function respondSolverJobError(
   const message = error instanceof Error ? error.message : String(error);
   const status = /not found|does not exist/i.test(message)
     ? 404
-    : /already has active|must be stopped|must be canceled|confirmation is required|must be approved|dataset repo is missing|online server|is offline|is unknown/i.test(message)
+      : /already has active|must be stopped|must be canceled|confirmation is required|must be approved|dataset repo is missing|online server|is offline|is unknown|only queued/i.test(message)
       ? 409
       : /missing|must have|required|invalid|outside|not marked studied/i.test(message)
         ? 400

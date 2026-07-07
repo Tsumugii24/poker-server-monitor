@@ -258,6 +258,17 @@ export class SolverJobService {
     return this.getParallelRun(id);
   }
 
+  deleteQueuedParallelRun(id: string): { deletedRunId: string } {
+    this.reconcileCompletedJobs();
+    this.reconcileParallelRuns();
+    const run = this.getParallelRun(id);
+    if (parallelRunLocked(run) || run.status !== "queued") {
+      throw new Error("Only queued parallel runs with no active solver task can be deleted.");
+    }
+    this.options.db.deleteParallelSolverRuns([id]);
+    return { deletedRunId: id };
+  }
+
   async previewFailurePool(input: ParallelFailurePoolPreviewRequest): Promise<ParallelSolverJobPreview> {
     return this.buildFailurePoolPreview(input);
   }
@@ -710,7 +721,7 @@ export class SolverJobService {
     const servers = sortServersByNaturalId(this.options.db.getServerRows());
     for (const server of servers) {
       const queued = this.options.db.getQueuedSolverJobForServer(server.id);
-      if (queued) {
+      if (queued && queued.queueMode !== "parallel") {
         await this.startQueuedJobIfDispatchReady(queued);
         continue;
       }
@@ -770,7 +781,7 @@ export class SolverJobService {
       : repoExists
         ? await fetchMissingBoardIndices(basePreview.repoId, allBoards, this.hfToken, this.effectiveHfProxyUrl())
         : [];
-    const allocationServerCount = Math.max(1, enabledServers.length, selectedServers.length);
+    const allocationServerCount = normalizedParallelChunkCount(input.chunkCount, enabledServers.length);
     const allocations = allocateRoundRobinChunks(indices, selectedServers, allocationServerCount).map((allocation) => {
       const settings = { ...basePreview.settings, rangeExpr: allocation.rangeExpr };
       const solverRoot = effectiveSolverRoot(allocation.server);
@@ -881,12 +892,12 @@ export class SolverJobService {
       ...availableServers,
       ...enabledServers
     ]));
-    const allocationServerCount = Math.max(1, enabledServers.length, selectedServers.length, bestServer ? 1 : 0);
+    const allocationServerCount = normalizedParallelChunkCount(input.chunkCount, enabledServers.length);
     const normalIndices = normalizeBoardIndices(normalEntries.map((entry) => entry.boardIndex), allBoards.length);
     const skippedIndices = normalizeBoardIndices(skippedEntries.map((entry) => entry.boardIndex), allBoards.length);
     const normalAllocations = allocateRoundRobinChunks(normalIndices, selectedServers, allocationServerCount);
     const skippedAllocations = bestServer && skippedIndices.length > 0
-      ? allocateRoundRobinChunks(skippedIndices, [bestServer], 1)
+      ? allocateRoundRobinChunks(skippedIndices, [bestServer], allocationServerCount)
       : [];
     const rawAllocations = [...normalAllocations, ...skippedAllocations];
     const allocations: ParallelSolverServerAllocation[] = rawAllocations.map((allocation) => {
@@ -1107,6 +1118,7 @@ export class SolverJobService {
   }
 
   private reconcileCompletedJobs(): void {
+    this.reconcileStartedJobsFromPipelines();
     for (const job of this.options.db.getSolverJobs()) {
       if (!ACTIVE_JOB_STATUSES.has(job.status)) continue;
       if (!job.pipeline || !pipelineIsNewEnoughForJob(job.pipeline, job)) continue;
@@ -1120,6 +1132,26 @@ export class SolverJobService {
         lastError
       });
       this.recordEvent(job.id, nextStatus, `Server task reconciled job as ${nextStatus}.`, null);
+    }
+  }
+
+  private reconcileStartedJobsFromPipelines(): void {
+    for (const job of this.options.db.getSolverJobs()) {
+      if (job.status !== "queued" && job.status !== "deploying") continue;
+      if (!job.pipeline || !pipelineBelongsToJob(job.pipeline, job) || !isPipelineActive(job.pipeline)) continue;
+      const startedAt = job.startedAt ?? job.pipeline.startedAt ?? job.pipeline.collectedAt ?? new Date().toISOString();
+      this.options.db.updateSolverJob(job.id, {
+        status: "running",
+        startedAt,
+        finishedAt: null,
+        lastError: null
+      });
+      this.recordEvent(
+        job.id,
+        "running_reconciled",
+        `Server inventory reports ${job.datasetName} is running on ${job.serverId}.`,
+        null
+      );
     }
   }
 
@@ -1471,13 +1503,16 @@ export class SolverJobService {
     if (!server.enabled || !serverIsOnline(server)) return false;
     if (this.options.db.getActiveSolverJobForServer(server.id)) return false;
     if (isPipelineActive(server.pipeline)) return false;
-    const sliceWithRun = this.nextQueuedParallelSliceForServer(server.id);
-    if (!sliceWithRun) return false;
-    const job = this.createJobForParallelSlice(sliceWithRun.run, sliceWithRun.slice, server);
+    const candidate = this.nextQueuedParallelSliceForServer(server.id);
+    if (!candidate) return false;
+    if (candidate.job && candidate.job.serverId === server.id) {
+      return this.startQueuedJobIfDispatchReady(candidate.job);
+    }
+    const job = this.createJobForParallelSlice(candidate.run, candidate.slice, server);
     return this.startQueuedJobIfDispatchReady(job);
   }
 
-  private nextQueuedParallelSliceForServer(serverId: string): { run: ParallelSolverRun; slice: ParallelSolverSlice } | null {
+  private nextQueuedParallelSliceForServer(serverId: string): { run: ParallelSolverRun; slice: ParallelSolverSlice; job: SolverJob | null } | null {
     const runs = this.options.db.getParallelSolverRuns()
       .filter((run) => run.status === "queued" || run.status === "running")
       .sort(compareParallelRunQueue);
@@ -1485,9 +1520,9 @@ export class SolverJobService {
       const slices = [...run.slices].sort(compareParallelSliceQueue);
       for (const slice of slices) {
         if (slice.status !== "queued") continue;
-        if (slice.jobId) continue;
         if (!slice.candidateServerIds.includes(serverId)) continue;
-        return { run, slice };
+        if (!slice.job) return { run, slice, job: null };
+        if (parallelSliceJobCanBeReassigned(slice)) return { run, slice, job: slice.job };
       }
     }
     return null;
@@ -1495,6 +1530,14 @@ export class SolverJobService {
 
   private createJobForParallelSlice(run: ParallelSolverRun, slice: ParallelSolverSlice, server: ServerRow): SolverJob {
     const now = new Date().toISOString();
+    if (parallelSliceJobCanBeReassigned(slice) && slice.job) {
+      this.options.db.updateSolverJob(slice.job.id, {
+        status: "canceled",
+        finishedAt: now,
+        lastError: `Parallel chunk reassigned to ${server.id} before dispatch.`
+      });
+      this.recordEvent(slice.job.id, "reassigned", `Parallel chunk reassigned to ${server.id} before dispatch.`, null);
+    }
     const jobId = randomUUID();
     const settings = { ...run.settings, rangeExpr: slice.rangeExpr };
     const solverRoot = effectiveSolverRoot(server);
@@ -2746,6 +2789,11 @@ function normalizePositiveIndices(indices: number[]): number[] {
   return normalized.sort((a, b) => a - b);
 }
 
+function normalizedParallelChunkCount(chunkCount: number | undefined, defaultCount: number): number {
+  const parsed = Math.trunc(Number(chunkCount ?? defaultCount));
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : Math.max(1, defaultCount);
+}
+
 function allocateRoundRobinChunks(
   indices: number[],
   servers: ServerRow[],
@@ -2890,6 +2938,15 @@ function parallelRunLocked(run: ParallelSolverRun): boolean {
     slice.job?.status === "deploying" ||
     slice.job?.status === "running" ||
     slice.job?.status === "stopping"
+  );
+}
+
+function parallelSliceJobCanBeReassigned(slice: ParallelSolverSlice): boolean {
+  return Boolean(
+    slice.job &&
+      slice.status === "queued" &&
+      slice.job.status === "queued" &&
+      !slice.job.startedAt
   );
 }
 
