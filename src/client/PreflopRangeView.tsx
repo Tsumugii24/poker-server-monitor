@@ -3883,13 +3883,15 @@ function ParallelQueueBoard({
                 <div className="parallel-queue-rank">{index + 1}</div>
                 <div className="parallel-queue-marker" aria-hidden="true" />
                 <div className="parallel-queue-copy">
-                  <strong>{run.datasetName}</strong>
-                  <span>
+                  <div className="parallel-queue-heading">
+                    <strong title={run.datasetName}>{run.datasetName}</strong>
+                    <em className={`solver-job-status ${dispatch.className || run.status}`}>{dispatch.label}</em>
+                  </div>
+                  <p className="parallel-queue-meta">
                     {run.sourceType === "failure_pool" ? "Pool retry" : "Parallel run"} · {run.report.totalBoards} boards · {serverText} · {dispatch.summary}
-                  </span>
+                  </p>
                 </div>
-                <div className="parallel-queue-state">
-                  <em className={`solver-job-status ${dispatch.className || run.status}`}>{dispatch.label}</em>
+                <div className="parallel-queue-actions">
                   {locked ? (
                     <span className="parallel-queue-lock" title="Locked while any server is running this run">
                       <Lock size={12} />
@@ -3971,16 +3973,16 @@ function ParallelHistoryBoard({
               >
                 <div className="parallel-queue-marker" aria-hidden="true" />
                 <div className="parallel-queue-copy">
-                  <strong>{run.datasetName}</strong>
-                  <span>
+                  <div className="parallel-queue-heading">
+                    <strong title={run.datasetName}>{run.datasetName}</strong>
+                    <em className={`solver-job-status ${run.status}`}>{formatParallelRunStatus(run.status)}</em>
+                    <span className="parallel-history-metric">{formatRatio(run.report.successRate)}</span>
+                  </div>
+                  <p className="parallel-queue-meta">
                     {run.sourceType === "failure_pool" ? "Pool retry" : "Parallel run"}
                     {run.finishedAt ? ` · ${formatShortDateTime(run.finishedAt)}` : ""}
                     {failureCount > 0 ? ` · ${failureCount} failed board${failureCount === 1 ? "" : "s"}` : ""}
-                  </span>
-                </div>
-                <div className="parallel-queue-state">
-                  <em className={`solver-job-status ${run.status}`}>{formatParallelRunStatus(run.status)}</em>
-                  <span className="parallel-history-metric">{formatRatio(run.report.successRate)}</span>
+                  </p>
                 </div>
               </article>
             );

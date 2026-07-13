@@ -5666,18 +5666,13 @@ td .port-value {
 
 .parallel-history-lane {
   display: grid;
-  grid-auto-flow: column;
-  grid-auto-columns: minmax(280px, calc((100% - 18px) / 3));
-  gap: 9px;
-  overflow-x: auto;
-  overscroll-behavior-x: contain;
-  padding-bottom: 4px;
-  scrollbar-width: thin;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 380px), 1fr));
+  gap: 10px;
 }
 
 .parallel-history-item {
-  grid-template-columns: 4px minmax(0, 1fr) auto;
-  min-height: 68px;
+  grid-template-columns: 4px minmax(0, 1fr);
+  min-height: 72px;
   cursor: pointer;
 }
 
@@ -5708,33 +5703,38 @@ td .port-value {
 }
 
 .parallel-history-metric {
+  flex: 0 0 auto;
   color: var(--text-tertiary);
   font-size: 11px;
-  font-weight: 700;
+  font-weight: 800;
+  letter-spacing: 0.02em;
 }
 
 .parallel-queue-lane {
-  display: grid;
-  grid-auto-flow: column;
-  grid-auto-columns: minmax(300px, calc((100% - 18px) / 3));
-  gap: 9px;
+  display: flex;
+  gap: 10px;
   overflow-x: auto;
   overscroll-behavior-x: contain;
   padding-bottom: 4px;
   scrollbar-width: thin;
 }
 
+.parallel-queue-lane > .parallel-queue-item {
+  flex: 0 0 clamp(360px, 42vw, 520px);
+  width: clamp(360px, 42vw, 520px);
+}
+
 .parallel-queue-item {
   position: relative;
   display: grid;
   grid-template-columns: 30px 4px minmax(0, 1fr) auto;
-  gap: 9px;
-  align-items: center;
+  gap: 8px 10px;
+  align-items: start;
   min-width: 0;
-  min-height: 74px;
+  min-height: 82px;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  padding: 10px;
+  padding: 12px;
   background: var(--bg-base);
   cursor: pointer;
   transition: border-color 0.16s ease, box-shadow 0.16s ease, transform 0.16s ease, opacity 0.16s ease;
@@ -5804,9 +5804,55 @@ td .port-value {
 .parallel-queue-marker {
   width: 4px;
   height: 100%;
-  min-height: 42px;
+  min-height: 52px;
+  align-self: stretch;
   border-radius: var(--radius-pill);
   background: var(--yellow);
+}
+
+.parallel-queue-copy {
+  min-width: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.parallel-queue-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  min-width: 0;
+}
+
+.parallel-queue-heading strong {
+  min-width: 0;
+  flex: 1 1 120px;
+  overflow-wrap: anywhere;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 850;
+  line-height: 1.35;
+}
+
+.parallel-queue-heading .solver-job-status {
+  flex: 0 0 auto;
+  font-size: 9px;
+  letter-spacing: 0.03em;
+}
+
+.parallel-queue-meta {
+  margin: 0;
+  color: var(--text-tertiary);
+  font-size: 11px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.parallel-queue-actions {
+  display: inline-flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding-top: 1px;
 }
 
 .parallel-queue-item.running .parallel-queue-marker {
@@ -5819,36 +5865,6 @@ td .port-value {
 
 .parallel-queue-item.active .parallel-queue-marker {
   background: var(--accent);
-}
-
-.parallel-queue-copy {
-  min-width: 0;
-  display: grid;
-  gap: 3px;
-}
-
-.parallel-queue-copy strong,
-.parallel-queue-copy span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.parallel-queue-copy strong {
-  color: var(--text-primary);
-  font-size: 13px;
-  font-weight: 850;
-}
-
-.parallel-queue-copy span {
-  color: var(--text-tertiary);
-  font-size: 11px;
-}
-
-.parallel-queue-state {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
 }
 
 .parallel-queue-lock,
@@ -5909,6 +5925,7 @@ td .port-value {
   align-items: center;
   justify-content: space-between;
   gap: 10px;
+  flex-wrap: wrap;
 }
 
 .parallel-section-title-with-actions {
@@ -5932,9 +5949,8 @@ td .port-value {
   color: var(--text-tertiary);
   font-size: 11px;
   font-weight: 800;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  line-height: 1.4;
+  text-align: right;
 }
 
 .parallel-report-actions {
@@ -7069,6 +7085,19 @@ td .port-value {
   .preflop-confirm-actions,
   .preflop-delete-actions {
     width: 100%;
+  }
+
+  .parallel-queue-item:not(.parallel-history-item) {
+    grid-template-columns: 30px 4px minmax(0, 1fr) auto;
+  }
+
+  .parallel-history-item {
+    grid-template-columns: 4px minmax(0, 1fr);
+  }
+
+  .parallel-queue-lane > .parallel-queue-item {
+    flex: 0 0 min(100%, 520px);
+    width: min(100%, 520px);
   }
 
 }
