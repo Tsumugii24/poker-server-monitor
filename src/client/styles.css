@@ -5671,8 +5671,6 @@ td .port-value {
 }
 
 .parallel-history-item {
-  grid-template-columns: 4px minmax(0, 1fr);
-  min-height: 72px;
   cursor: pointer;
 }
 
@@ -5738,6 +5736,21 @@ td .port-value {
   background: var(--bg-base);
   cursor: pointer;
   transition: border-color 0.16s ease, box-shadow 0.16s ease, transform 0.16s ease, opacity 0.16s ease;
+}
+
+.parallel-queue-item.parallel-history-item {
+  grid-template-columns: 4px minmax(0, 1fr);
+  min-height: 72px;
+}
+
+.parallel-history-item .parallel-queue-marker {
+  grid-column: 1;
+  grid-row: 1 / -1;
+}
+
+.parallel-history-item .parallel-queue-copy {
+  grid-column: 2;
+  min-width: 0;
 }
 
 .parallel-queue-item.queued {
@@ -5827,7 +5840,8 @@ td .port-value {
 .parallel-queue-heading strong {
   min-width: 0;
   flex: 1 1 120px;
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
+  word-break: normal;
   color: var(--text-primary);
   font-size: 13px;
   font-weight: 850;
@@ -5845,7 +5859,8 @@ td .port-value {
   color: var(--text-tertiary);
   font-size: 11px;
   line-height: 1.45;
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
+  word-break: normal;
 }
 
 .parallel-queue-actions {
@@ -7091,7 +7106,7 @@ td .port-value {
     grid-template-columns: 30px 4px minmax(0, 1fr) auto;
   }
 
-  .parallel-history-item {
+  .parallel-queue-item.parallel-history-item {
     grid-template-columns: 4px minmax(0, 1fr);
   }
 
