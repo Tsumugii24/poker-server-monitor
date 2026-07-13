@@ -41,6 +41,8 @@ import {
   datasetNameFromRangePath,
   scenarioFromRangePath
 } from "../shared/preflopDataset";
+import { computeMissingSolveBoardIndices } from "../shared/solverCoverage";
+import type { ParallelSolverCoverageSummary } from "../shared/solverJobs";
 import type {
   ServerOperation,
   ServerOperationEvent,
@@ -776,11 +778,20 @@ export class SolverJobService {
       ...availableServers,
       ...enabledServers
     ]));
-    const indices = options.explicitIndices
-      ? normalizeBoardIndices(options.explicitIndices, allBoards.length)
-      : repoExists
-        ? await fetchMissingBoardIndices(basePreview.repoId, allBoards, this.hfToken, this.effectiveHfProxyUrl())
-        : [];
+    let indices: number[] = [];
+    let coverage: ParallelSolverCoverageSummary | null = null;
+    if (options.explicitIndices) {
+      indices = normalizeBoardIndices(options.explicitIndices, allBoards.length);
+    } else if (repoExists) {
+      const resolved = await this.resolveMissingSolveBoardIndices(
+        basePreview.repoId,
+        basePreview.rangePath,
+        basePreview.datasetName,
+        allBoards
+      );
+      indices = resolved.missingIndices;
+      coverage = resolved.coverage;
+    }
     const allocationServerCount = normalizedParallelChunkCount(input.chunkCount, enabledServers.length);
     const allocations = allocateRoundRobinChunks(indices, selectedServers, allocationServerCount).map((allocation) => {
       const settings = { ...basePreview.settings, rangeExpr: allocation.rangeExpr };
@@ -821,15 +832,34 @@ export class SolverJobService {
       missingIndices: indices,
       missingBoardNames: indices.map((index) => allBoards[index - 1] ?? String(index)),
       allocations,
+      coverage,
       repoExists,
       tokenConfigured: Boolean(this.hfToken),
       requiresConfirmation: !basePreview.learned || !repoExists,
       warnings: [
         ...basePreview.warnings,
         ...(!repoExists ? ["Dataset repo is missing. Confirm the dataset name before creating it."] : []),
+        ...(coverage ? buildMissingSolveWarnings(coverage) : []),
         ...(indices.length === 0 && repoExists ? ["No missing boards remain for this dataset."] : [])
       ]
     };
+  }
+
+  private async resolveMissingSolveBoardIndices(
+    repoId: string,
+    rangePath: string,
+    datasetName: string,
+    allBoards: string[]
+  ): Promise<{ missingIndices: number[]; coverage: ParallelSolverCoverageSummary }> {
+    const remoteBoardKeys = await fetchHuggingFaceDatasetBoardKeys(repoId, this.hfToken, this.effectiveHfProxyUrl());
+    return computeMissingSolveBoardIndices({
+      allBoards,
+      remoteBoardKeys,
+      runs: this.options.db.getParallelSolverRuns(),
+      datasetName,
+      rangePath,
+      failurePoolEntries: this.options.db.getParallelFailurePoolEntries(rangePath, datasetName)
+    });
   }
 
   private async buildFailurePoolPreview(
@@ -944,6 +974,7 @@ export class SolverJobService {
       missingIndices: indices,
       missingBoardNames: indices.map((index) => allBoards[index - 1] ?? String(index)),
       allocations,
+      coverage: null,
       repoExists,
       tokenConfigured: Boolean(this.hfToken),
       requiresConfirmation: !basePreview.learned || !repoExists,
@@ -2714,18 +2745,24 @@ function safeTmuxName(value: string): string {
   return value.replace(/[^A-Za-z0-9_.-]+/g, "-").replace(/^-+|-+$/g, "") || "server";
 }
 
-async function fetchMissingBoardIndices(
-  repoId: string,
-  allBoards: string[],
-  hfToken: string | null,
-  hfProxyUrl: string | null
-): Promise<number[]> {
-  const existing = await fetchHuggingFaceDatasetBoardKeys(repoId, hfToken, hfProxyUrl);
-  const missing: number[] = [];
-  allBoards.forEach((board, index) => {
-    if (!existing.has(boardKeyFromName(board))) missing.push(index + 1);
-  });
-  return missing;
+function buildMissingSolveWarnings(coverage: ParallelSolverCoverageSummary): string[] {
+  const warnings: string[] = [];
+  if (coverage.uploadPendingCount > 0) {
+    warnings.push(
+      `${coverage.uploadPendingCount} board(s) already completed in prior runs but are not on Hugging Face yet. Upload via Server Operations instead of re-solving.`
+    );
+  }
+  if (coverage.inFlightCount > 0) {
+    warnings.push(`${coverage.inFlightCount} board(s) are already assigned to an active parallel run.`);
+  }
+  if (coverage.failurePoolPendingCount > 0 && coverage.failurePoolPendingCount === coverage.missingCount) {
+    warnings.push("Remaining missing boards match the retryable failure pool for this dataset.");
+  } else if (coverage.failurePoolPendingCount > 0 && coverage.missingCount > coverage.failurePoolPendingCount) {
+    warnings.push(
+      `${coverage.failurePoolPendingCount} board(s) are in the failure pool; ${coverage.missingCount - coverage.failurePoolPendingCount} board(s) have never been attempted.`
+    );
+  }
+  return warnings;
 }
 
 async function fetchHuggingFaceDatasetBoardKeys(

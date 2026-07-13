@@ -350,7 +350,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
     if (activeSolverJobTab !== "parallel") return;
     setActiveParallelRunId((current) => {
       if (current && parallelRuns.some((run) => run.id === current)) return current;
-      return parallelQueueRuns(parallelRuns)[0]?.id ?? null;
+      return resolveDefaultParallelRunId(parallelRuns);
     });
   }, [activeSolverJobTab, parallelRuns]);
 
@@ -1560,7 +1560,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
   const changeSolverJobTab = (tab: "single" | "parallel" | "operations") => {
     setActiveSolverJobTab(tab);
     if (tab === "parallel") {
-      setActiveParallelRunId(parallelQueueRuns(parallelRuns)[0]?.id ?? null);
+      setActiveParallelRunId(resolveDefaultParallelRunId(parallelRuns));
     }
   };
 
@@ -3040,11 +3040,15 @@ function SolverJobPanel({
               <Play size={15} />
               Start Now
             </button>
-            <button className="icon-button compact" onClick={onQueueNext} disabled={submitDisabled}>
+            <button className="icon-button compact" onClick={onQueueNext} disabled={submitDisabled || !preview}>
               <Send size={15} />
               Queue Next
             </button>
           </div>
+
+          {!preview && canSubmit && !requiresApproval ? (
+            <div className="notice warning compact-notice">Preview the job before queuing.</div>
+          ) : null}
 
           {preview ? (
             <div className="solver-job-preview">
@@ -3420,11 +3424,12 @@ function ParallelSolverJobPanel({
   const targetServerCount = selectedServers.length > 0 ? selectedServers.length : enabledServers.length;
   const hasTargetServers = targetServerCount > 0;
   const queueRuns = parallelQueueRuns(runs);
-  const activeInspectionRun = runs.find((run) => run.id === activeRunId) ?? queueRuns[0] ?? null;
+  const historyRuns = parallelHistoryRuns(runs);
+  const activeInspectionRun = resolveInspectionRun(runs, activeRunId);
   const activeFailurePoolRangePath = activeInspectionRun?.rangePath ?? selectedRangePath;
   const activeFailurePoolDatasetName = activeInspectionRun?.datasetName ?? preview?.datasetName ?? datasetName.trim();
   const inspectionContextLabel = activeInspectionRun
-    ? `${activeInspectionRun.datasetName} · ${formatParallelRunStatus(activeInspectionRun.status)}`
+    ? `${activeInspectionRun.datasetName} · ${formatParallelRunStatus(activeInspectionRun.status)}${historyRuns.some((run) => run.id === activeInspectionRun.id) ? " · history" : ""}`
     : selectedRangeName || "Current selection";
   const visibleFailurePool = failurePool.filter((entry) =>
     entry.rangePath === activeFailurePoolRangePath &&
@@ -3434,8 +3439,9 @@ function ParallelSolverJobPanel({
   const baseSubmitDisabled = !selectedRangePath || !selectedRangeLearned || busy != null;
   const submitDisabled = baseSubmitDisabled || !hasTargetServers;
   const previewHasNoMissingBoards = preview != null && preview.missingIndices.length === 0;
+  const previewRequired = preview == null;
   const startDisabled = submitDisabled || queueRuns.length > 0 || previewHasNoMissingBoards;
-  const queueNextDisabled = submitDisabled || previewHasNoMissingBoards;
+  const queueNextDisabled = submitDisabled || previewHasNoMissingBoards || previewRequired;
   const inspectedRuns = activeInspectionRun ? [activeInspectionRun] : [];
   const clearableRuns = terminalParallelReportRuns(runs);
   const failurePoolDatasets = summarizeFailurePoolDatasets(visibleFailurePool);
@@ -3445,6 +3451,7 @@ function ParallelSolverJobPanel({
   const failurePoolSubmitDisabled =
     baseSubmitDisabled ||
     !hasTargetServers ||
+    previewRequired ||
     retryableFailurePoolCount === 0 ||
     (skippedFailurePoolCount > 0 && !bestServerId.trim());
 
@@ -3460,6 +3467,11 @@ function ParallelSolverJobPanel({
         onDragStart={onQueueDragStart}
         onDragEnd={onQueueDragEnd}
         onDrop={onQueueDrop}
+      />
+      <ParallelHistoryBoard
+        runs={runs}
+        activeRunId={activeInspectionRun?.id ?? null}
+        onRunSelect={onRunSelect}
       />
 
     <div className="parallel-job-grid">
@@ -3611,6 +3623,9 @@ function ParallelSolverJobPanel({
         {!selectedRangeLearned && selectedRangePath ? (
           <div className="notice warning compact-notice">Approve this range before creating parallel jobs.</div>
         ) : null}
+        {previewRequired && selectedRangePath && selectedRangeLearned && hasTargetServers ? (
+          <div className="notice warning compact-notice">Preview distribution before queuing a parallel run.</div>
+        ) : null}
 
         {preview ? (
           <div className="parallel-preview-panel">
@@ -3620,6 +3635,15 @@ function ParallelSolverJobPanel({
               <div><span>Chunks</span><strong>{preview.allocations.filter((item) => item.indices.length > 0).length}</strong></div>
               <div><span>Repo Status</span><strong>{preview.repoExists ? "Exists" : "Missing"}</strong></div>
             </div>
+            {preview.coverage ? (
+              <div className="parallel-preview-coverage">
+                <span>HF {preview.coverage.remoteCoveredCount}</span>
+                <span>Completed {preview.coverage.historicallyCompletedCount}</span>
+                <span>Upload pending {preview.coverage.uploadPendingCount}</span>
+                <span>Failure pool {preview.coverage.failurePoolPendingCount}</span>
+                <span>In flight {preview.coverage.inFlightCount}</span>
+              </div>
+            ) : null}
             <div className="parallel-allocation-list">
               {preview.allocations.map((allocation, index) => (
                 <article key={`${allocation.server.id}:${allocation.rangeExpr}:${index}`} className="parallel-allocation-row">
@@ -3709,7 +3733,13 @@ function ParallelSolverJobPanel({
               </button>
             </div>
           </div>
-          {inspectedRuns.length === 0 ? <p className="solver-job-empty">No active or queued parallel run selected.</p> : null}
+          {inspectedRuns.length === 0 ? (
+            <p className="solver-job-empty">
+              {queueRuns.length === 0 && historyRuns.length === 0
+                ? "No parallel runs yet."
+                : "Select a run from the queue or history to inspect reports and failure pool."}
+            </p>
+          ) : null}
           {inspectedRuns.map((run) => {
             const dispatch = parallelDispatchState(run);
             return (
@@ -3885,6 +3915,72 @@ function ParallelQueueBoard({
                       </span>
                     </>
                   )}
+                </div>
+              </article>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function ParallelHistoryBoard({
+  runs,
+  activeRunId,
+  onRunSelect
+}: {
+  runs: ParallelSolverRun[];
+  activeRunId: string | null;
+  onRunSelect: (runId: string) => void;
+}) {
+  const historyRuns = parallelHistoryRuns(runs);
+
+  return (
+    <section className="parallel-history-board">
+      <div className="parallel-section-title">
+        <strong>Parallel History</strong>
+        <span>{historyRuns.length} finished · select to inspect reports and failure pool</span>
+      </div>
+      {historyRuns.length === 0 ? (
+        <p className="solver-job-empty">No finished parallel runs yet.</p>
+      ) : (
+        <div className="parallel-history-lane" aria-label="Parallel run history">
+          {historyRuns.map((run) => {
+            const active = activeRunId === run.id;
+            const failureCount = run.report.failedBoards;
+            return (
+              <article
+                key={run.id}
+                className={[
+                  "parallel-queue-item",
+                  "parallel-history-item",
+                  run.status,
+                  run.sourceType,
+                  active ? "active" : ""
+                ].filter(Boolean).join(" ")}
+                role="button"
+                tabIndex={0}
+                aria-pressed={active}
+                onClick={() => onRunSelect(run.id)}
+                onKeyDown={(event) => {
+                  if (event.key !== "Enter" && event.key !== " ") return;
+                  event.preventDefault();
+                  onRunSelect(run.id);
+                }}
+              >
+                <div className="parallel-queue-marker" aria-hidden="true" />
+                <div className="parallel-queue-copy">
+                  <strong>{run.datasetName}</strong>
+                  <span>
+                    {run.sourceType === "failure_pool" ? "Pool retry" : "Parallel run"}
+                    {run.finishedAt ? ` · ${formatShortDateTime(run.finishedAt)}` : ""}
+                    {failureCount > 0 ? ` · ${failureCount} failed board${failureCount === 1 ? "" : "s"}` : ""}
+                  </span>
+                </div>
+                <div className="parallel-queue-state">
+                  <em className={`solver-job-status ${run.status}`}>{formatParallelRunStatus(run.status)}</em>
+                  <span className="parallel-history-metric">{formatRatio(run.report.successRate)}</span>
                 </div>
               </article>
             );
@@ -4703,6 +4799,22 @@ function parallelQueueRuns(runs: ParallelSolverRun[]): ParallelSolverRun[] {
     .sort(compareParallelRunQueue);
 }
 
+function parallelHistoryRuns(runs: ParallelSolverRun[]): ParallelSolverRun[] {
+  return terminalParallelReportRuns(runs).sort(compareParallelHistoryRun);
+}
+
+function resolveInspectionRun(runs: ParallelSolverRun[], activeRunId: string | null): ParallelSolverRun | null {
+  if (activeRunId) {
+    const selected = runs.find((run) => run.id === activeRunId);
+    if (selected) return selected;
+  }
+  return parallelQueueRuns(runs)[0] ?? parallelHistoryRuns(runs)[0] ?? null;
+}
+
+function resolveDefaultParallelRunId(runs: ParallelSolverRun[]): string | null {
+  return resolveInspectionRun(runs, null)?.id ?? null;
+}
+
 function terminalParallelReportRuns(runs: ParallelSolverRun[]): ParallelSolverRun[] {
   return runs.filter((run) =>
     run.status === "completed" ||
@@ -4716,6 +4828,15 @@ function compareParallelRunQueue(left: ParallelSolverRun, right: ParallelSolverR
   const orderDelta = left.queueOrder - right.queueOrder;
   if (orderDelta !== 0) return orderDelta;
   return Date.parse(left.createdAt) - Date.parse(right.createdAt);
+}
+
+function compareParallelHistoryRun(left: ParallelSolverRun, right: ParallelSolverRun): number {
+  const leftFinished = Date.parse(left.finishedAt ?? left.updatedAt);
+  const rightFinished = Date.parse(right.finishedAt ?? right.updatedAt);
+  if (Number.isFinite(leftFinished) && Number.isFinite(rightFinished) && leftFinished !== rightFinished) {
+    return rightFinished - leftFinished;
+  }
+  return Date.parse(right.createdAt) - Date.parse(left.createdAt);
 }
 
 function parallelRunIsLocked(run: ParallelSolverRun): boolean {

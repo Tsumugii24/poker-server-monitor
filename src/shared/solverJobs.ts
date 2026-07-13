@@ -285,6 +285,16 @@ export type ParallelFailurePoolSubmitRequest = ParallelFailurePoolPreviewRequest
   queueMode?: "start_now" | "queue_next";
 };
 
+export type ParallelSolverCoverageSummary = {
+  totalBoards: number;
+  remoteCoveredCount: number;
+  historicallyCompletedCount: number;
+  uploadPendingCount: number;
+  inFlightCount: number;
+  failurePoolPendingCount: number;
+  missingCount: number;
+};
+
 export type ParallelSolverJobPreview = {
   rangePath: string;
   rangeName: string;
@@ -299,6 +309,7 @@ export type ParallelSolverJobPreview = {
   missingIndices: number[];
   missingBoardNames: string[];
   allocations: ParallelSolverServerAllocation[];
+  coverage: ParallelSolverCoverageSummary | null;
   repoExists: boolean;
   tokenConfigured: boolean;
   requiresConfirmation: boolean;

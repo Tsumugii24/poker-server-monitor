@@ -5655,6 +5655,64 @@ td .port-value {
   background: var(--bg-elevated);
 }
 
+.parallel-history-board {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+  background: color-mix(in srgb, var(--bg-elevated) 88%, var(--bg-base));
+}
+
+.parallel-history-lane {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(280px, calc((100% - 18px) / 3));
+  gap: 9px;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  padding-bottom: 4px;
+  scrollbar-width: thin;
+}
+
+.parallel-history-item {
+  grid-template-columns: 4px minmax(0, 1fr) auto;
+  min-height: 68px;
+  cursor: pointer;
+}
+
+.parallel-history-item.completed {
+  border-color: color-mix(in srgb, var(--green) 28%, var(--border));
+}
+
+.parallel-history-item.completed_with_failures {
+  border-color: color-mix(in srgb, var(--yellow) 34%, var(--border));
+}
+
+.parallel-history-item.failed,
+.parallel-history-item.canceled {
+  border-color: color-mix(in srgb, var(--red) 24%, var(--border));
+}
+
+.parallel-history-item.completed .parallel-queue-marker {
+  background: var(--green);
+}
+
+.parallel-history-item.completed_with_failures .parallel-queue-marker {
+  background: var(--yellow);
+}
+
+.parallel-history-item.failed .parallel-queue-marker,
+.parallel-history-item.canceled .parallel-queue-marker {
+  background: var(--red);
+}
+
+.parallel-history-metric {
+  color: var(--text-tertiary);
+  font-size: 11px;
+  font-weight: 700;
+}
+
 .parallel-queue-lane {
   display: grid;
   grid-auto-flow: column;
@@ -6024,6 +6082,22 @@ td .port-value {
   font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.parallel-preview-coverage {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.parallel-preview-coverage span {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  padding: 4px 10px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 700;
+  background: var(--bg-base);
 }
 
 .parallel-allocation-list,
