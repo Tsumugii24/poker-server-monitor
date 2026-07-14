@@ -986,6 +986,171 @@ describe("solver job API", () => {
     expect(preview.body.missingIndices[0]).toBe(1605);
   });
 
+  it("removes remotely covered boards from a stale failure pool before retry preview", async () => {
+    const datasetName = "stale-failure-pool";
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/tree/main")) {
+        return new Response(JSON.stringify(
+          Array.from({ length: 7 }, (_value, index) => ({ path: `board-${index + 1}.parquet` }))
+        ), { status: 200 });
+      }
+      if (url.includes("/api/datasets/")) {
+        return new Response(JSON.stringify({ id: `Tsumugii/${datasetName}` }), { status: 200 });
+      }
+      return new Response("{}", { status: 200 });
+    }));
+    const executor: SshExecutor = {
+      run: vi.fn(async (_server, _credentials, command) =>
+        command.includes("cards/cards.txt") ? solverCardsText() : "ok"
+      )
+    };
+    const solverJobService = new SolverJobService({
+      db,
+      preflopRangesPath,
+      credentials: { username: "root", password: "secret" },
+      executor,
+      defaultPipelineStatusFilePath: "~/run/solver_running_status.json",
+      repoNamespace: "Tsumugii",
+      hfToken: "hf_test_token"
+    });
+    const app = createApp({ db, refreshService, preflopRangesPath, solverJobService });
+    const rangePath = "3OD-EP/3OD-4.3 vs 3IA-4.2.json";
+    await approveRange(app, rangePath);
+    const now = new Date().toISOString();
+    for (let boardIndex = 1; boardIndex <= 10; boardIndex += 1) {
+      db.upsertParallelFailurePoolEntry({
+        id: `stale-${boardIndex}`,
+        rangePath,
+        datasetName,
+        repoId: `Tsumugii/${datasetName}`,
+        scenario: "3ia-3od",
+        boardIndex,
+        boardName: `board-${boardIndex}`,
+        boardKey: `board-${boardIndex}`,
+        status: "pending",
+        failureReason: "abnormal_end",
+        attemptCount: 1,
+        lastRunId: "old-run",
+        lastSliceId: "old-slice",
+        lastServerId: "solver-01",
+        lastError: "old failure",
+        createdAt: now,
+        updatedAt: now
+      });
+    }
+
+    const preview = await request(app)
+      .post("/api/parallel-jobs/failure-pool/preview")
+      .send({
+        rangePath,
+        datasetName,
+        serverIds: ["solver-01"],
+        chunkCount: 3,
+        settings: { uploadEnabled: false }
+      });
+
+    expect(preview.status).toBe(200);
+    expect(preview.body.missingIndices).toEqual([8, 9, 10]);
+    expect(preview.body.allocations).toHaveLength(3);
+    expect(preview.body.coverage).toMatchObject({
+      remoteCoveredCount: 7,
+      failurePoolPendingCount: 3
+    });
+    const listed = await request(app).get("/api/parallel-jobs");
+    expect(listed.body.failurePool.filter((entry: { status: string }) => entry.status === "solved")).toHaveLength(7);
+    expect(listed.body.failurePool.filter((entry: { status: string }) => entry.status === "pending")).toHaveLength(3);
+  });
+
+  it("uses one global balanced chunk budget for mixed failure-pool reasons", async () => {
+    db.syncServers([
+      ...servers,
+      {
+        id: "solver-02",
+        name: "Solver 02",
+        host: "10.0.0.2",
+        port: 22,
+        enabled: true,
+        note: "TBD",
+        solverRoot: "/srv/solver",
+        tmuxSession: "solver",
+        pipelineStatusFilePath: "~/run/status.json"
+      },
+      {
+        id: "solver-03",
+        name: "Solver 03",
+        host: "10.0.0.3",
+        port: 22,
+        enabled: true,
+        note: "TBD",
+        solverRoot: "/srv/solver",
+        tmuxSession: "solver",
+        pipelineStatusFilePath: "~/run/status.json"
+      }
+    ]);
+    const executor: SshExecutor = {
+      run: vi.fn(async (_server, _credentials, command) =>
+        command.includes("cards/cards.txt") ? solverCardsText() : "ok"
+      )
+    };
+    const solverJobService = new SolverJobService({
+      db,
+      preflopRangesPath,
+      credentials: { username: "root", password: "secret" },
+      executor,
+      defaultPipelineStatusFilePath: "~/run/solver_running_status.json",
+      repoNamespace: "Tsumugii",
+      hfToken: "hf_test_token"
+    });
+    const app = createApp({ db, refreshService, preflopRangesPath, solverJobService });
+    const rangePath = "3OD-EP/3OD-4.3 vs 3IA-4.2.json";
+    const datasetName = "mixed-failure-pool";
+    await approveRange(app, rangePath);
+    const indices = Array.from({ length: 40 }, (_value, index) => index + 1000);
+    const now = new Date().toISOString();
+    for (const boardIndex of indices) {
+      db.upsertParallelFailurePoolEntry({
+        id: `mixed-${boardIndex}`,
+        rangePath,
+        datasetName,
+        repoId: `Tsumugii/${datasetName}`,
+        scenario: "3ia-3od",
+        boardIndex,
+        boardName: `board-${boardIndex}`,
+        boardKey: `board-${boardIndex}`,
+        status: "pending",
+        failureReason: boardIndex < 1030 ? "abnormal_end" : "skipped",
+        attemptCount: 1,
+        lastRunId: "old-run",
+        lastSliceId: "old-slice",
+        lastServerId: "solver-01",
+        lastError: "test failure",
+        createdAt: now,
+        updatedAt: now
+      });
+    }
+
+    const preview = await request(app)
+      .post("/api/parallel-jobs/failure-pool/preview")
+      .send({
+        rangePath,
+        datasetName,
+        indices,
+        serverIds: ["solver-01", "solver-02"],
+        bestServerId: "solver-03",
+        chunkCount: 4,
+        settings: { uploadEnabled: false }
+      });
+
+    expect(preview.status).toBe(200);
+    expect(preview.body.allocations).toHaveLength(4);
+    expect(preview.body.allocations.map((allocation: { indices: number[] }) => allocation.indices.length)).toEqual([10, 10, 10, 10]);
+    expect(preview.body.allocations.slice(0, 3).every((allocation: { candidateServerIds: string[] }) =>
+      JSON.stringify(allocation.candidateServerIds) === JSON.stringify(["solver-01", "solver-02"])
+    )).toBe(true);
+    expect(preview.body.allocations[3].candidateServerIds).toEqual(["solver-03"]);
+  });
+
   it("sizes parallel chunks from the full enabled server count", async () => {
     db.syncServers([
       ...servers,

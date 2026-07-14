@@ -42,7 +42,11 @@ import {
   datasetNameFromRangePath,
   scenarioFromRangePath
 } from "../shared/preflopDataset";
-import { computeMissingSolveBoardIndices } from "../shared/solverCoverage";
+import {
+  collectHistoricallyCompletedBoardIndices,
+  collectRemoteCoveredBoardIndices,
+  computeMissingSolveBoardIndices
+} from "../shared/solverCoverage";
 import type { ParallelSolverCoverageSummary } from "../shared/solverJobs";
 import type {
   ServerOperation,
@@ -309,6 +313,9 @@ export class SolverJobService {
     const preview = await this.buildFailurePoolPreview(input, {
       createRepoIfConfirmed: Boolean(input.confirmDatasetName)
     });
+    if (preview.missingIndices.length === 0) {
+      throw new Error("Failure pool has no pending boards for this range after coverage reconciliation.");
+    }
     if (!preview.repoExists) {
       throw new Error("Dataset repo is missing. Confirm the dataset name and create the repo before submitting this failure pool.");
     }
@@ -896,7 +903,7 @@ export class SolverJobService {
     input: ParallelFailurePoolPreviewRequest,
     options: { createRepoIfConfirmed?: boolean } = {}
   ): Promise<ParallelSolverJobPreview> {
-    const entries = this.failurePoolEntries(input);
+    let entries = this.failurePoolEntries(input);
     const servers = sortServersByNaturalId(this.options.db.getServerRows());
     const enabledServers = servers.filter((server) => server.enabled);
     const availableServers = enabledServers.filter((server) =>
@@ -908,18 +915,10 @@ export class SolverJobService {
       if (!server) throw new Error(`Server ${serverId} is not enabled or does not exist.`);
       return server;
     });
-    const skippedEntries = entries.filter((entry) => entry.failureReason === "skipped");
-    const normalEntries = entries.filter((entry) => entry.failureReason !== "skipped");
     const bestServerId = input.bestServerId?.trim();
     const bestServer = bestServerId
-      ? enabledServers.find((server) => server.id === bestServerId)
+      ? enabledServers.find((server) => server.id === bestServerId) ?? null
       : null;
-    if (skippedEntries.length > 0 && !bestServer) {
-      throw new Error("Best Server ID is required to retry skipped failure-pool boards.");
-    }
-    if (normalEntries.length > 0 && selectedServers.length === 0) {
-      throw new Error("At least one enabled server is required to retry abnormal failure-pool boards.");
-    }
     const baseServer = selectedServers[0] ?? bestServer;
     if (!baseServer) {
       throw new Error("Failure pool has no retryable boards for this range.");
@@ -952,14 +951,34 @@ export class SolverJobService {
       ...availableServers,
       ...enabledServers
     ]));
+    let coverage: ParallelSolverCoverageSummary | null = null;
+    if (repoExists) {
+      coverage = await this.reconcileFailurePoolCoverage(
+        basePreview.repoId,
+        basePreview.rangePath,
+        basePreview.datasetName,
+        allBoards
+      );
+      entries = this.failurePoolEntries(input);
+    }
+    const skippedEntries = entries.filter((entry) => entry.failureReason === "skipped");
+    const normalEntries = entries.filter((entry) => entry.failureReason !== "skipped");
+    if (skippedEntries.length > 0 && !bestServer) {
+      throw new Error("Best Server ID is required to retry skipped failure-pool boards.");
+    }
+    if (normalEntries.length > 0 && selectedServers.length === 0) {
+      throw new Error("At least one enabled server is required to retry abnormal failure-pool boards.");
+    }
     const allocationServerCount = normalizedParallelChunkCount(input.chunkCount, enabledServers.length);
     const normalIndices = normalizeBoardIndices(normalEntries.map((entry) => entry.boardIndex), allBoards.length);
     const skippedIndices = normalizeBoardIndices(skippedEntries.map((entry) => entry.boardIndex), allBoards.length);
-    const normalAllocations = allocateRoundRobinChunks(normalIndices, selectedServers, allocationServerCount);
-    const skippedAllocations = bestServer && skippedIndices.length > 0
-      ? allocateRoundRobinChunks(skippedIndices, [bestServer], allocationServerCount)
-      : [];
-    const rawAllocations = [...normalAllocations, ...skippedAllocations];
+    const rawAllocations = allocateFailurePoolChunks({
+      normalIndices,
+      skippedIndices,
+      normalServers: selectedServers,
+      bestServer,
+      chunkCount: allocationServerCount
+    });
     const allocations: ParallelSolverServerAllocation[] = rawAllocations.map((allocation) => {
       const settings = { ...basePreview.settings, rangeExpr: allocation.rangeExpr };
       const solverRoot = effectiveSolverRoot(allocation.server);
@@ -1006,7 +1025,7 @@ export class SolverJobService {
       missingIndices: indices,
       missingBoardNames: indices.map((index) => allBoards[index - 1] ?? String(index)),
       allocations,
-      coverage: null,
+      coverage,
       repoExists,
       tokenConfigured: Boolean(this.hfToken),
       requiresConfirmation: !basePreview.learned || !repoExists,
@@ -1197,6 +1216,53 @@ export class SolverJobService {
       entries.filter((entry) => entry.failureReason === "best_server_skipped").map((entry) => entry.boardIndex),
       "failed"
     );
+  }
+
+  private async reconcileFailurePoolCoverage(
+    repoId: string,
+    rangePath: string,
+    datasetName: string,
+    allBoards: string[]
+  ): Promise<ParallelSolverCoverageSummary> {
+    const runs = this.options.db.getParallelSolverRuns();
+    const remoteBoardKeys = await fetchHuggingFaceDatasetBoardKeys(repoId, this.hfToken, this.effectiveHfProxyUrl());
+    const remoteCovered = new Set(collectRemoteCoveredBoardIndices(allBoards, remoteBoardKeys));
+    const historicallyCompleted = new Set(collectHistoricallyCompletedBoardIndices(runs, datasetName, rangePath));
+    const queued = new Set<number>();
+    const running = new Set<number>();
+    for (const run of runs) {
+      if (run.datasetName !== datasetName || run.rangePath !== rangePath) continue;
+      if (run.status !== "queued" && run.status !== "running") continue;
+      for (const slice of run.slices) {
+        if (slice.status !== "queued" && slice.status !== "running") continue;
+        const target = slice.status === "running" ? running : queued;
+        for (const index of slice.assignedIndices) target.add(index);
+      }
+    }
+
+    const poolEntries = this.options.db.getParallelFailurePoolEntries(rangePath, datasetName);
+    const solvedIndices = poolEntries
+      .filter((entry) => remoteCovered.has(entry.boardIndex) || historicallyCompleted.has(entry.boardIndex))
+      .map((entry) => entry.boardIndex);
+    const solved = new Set(solvedIndices);
+    const runningIndices = poolEntries
+      .filter((entry) => !solved.has(entry.boardIndex) && running.has(entry.boardIndex))
+      .map((entry) => entry.boardIndex);
+    const queuedIndices = poolEntries
+      .filter((entry) => !solved.has(entry.boardIndex) && !running.has(entry.boardIndex) && queued.has(entry.boardIndex))
+      .map((entry) => entry.boardIndex);
+    this.options.db.updateParallelFailurePoolEntries(rangePath, datasetName, solvedIndices, "solved");
+    this.options.db.updateParallelFailurePoolEntries(rangePath, datasetName, runningIndices, "running");
+    this.options.db.updateParallelFailurePoolEntries(rangePath, datasetName, queuedIndices, "queued");
+
+    return computeMissingSolveBoardIndices({
+      allBoards,
+      remoteBoardKeys,
+      runs,
+      datasetName,
+      rangePath,
+      failurePoolEntries: this.options.db.getParallelFailurePoolEntries(rangePath, datasetName)
+    }).coverage;
   }
 
   private recordCanceledSliceFailures(run: ParallelSolverRun, slice: ParallelSolverSlice): void {
@@ -3069,6 +3135,61 @@ function allocateRoundRobinChunks(
     ...bucket,
     rangeExpr: compressIndices(bucket.indices)
   }));
+}
+
+function allocateFailurePoolChunks({
+  normalIndices,
+  skippedIndices,
+  normalServers,
+  bestServer,
+  chunkCount
+}: {
+  normalIndices: number[];
+  skippedIndices: number[];
+  normalServers: ServerRow[];
+  bestServer: ServerRow | null;
+  chunkCount: number;
+}): Array<{ server: ServerRow; candidateServerIds: string[]; indices: number[]; rangeExpr: string }> {
+  const totalBoards = normalIndices.length + skippedIndices.length;
+  if (totalBoards === 0) return [];
+  const totalChunkCount = Math.min(totalBoards, Math.max(1, chunkCount));
+
+  if (normalIndices.length > 0 && skippedIndices.length > 0 && totalChunkCount === 1) {
+    if (!bestServer) return [];
+    return allocateRoundRobinChunks([...normalIndices, ...skippedIndices], [bestServer], 1);
+  }
+
+  const [normalChunkCount, skippedChunkCount] = proportionalChunkBudget(
+    [normalIndices.length, skippedIndices.length],
+    totalChunkCount
+  );
+  return [
+    ...allocateRoundRobinChunks(normalIndices, normalServers, normalChunkCount),
+    ...(bestServer ? allocateRoundRobinChunks(skippedIndices, [bestServer], skippedChunkCount) : [])
+  ];
+}
+
+function proportionalChunkBudget(groupSizes: number[], totalChunkCount: number): number[] {
+  const budgets: number[] = groupSizes.map((size) => size > 0 ? 1 : 0);
+  let remaining = Math.max(0, totalChunkCount - budgets.reduce((sum, value) => sum + value, 0));
+  while (remaining > 0) {
+    let selectedGroup = -1;
+    let selectedScore = -1;
+    for (let index = 0; index < groupSizes.length; index += 1) {
+      const size = groupSizes[index] ?? 0;
+      const budget = budgets[index] ?? 0;
+      if (size <= budget) continue;
+      const score = size / (budget + 1);
+      if (score > selectedScore) {
+        selectedGroup = index;
+        selectedScore = score;
+      }
+    }
+    if (selectedGroup < 0) break;
+    budgets[selectedGroup] = (budgets[selectedGroup] ?? 0) + 1;
+    remaining -= 1;
+  }
+  return budgets;
 }
 
 function compressIndices(indices: number[]): string {

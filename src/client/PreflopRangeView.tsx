@@ -956,6 +956,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
       });
       setParallelPreview(preview);
       setJobDatasetName(preview.datasetName);
+      await loadJobContext();
     } catch (caught) {
       setJobError(caught instanceof Error ? caught.message : String(caught));
     } finally {
@@ -2472,7 +2473,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
               </h3>
               {pendingParallelReportsAction.action === "clear" ? (
                 <p>
-                  This will remove <strong>{pendingParallelReportsAction.clearableCount}</strong> completed, failed, or canceled
+                  This will remove <strong>{pendingParallelReportsAction.clearableCount}</strong> completed, completed-with-failures, or canceled
                   parallel report{pendingParallelReportsAction.clearableCount === 1 ? "" : "s"}. Active and queued runs stay in the queue.
                 </p>
               ) : (
@@ -3820,7 +3821,7 @@ function ParallelSolverJobPanel({
             </div>
           ) : null}
           {visibleFailurePool.length === 0 ? (
-            <p className="solver-job-empty">No pending failed boards for this context.</p>
+            <p className="solver-job-empty">No pending unresolved boards for this context.</p>
           ) : (
             <div className="failure-pool-list">
               {visibleFailurePool.slice(0, 24).map((entry) => (
@@ -3888,7 +3889,7 @@ function ParallelSolverJobPanel({
                 <div><span>Assigned</span><strong>{run.report.totalBoards}</strong></div>
                 <div><span>Dispatch</span><strong>{dispatch.metric}</strong></div>
                 <div><span>Done</span><strong>{run.report.completedBoards}</strong></div>
-                <div><span>Failed</span><strong>{run.report.failedBoards}</strong></div>
+                <div><span>Unresolved</span><strong>{run.report.failedBoards}</strong></div>
                 <div><span>Success</span><strong>{formatRatio(run.report.successRate)}</strong></div>
                 <div><span>Duration</span><strong>{formatDuration(run.report.durationSeconds)}</strong></div>
               </div>
@@ -3897,7 +3898,7 @@ function ParallelSolverJobPanel({
                   <div key={slice.id} className={`parallel-slice-row ${slice.status}`}>
                     <span>{formatSliceServerId(slice)}</span>
                     <strong>{slice.assignedIndices.length}</strong>
-                    <em>{slice.status}</em>
+                    <em>{formatParallelSliceStatus(slice.status)}</em>
                     <small>{slice.status === "queued" ? slice.lastError ?? slice.job?.lastError ?? "Pending dispatch" : slice.rangeExpr}</small>
                   </div>
                 ))}
@@ -4138,7 +4139,7 @@ function ParallelHistoryBoard({
                   <p className="parallel-queue-meta">
                     {run.sourceType === "failure_pool" ? "Pool retry" : "Parallel run"}
                     {run.finishedAt ? ` · ${formatShortDateTime(run.finishedAt)}` : ""}
-                    {failureCount > 0 ? ` · ${failureCount} failed board${failureCount === 1 ? "" : "s"}` : ""}
+                    {failureCount > 0 ? ` · ${failureCount} unresolved board${failureCount === 1 ? "" : "s"}` : ""}
                   </p>
                 </div>
               </article>
@@ -4797,7 +4798,20 @@ function formatJobStatus(status: SolverJob["status"]): string {
 }
 
 function formatParallelRunStatus(status: ParallelSolverRun["status"]): string {
-  return status.replace(/_/g, " ");
+  if (status === "completed_with_failures" || status === "failed") return "Completed with Failures";
+  return titleCaseStatus(status);
+}
+
+function formatParallelSliceStatus(status: ParallelSolverRun["slices"][number]["status"]): string {
+  if (status === "failed") return "Completed with Failures";
+  return titleCaseStatus(status);
+}
+
+function titleCaseStatus(status: string): string {
+  return status
+    .split("_")
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(" ");
 }
 
 function formatServerOperationStatus(status: ServerOperation["status"]): string {
@@ -5088,18 +5102,18 @@ function buildParallelReportsMarkdown(
       `- Finished: ${run.finishedAt ?? "-"}`,
       `- Total Boards: ${run.report.totalBoards}`,
       `- Completed Boards: ${run.report.completedBoards}`,
-      `- Failed Boards: ${run.report.failedBoards}`,
+      `- Unresolved Boards: ${run.report.failedBoards}`,
       `- Queued Boards: ${run.report.queuedBoards}`,
       `- Running Boards: ${run.report.runningBoards}`,
       `- Success Rate: ${formatRatio(run.report.successRate)}`,
       `- Duration: ${formatDuration(run.report.durationSeconds)}`,
       "",
-      "| Server | Status | Boards | Completed | Failed | Range Expr |",
+      "| Server | Status | Boards | Completed | Unresolved | Range Expr |",
       "| --- | --- | ---: | ---: | ---: | --- |"
     );
     for (const slice of run.slices) {
       lines.push(
-        `| ${markdownCell(formatSliceServerId(slice))} | ${markdownCell(slice.status)} | ${slice.assignedIndices.length} | ${slice.completedCount} | ${slice.failedCount} | ${markdownCell(slice.rangeExpr || "-")} |`
+        `| ${markdownCell(formatSliceServerId(slice))} | ${markdownCell(formatParallelSliceStatus(slice.status))} | ${slice.assignedIndices.length} | ${slice.completedCount} | ${slice.failedCount} | ${markdownCell(slice.rangeExpr || "-")} |`
       );
     }
     if (run.lastError) {
