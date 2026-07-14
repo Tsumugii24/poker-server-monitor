@@ -44,6 +44,9 @@ function getSql(): Promise<SqlJsStatic> {
 type SqlValue = string | number | null;
 
 export class MonitorDatabase {
+  private persistenceBatchDepth = 0;
+  private persistencePending = false;
+
   private constructor(
     private readonly database: Database,
     private readonly filename: string | null
@@ -65,6 +68,19 @@ export class MonitorDatabase {
   close(): void {
     this.persist();
     this.database.close();
+  }
+
+  runInPersistenceBatch<T>(action: () => T): T {
+    this.persistenceBatchDepth += 1;
+    try {
+      return action();
+    } finally {
+      this.persistenceBatchDepth -= 1;
+      if (this.persistenceBatchDepth === 0 && this.persistencePending) {
+        this.persistencePending = false;
+        this.persist();
+      }
+    }
   }
 
   syncServers(servers: ServerConfig[]): void {
@@ -613,6 +629,22 @@ export class MonitorDatabase {
       [],
       (row) => mapParallelSolverRun(row, this.getParallelSolverSlices(String(row.id)))
     );
+  }
+
+  getParallelSolverRunRecordCounts(): { total: number; visible: number; cleared: number } {
+    return this.query(
+      `SELECT
+         COUNT(*) AS total,
+         SUM(CASE WHEN report_cleared = 0 THEN 1 ELSE 0 END) AS visible,
+         SUM(CASE WHEN report_cleared != 0 THEN 1 ELSE 0 END) AS cleared
+       FROM parallel_solver_runs`,
+      [],
+      (row) => ({
+        total: Number(row.total ?? 0),
+        visible: Number(row.visible ?? 0),
+        cleared: Number(row.cleared ?? 0)
+      })
+    )[0] ?? { total: 0, visible: 0, cleared: 0 };
   }
 
   getParallelSolverRun(id: string): ParallelSolverRun | null {
@@ -1463,8 +1495,18 @@ export class MonitorDatabase {
 
   private persist(): void {
     if (!this.filename) return;
+    if (this.persistenceBatchDepth > 0) {
+      this.persistencePending = true;
+      return;
+    }
     fs.mkdirSync(path.dirname(this.filename), { recursive: true });
-    fs.writeFileSync(this.filename, Buffer.from(this.database.export()));
+    const temporaryFilename = `${this.filename}.tmp-${process.pid}`;
+    try {
+      fs.writeFileSync(temporaryFilename, Buffer.from(this.database.export()));
+      fs.renameSync(temporaryFilename, this.filename);
+    } finally {
+      if (fs.existsSync(temporaryFilename)) fs.rmSync(temporaryFilename, { force: true });
+    }
   }
 }
 

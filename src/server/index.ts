@@ -15,6 +15,11 @@ async function main(): Promise<void> {
   const config = loadRuntimeConfig();
   const servers = loadServerInventory(config.inventoryPath);
   const db = await MonitorDatabase.open(config.databasePath);
+  const parallelRecords = db.getParallelSolverRunRecordCounts();
+  console.log(
+    `Monitor database loaded: ${path.resolve(config.databasePath)} ` +
+    `(parallel runs: ${parallelRecords.total} total, ${parallelRecords.visible} visible, ${parallelRecords.cleared} cleared)`
+  );
   db.syncServers(servers);
   const legacyNotifier = new WeChatNotifier();
   const weChatAccounts = new WeChatAccountManager({

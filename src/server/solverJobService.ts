@@ -157,6 +157,10 @@ export class SolverJobService {
   listParallelJobs() {
     this.reconcileCompletedJobs();
     this.reconcileParallelRuns();
+    return this.readParallelJobs();
+  }
+
+  readParallelJobs() {
     return {
       runs: this.options.db.getParallelSolverRuns().filter((run) => !run.reportCleared),
       failurePool: this.options.db.getParallelFailurePoolEntries(),
@@ -165,12 +169,10 @@ export class SolverJobService {
   }
 
   refreshParallelJobs() {
-    this.reconcileCompletedJobs();
-    this.reconcileParallelRuns();
     void this.reconcileAndStartQueuedJobs().catch((error: unknown) => {
       console.error("Solver job queue reconciliation failed", error);
     });
-    return this.listParallelJobs();
+    return this.readParallelJobs();
   }
 
   getParallelRun(id: string): ParallelSolverRun {
@@ -886,7 +888,11 @@ export class SolverJobService {
     if (this.queueReconciliationTask) {
       return this.queueReconciliationTask;
     }
-    const task = this.runQueueReconciliation();
+    const task = new Promise<void>((resolve, reject) => {
+      setImmediate(() => {
+        void this.runQueueReconciliation().then(resolve, reject);
+      });
+    });
     this.queueReconciliationTask = task;
     try {
       await task;
@@ -1259,6 +1265,10 @@ export class SolverJobService {
   }
 
   private reconcileParallelRuns(): void {
+    this.options.db.runInPersistenceBatch(() => this.reconcileParallelRunsWithinBatch());
+  }
+
+  private reconcileParallelRunsWithinBatch(): void {
     const runs = this.options.db.getParallelSolverRuns();
     for (const run of runs) {
       for (const slice of run.slices) {
@@ -1442,21 +1452,23 @@ export class SolverJobService {
   }
 
   private reconcileCompletedJobs(): void {
-    this.reconcileStartedJobsFromPipelines();
-    for (const job of this.options.db.getSolverJobs()) {
-      if (!ACTIVE_JOB_STATUSES.has(job.status)) continue;
-      if (!job.pipeline || !pipelineIsNewEnoughForJob(job.pipeline, job)) continue;
-      if (isPipelineActive(job.pipeline) && pipelineBelongsToJob(job.pipeline, job)) continue;
-      if (!pipelineCanSettleActiveJob(job.pipeline, job)) continue;
-      const nextStatus = completedStatusFromPipeline(job.pipeline);
-      const lastError = nextStatus === "failed" ? pipelineReconciliationError(job.pipeline, job) : null;
-      this.options.db.updateSolverJob(job.id, {
-        status: nextStatus,
-        finishedAt: job.pipeline?.finishedAt ?? new Date().toISOString(),
-        lastError
-      });
-      this.recordEvent(job.id, nextStatus, `Server task reconciled job as ${nextStatus}.`, null);
-    }
+    this.options.db.runInPersistenceBatch(() => {
+      this.reconcileStartedJobsFromPipelines();
+      for (const job of this.options.db.getSolverJobs()) {
+        if (!ACTIVE_JOB_STATUSES.has(job.status)) continue;
+        if (!job.pipeline || !pipelineIsNewEnoughForJob(job.pipeline, job)) continue;
+        if (isPipelineActive(job.pipeline) && pipelineBelongsToJob(job.pipeline, job)) continue;
+        if (!pipelineCanSettleActiveJob(job.pipeline, job)) continue;
+        const nextStatus = completedStatusFromPipeline(job.pipeline);
+        const lastError = nextStatus === "failed" ? pipelineReconciliationError(job.pipeline, job) : null;
+        this.options.db.updateSolverJob(job.id, {
+          status: nextStatus,
+          finishedAt: job.pipeline?.finishedAt ?? new Date().toISOString(),
+          lastError
+        });
+        this.recordEvent(job.id, nextStatus, `Server task reconciled job as ${nextStatus}.`, null);
+      }
+    });
   }
 
   private reconcileStartedJobsFromPipelines(): void {

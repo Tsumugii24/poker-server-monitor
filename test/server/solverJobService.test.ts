@@ -1163,6 +1163,11 @@ describe("solver job API", () => {
       lastError: "solver failed"
     });
 
+    const persistedBeforeReconciliation = await request(app).get("/api/parallel-jobs");
+    expect(persistedBeforeReconciliation.status).toBe(200);
+    expect(persistedBeforeReconciliation.body.failurePool).toEqual([]);
+
+    solverJobService.listParallelJobs();
     const list = await request(app).get("/api/parallel-jobs");
     expect(list.status).toBe(200);
     expect(list.body.runs[0].status).toBe("running");
@@ -1318,6 +1323,7 @@ describe("solver job API", () => {
       remoteCoveredCount: 7,
       failurePoolPendingCount: 3
     });
+    await solverJobService.reconcileAndStartQueuedJobs();
     const listed = await request(app).get("/api/parallel-jobs");
     expect(listed.body.failurePool.filter((entry: { status: string }) => entry.status === "solved")).toHaveLength(7);
     expect(listed.body.failurePool.filter((entry: { status: string }) => entry.status === "pending")).toHaveLength(3);
@@ -1824,6 +1830,7 @@ describe("solver job API", () => {
       lastError: "board skipped"
     });
 
+    solverJobService.listParallelJobs();
     const listed = await request(app).get("/api/parallel-jobs");
     expect(listed.body.failurePool.find((entry: { boardIndex: number }) => entry.boardIndex === skippedIndex)).toMatchObject({
       failureReason: "skipped",
@@ -2009,7 +2016,11 @@ describe("solver job API", () => {
     }));
 
     preflightReady = true;
-    const reconciled = await request(app).get("/api/parallel-jobs?reconcile=1");
+    const refreshRequested = await request(app).get("/api/parallel-jobs?reconcile=1");
+    expect(refreshRequested.status).toBe(200);
+    expect(refreshRequested.body.reconciling).toBe(true);
+    await solverJobService.reconcileAndStartQueuedJobs();
+    const reconciled = await request(app).get("/api/parallel-jobs");
     expect(reconciled.status).toBe(200);
     const run = reconciled.body.runs.find((candidate: { id: string }) => candidate.id === created.body.run.id);
     expect(run.slices[0]).toMatchObject({
@@ -2380,6 +2391,7 @@ describe("solver job API", () => {
       });
     }
 
+    solverJobService.listParallelJobs();
     const beforeClear = await request(app).get("/api/parallel-jobs");
     expect(beforeClear.body.runs.some((run: { id: string; status: string }) =>
       run.id === completed.body.run.id && run.status === "completed"
