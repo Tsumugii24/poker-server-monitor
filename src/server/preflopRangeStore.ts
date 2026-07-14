@@ -18,13 +18,12 @@ import {
   type PreflopRangeTreeResponse
 } from "../shared/preflopRange";
 import { datasetNameFromRangePath, scenarioFromRangePath } from "../shared/preflopDataset";
-import type { SolverJob, SolverJobStatus } from "../shared/solverJobs";
+import { SOLVER_TOTAL_BOARD_COUNT, type SolverJob, type SolverJobStatus } from "../shared/solverJobs";
 import { huggingFaceFetch } from "./huggingFaceHttp";
 
 const ORDER_FILE = ".range_order.json";
 const STATUS_FILE = ".range_status.json";
 const PROGRESS_FILE = ".range_progress.json";
-const SOLVER_TOTAL_ROWS = 1755;
 const RUNNING_JOB_STATUSES = new Set<SolverJobStatus>(["deploying", "running", "stopping"]);
 
 type RangeStatusEntry = {
@@ -530,7 +529,7 @@ function runtimeProgress(
       error: entry.error
     };
   }
-  return progressEntry(datasetName, 0, SOLVER_TOTAL_ROWS, entry?.checkedAt);
+  return progressEntry(datasetName, 0, SOLVER_TOTAL_BOARD_COUNT, entry?.checkedAt);
 }
 
 function canonicalDatasetName(rangePath: string): string {
@@ -984,7 +983,7 @@ function normalizedRows(value: unknown): number {
 
 function positiveTotalRows(value: unknown): number {
   const parsed = Number(value);
-  if (!Number.isFinite(parsed) || parsed <= 0) return SOLVER_TOTAL_ROWS;
+  if (!Number.isFinite(parsed) || parsed <= 0) return SOLVER_TOTAL_BOARD_COUNT;
   return Math.floor(parsed);
 }
 

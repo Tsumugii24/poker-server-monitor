@@ -493,9 +493,9 @@ export class MonitorDatabase {
     this.database.run(
       `INSERT INTO parallel_solver_runs (
         id, source_type, range_path, range_name, dataset_name, scenario, repo_id,
-        settings_json, solver_range_text, status, server_ids_json, total_indices_json,
+        settings_json, solver_range_text, status, report_cleared, server_ids_json, total_indices_json,
         missing_indices_json, queue_order, created_at, updated_at, started_at, finished_at, last_error
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         run.id,
         run.sourceType,
@@ -507,6 +507,7 @@ export class MonitorDatabase {
         JSON.stringify(run.settings),
         run.solverRangeText,
         run.status,
+        run.reportCleared ? 1 : 0,
         JSON.stringify(run.serverIds),
         JSON.stringify(run.totalIndices),
         JSON.stringify(run.missingIndices),
@@ -644,6 +645,19 @@ export class MonitorDatabase {
     this.database.run(
       `DELETE FROM parallel_solver_runs WHERE id IN (${placeholders})`,
       uniqueIds
+    );
+    this.persist();
+  }
+
+  clearParallelSolverRunReports(ids: string[]): void {
+    const uniqueIds = [...new Set(ids.map((id) => id.trim()).filter(Boolean))];
+    if (uniqueIds.length === 0) return;
+    const placeholders = uniqueIds.map(() => "?").join(", ");
+    this.database.run(
+      `UPDATE parallel_solver_runs
+       SET report_cleared = 1, updated_at = ?
+       WHERE id IN (${placeholders})`,
+      [new Date().toISOString(), ...uniqueIds]
     );
     this.persist();
   }
@@ -1134,6 +1148,7 @@ export class MonitorDatabase {
         settings_json TEXT NOT NULL,
         solver_range_text TEXT NOT NULL,
         status TEXT NOT NULL,
+        report_cleared INTEGER NOT NULL DEFAULT 0,
         server_ids_json TEXT NOT NULL,
         total_indices_json TEXT NOT NULL,
         missing_indices_json TEXT NOT NULL,
@@ -1196,6 +1211,7 @@ export class MonitorDatabase {
     this.ensurePipelineDetailColumns();
     this.ensureSolverJobParallelColumns();
     this.ensureParallelSolverRunQueueOrderColumn();
+    this.ensureParallelSolverRunReportClearedColumn();
     this.ensureParallelSolverSliceCandidateServerColumn();
     this.ensureParallelFailurePoolReasonColumn();
     this.ensureSolverJobResultPathColumn();
@@ -1300,6 +1316,17 @@ export class MonitorDatabase {
     if (!columns.some((column) => column.name === "queue_order")) {
       this.database.run("ALTER TABLE parallel_solver_runs ADD COLUMN queue_order INTEGER NOT NULL DEFAULT 0");
       this.database.run("UPDATE parallel_solver_runs SET queue_order = CAST(strftime('%s', created_at) AS INTEGER) WHERE queue_order = 0");
+    }
+  }
+
+  private ensureParallelSolverRunReportClearedColumn(): void {
+    const columns = this.query<{ name: string }>(
+      "PRAGMA table_info(parallel_solver_runs)",
+      [],
+      (row) => ({ name: String(row.name) })
+    );
+    if (!columns.some((column) => column.name === "report_cleared")) {
+      this.database.run("ALTER TABLE parallel_solver_runs ADD COLUMN report_cleared INTEGER NOT NULL DEFAULT 0");
     }
   }
 
@@ -1458,6 +1485,7 @@ function mapParallelSolverRun(row: Record<string, SqlValue>, slices: ParallelSol
     settings: parseSolverJobSettings(row.settings_json),
     solverRangeText: String(row.solver_range_text),
     status: String(row.status) as ParallelSolverRunStatus,
+    reportCleared: Number(row.report_cleared ?? 0) === 1,
     queueOrder: Number(row.queue_order ?? 0),
     serverIds: parseStringArray(row.server_ids_json),
     totalIndices: parseNumberArray(row.total_indices_json),

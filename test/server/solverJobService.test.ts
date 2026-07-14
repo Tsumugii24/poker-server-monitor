@@ -869,6 +869,8 @@ describe("solver job API", () => {
       .send({ rangePath, serverIds: ["solver-01", "solver-02"], settings: { uploadEnabled: false } });
 
     expect(preview.status).toBe(200);
+    expect(preview.body.sourceType).toBe("parallel");
+    expect(preview.body.totalBoards).toBe(1755);
     expect(preview.body.missingIndices).toHaveLength(1755);
     expect(preview.body.allocations).toHaveLength(2);
     expect(preview.body.allocations[0].indices).toHaveLength(878);
@@ -1008,6 +1010,210 @@ describe("solver job API", () => {
     ]);
   });
 
+  it("rejects a parallel preview when online servers have inconsistent solver cards", async () => {
+    db.syncServers([
+      ...servers,
+      {
+        id: "solver-02",
+        name: "Solver 02",
+        host: "10.0.0.2",
+        port: 22,
+        enabled: true,
+        note: "TBD",
+        solverRoot: "/srv/solver",
+        tmuxSession: "solver",
+        pipelineStatusFilePath: "~/run/status.json"
+      }
+    ]);
+    db.insertSnapshot(metricSnapshot("solver-02", "online"));
+    const executor: SshExecutor = {
+      run: vi.fn(async (server, _credentials, command) => {
+        if (command.includes("cards/cards.txt")) {
+          return solverCardsText(server.id === "solver-02" ? 756 : 1755);
+        }
+        return "ok";
+      })
+    };
+    const solverJobService = new SolverJobService({
+      db,
+      preflopRangesPath,
+      credentials: { username: "root", password: "secret" },
+      executor,
+      defaultPipelineStatusFilePath: "~/run/solver_running_status.json",
+      repoNamespace: "Tsumugii",
+      hfToken: "hf_test_token"
+    });
+    const app = createApp({ db, refreshService, preflopRangesPath, solverJobService });
+    const rangePath = "3OD-EP/3OD-4.3 vs 3IA-4.2.json";
+    await approveRange(app, rangePath);
+
+    const preview = await request(app)
+      .post("/api/parallel-jobs/preview")
+      .send({ rangePath, serverIds: ["solver-01", "solver-02"], settings: { uploadEnabled: false } });
+
+    expect(preview.status).toBe(500);
+    expect(preview.body.message).toContain("Remote solver cards.txt is inconsistent");
+    expect(preview.body.message).toContain("solver-01=1755 boards");
+    expect(preview.body.message).toContain("solver-02=756 boards");
+  });
+
+  it("rejects a parallel preview when every reachable cards file has the wrong board count", async () => {
+    const executor: SshExecutor = {
+      run: vi.fn(async (_server, _credentials, command) =>
+        command.includes("cards/cards.txt") ? solverCardsText(756) : "ok"
+      )
+    };
+    const solverJobService = new SolverJobService({
+      db,
+      preflopRangesPath,
+      credentials: { username: "root", password: "secret" },
+      executor,
+      defaultPipelineStatusFilePath: "~/run/solver_running_status.json",
+      repoNamespace: "Tsumugii",
+      hfToken: "hf_test_token"
+    });
+    const app = createApp({ db, refreshService, preflopRangesPath, solverJobService });
+    const rangePath = "3OD-EP/3OD-4.3 vs 3IA-4.2.json";
+    await approveRange(app, rangePath);
+
+    const preview = await request(app)
+      .post("/api/parallel-jobs/preview")
+      .send({ rangePath, serverIds: ["solver-01"], settings: { uploadEnabled: false } });
+
+    expect(preview.status).toBe(500);
+    expect(preview.body.message).toContain("must contain 1755 boards");
+    expect(preview.body.message).toContain("contains 756");
+  });
+
+  it("keeps a queued slice pending when a server cards file changes before dispatch", async () => {
+    let staleCards = false;
+    const executor: SshExecutor = {
+      run: vi.fn(async (_server, _credentials, command) => {
+        if (command.includes("cards/cards.txt")) return solverCardsText(staleCards ? 756 : 1755);
+        if (command.includes("DISPATCH_READY")) return "DISPATCH_READY=1\n";
+        if (isCodeReadyCommand(command)) return codeReadyOutput();
+        commands.push(command);
+        return "ok";
+      })
+    };
+    const solverJobService = new SolverJobService({
+      db,
+      preflopRangesPath,
+      credentials: { username: "root", password: "secret" },
+      executor,
+      defaultPipelineStatusFilePath: "~/run/solver_running_status.json",
+      repoNamespace: "Tsumugii",
+      hfToken: "hf_test_token"
+    });
+    const app = createApp({ db, refreshService, preflopRangesPath, solverJobService });
+    const rangePath = "3OD-EP/3OD-4.3 vs 3IA-4.2.json";
+    await approveRange(app, rangePath);
+    const created = await request(app)
+      .post("/api/parallel-jobs")
+      .send({
+        rangePath,
+        serverIds: ["solver-01"],
+        settings: { uploadEnabled: false },
+        confirmDatasetName: true,
+        queueMode: "queue_next"
+      });
+    expect(created.status).toBe(201);
+
+    staleCards = true;
+    const refreshed = await request(app).get("/api/parallel-jobs?reconcile=1");
+
+    expect(refreshed.status).toBe(200);
+    expect(refreshed.body.runs[0].status).toBe("queued");
+    expect(refreshed.body.runs[0].slices[0].status).toBe("queued");
+    expect(refreshed.body.runs[0].slices[0].lastError).toContain("must contain 1755 boards");
+    expect(commands.some((command) => command.includes("run_pipeline.py"))).toBe(false);
+  });
+
+  it("returns unresolved boards to the failure pool when a queued parallel run is canceled", async () => {
+    const executor: SshExecutor = {
+      run: vi.fn(async (_server, _credentials, command) => {
+        if (command.includes("cards/cards.txt")) return solverCardsText();
+        return "ok";
+      })
+    };
+    const solverJobService = new SolverJobService({
+      db,
+      preflopRangesPath,
+      credentials: { username: "root", password: "secret" },
+      executor,
+      defaultPipelineStatusFilePath: "~/run/solver_running_status.json",
+      repoNamespace: "Tsumugii",
+      hfToken: "hf_test_token"
+    });
+    const app = createApp({ db, refreshService, preflopRangesPath, solverJobService });
+    const rangePath = "3OD-EP/3OD-4.3 vs 3IA-4.2.json";
+    await approveRange(app, rangePath);
+
+    const created = await request(app)
+      .post("/api/parallel-jobs")
+      .send({
+        rangePath,
+        serverIds: ["solver-01"],
+        settings: { uploadEnabled: false },
+        confirmDatasetName: true,
+        queueMode: "queue_next"
+      });
+    expect(created.status).toBe(201);
+
+    const canceled = await request(app).post(`/api/parallel-jobs/${created.body.run.id}/cancel`);
+
+    expect(canceled.status).toBe(200);
+    expect(canceled.body.run.status).toBe("canceled");
+    expect(canceled.body.failurePool).toHaveLength(1755);
+    expect(canceled.body.failurePool[0]).toMatchObject({
+      status: "pending",
+      failureReason: "abnormal_end",
+      lastRunId: created.body.run.id
+    });
+  });
+
+  it("keeps a parallel slice locked while remote cancellation is still pending", async () => {
+    const executor: SshExecutor = {
+      run: vi.fn(async (_server, _credentials, command) => {
+        if (command.includes("cards/cards.txt")) return solverCardsText();
+        if (command.includes("DISPATCH_READY")) return "DISPATCH_READY=1\n";
+        if (isCodeReadyCommand(command)) return codeReadyOutput();
+        if (command.includes("PIPELINE_ALIVE=")) return "PIPELINE_ALIVE=1\n";
+        return "ok";
+      })
+    };
+    const solverJobService = new SolverJobService({
+      db,
+      preflopRangesPath,
+      credentials: { username: "root", password: "secret" },
+      executor,
+      defaultPipelineStatusFilePath: "~/run/solver_running_status.json",
+      repoNamespace: "Tsumugii",
+      hfToken: "hf_test_token"
+    });
+    const app = createApp({ db, refreshService, preflopRangesPath, solverJobService });
+    const rangePath = "3OD-EP/3OD-4.3 vs 3IA-4.2.json";
+    await approveRange(app, rangePath);
+
+    const created = await request(app)
+      .post("/api/parallel-jobs")
+      .send({
+        rangePath,
+        serverIds: ["solver-01"],
+        settings: { uploadEnabled: false },
+        confirmDatasetName: true
+      });
+    expect(created.status).toBe(201);
+
+    const cancelPending = await request(app).post(`/api/parallel-jobs/${created.body.run.id}/cancel`);
+
+    expect(cancelPending.status).toBe(200);
+    expect(cancelPending.body.run.status).toBe("running");
+    expect(cancelPending.body.run.slices[0].status).toBe("running");
+    expect(cancelPending.body.run.slices[0].job.status).toBe("stopping");
+    expect(cancelPending.body.failurePool).toEqual([]);
+  });
+
   it("previews parallel allocation when enabled servers are busy but not available", async () => {
     db.insertPipelineSnapshot({
       ...idlePipelineSnapshot("solver-01", new Date().toISOString()),
@@ -1135,26 +1341,54 @@ describe("solver job API", () => {
       status: "pending"
     });
 
-    const retry = await request(app)
-      .post("/api/parallel-jobs/failure-pool/submit")
+    const poolPreview = await request(app)
+      .post("/api/parallel-jobs/failure-pool/preview")
       .send({
         rangePath,
         indices: [skippedIndex],
         serverIds: ["solver-01"],
         bestServerId: "solver-03",
-        settings: { uploadEnabled: false },
-        confirmDatasetName: true,
-        queueMode: "queue_next"
+        settings: { uploadEnabled: false }
       });
 
-    expect(retry.status).toBe(201);
-    expect(retry.body.run.sourceType).toBe("failure_pool");
-    expect(retry.body.run.slices).toHaveLength(1);
-    expect(retry.body.run.slices[0]).toMatchObject({
+    expect(poolPreview.status).toBe(200);
+    expect(poolPreview.body).toMatchObject({
+      sourceType: "failure_pool",
+      totalBoards: 1755,
+      missingIndices: [skippedIndex]
+    });
+
+    const retryRequest = {
+      rangePath,
+      indices: [skippedIndex],
+      serverIds: ["solver-01"],
+      bestServerId: "solver-03",
+      settings: { uploadEnabled: false },
+      confirmDatasetName: true,
+      queueMode: "queue_next"
+    };
+    const firstRetry = await request(app)
+      .post("/api/parallel-jobs/failure-pool/submit")
+      .send(retryRequest);
+
+    expect(firstRetry.status).toBe(201);
+    expect(firstRetry.body.run.sourceType).toBe("failure_pool");
+    expect(firstRetry.body.run.slices).toHaveLength(1);
+    expect(firstRetry.body.run.slices[0]).toMatchObject({
       serverId: "",
       candidateServerIds: ["solver-03"],
       rangeExpr: String(skippedIndex)
     });
+    expect(firstRetry.body.failurePool.find((entry: { boardIndex: number }) => entry.boardIndex === skippedIndex).status).toBe("queued");
+
+    const deletedRetry = await request(app).delete(`/api/parallel-jobs/${firstRetry.body.run.id}`);
+    expect(deletedRetry.status).toBe(200);
+    expect(deletedRetry.body.failurePool.find((entry: { boardIndex: number }) => entry.boardIndex === skippedIndex).status).toBe("pending");
+
+    const retry = await request(app)
+      .post("/api/parallel-jobs/failure-pool/submit")
+      .send(retryRequest);
+    expect(retry.status).toBe(201);
 
     await solverJobService.reconcileAndStartQueuedJobs();
     const afterDispatch = await request(app).get("/api/parallel-jobs");
@@ -1662,7 +1896,20 @@ describe("solver job API", () => {
     expect(cleared.body.deletedCount).toBe(1);
     expect(cleared.body.runs.map((run: { id: string }) => run.id)).toEqual([queued.body.run.id]);
     expect(cleared.body.runs[0].status).toBe("queued");
-    expect(db.getSolverJobs().some((job) => job.parallelRunId === completed.body.run.id)).toBe(false);
+    expect(db.getSolverJobs().some((job) => job.parallelRunId === completed.body.run.id)).toBe(true);
+    expect(db.getParallelSolverRun(completed.body.run.id)?.reportCleared).toBe(true);
+
+    const previewAfterClear = await request(app)
+      .post("/api/parallel-jobs/preview")
+      .send({
+        rangePath,
+        datasetName: "parallel-completed",
+        serverIds: ["solver-01", "solver-02"],
+        settings: { uploadEnabled: false }
+      });
+    expect(previewAfterClear.status).toBe(200);
+    expect(previewAfterClear.body.missingIndices).toEqual([]);
+    expect(previewAfterClear.body.coverage.historicallyCompletedCount).toBe(1755);
   });
 
   it("rejects job operations while the server is offline", async () => {

@@ -1,5 +1,7 @@
 import type { PipelineStatusSnapshot, ServerRow } from "./types";
 
+export const SOLVER_TOTAL_BOARD_COUNT = 1755;
+
 export const SOLVER_JOB_STATUSES = [
   "draft",
   "queued",
@@ -296,6 +298,7 @@ export type ParallelSolverCoverageSummary = {
 };
 
 export type ParallelSolverJobPreview = {
+  sourceType: "parallel" | "failure_pool";
   rangePath: string;
   rangeName: string;
   learned: boolean;
@@ -306,6 +309,7 @@ export type ParallelSolverJobPreview = {
   settings: SolverJobSettings;
   selectedServerIds: string[];
   availableServers: ServerRow[];
+  totalBoards: number;
   missingIndices: number[];
   missingBoardNames: string[];
   allocations: ParallelSolverServerAllocation[];
@@ -347,6 +351,7 @@ export type ParallelSolverRun = {
   settings: SolverJobSettings;
   solverRangeText: string;
   status: ParallelSolverRunStatus;
+  reportCleared: boolean;
   queueOrder: number;
   serverIds: string[];
   totalIndices: number[];

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import {
   DEFAULT_SOLVER_JOB_SETTINGS,
+  SOLVER_TOTAL_BOARD_COUNT,
   SOLVER_EXPORT_FORMATS,
   DEFAULT_SOLVER_SCENARIO_LIBRARY,
   SOLVER_UPLOAD_FORMATS,
@@ -144,7 +145,7 @@ export class SolverJobService {
     this.reconcileCompletedJobs();
     this.reconcileParallelRuns();
     return {
-      runs: this.options.db.getParallelSolverRuns(),
+      runs: this.options.db.getParallelSolverRuns().filter((run) => !run.reportCleared),
       failurePool: this.options.db.getParallelFailurePoolEntries()
     };
   }
@@ -215,9 +216,9 @@ export class SolverJobService {
     this.reconcileCompletedJobs();
     this.reconcileParallelRuns();
     const deletedRunIds = this.options.db.getParallelSolverRuns()
-      .filter((run) => TERMINAL_PARALLEL_RUN_STATUSES.has(run.status) && !parallelRunLocked(run))
+      .filter((run) => !run.reportCleared && TERMINAL_PARALLEL_RUN_STATUSES.has(run.status) && !parallelRunLocked(run))
       .map((run) => run.id);
-    this.options.db.deleteParallelSolverRuns(deletedRunIds);
+    this.options.db.clearParallelSolverRunReports(deletedRunIds);
     return {
       deletedCount: deletedRunIds.length,
       deletedRunIds
@@ -235,6 +236,12 @@ export class SolverJobService {
   async cancelParallelRun(id: string): Promise<ParallelSolverRun> {
     const run = this.getParallelRun(id);
     for (const slice of run.slices) {
+      if (!slice.job || !ACTIVE_JOB_STATUSES.has(slice.job.status)) continue;
+      this.ensureServerOnline(this.requireServer(slice.job.serverId));
+    }
+    let cancellationPending = false;
+    for (const slice of run.slices) {
+      if (slice.status === "completed" || slice.status === "failed" || slice.status === "canceled") continue;
       if (slice.job) {
         if (slice.job.status === "queued") {
           this.options.db.updateSolverJob(slice.job.id, {
@@ -243,7 +250,11 @@ export class SolverJobService {
           });
           this.recordEvent(slice.job.id, "canceled", "Parallel run canceled.", null);
         } else if (ACTIVE_JOB_STATUSES.has(slice.job.status)) {
-          await this.stop(slice.job.id);
+          const stopped = await this.stop(slice.job.id);
+          if (ACTIVE_JOB_STATUSES.has(stopped.status)) {
+            cancellationPending = true;
+            continue;
+          }
         }
       }
       this.options.db.updateParallelSolverSlice(slice.id, {
@@ -251,6 +262,16 @@ export class SolverJobService {
         finishedAt: new Date().toISOString(),
         lastError: "Parallel run canceled."
       });
+      if (run.sourceType === "failure_pool") {
+        this.restoreFailurePoolEntries(run.rangePath, run.datasetName, slice.assignedIndices);
+      } else {
+        this.recordCanceledSliceFailures(run, slice);
+      }
+    }
+    if (cancellationPending) {
+      this.reconcileCompletedJobs();
+      this.reconcileParallelRuns();
+      return this.getParallelRun(id);
     }
     this.options.db.updateParallelSolverRun(id, {
       status: "canceled",
@@ -266,6 +287,9 @@ export class SolverJobService {
     const run = this.getParallelRun(id);
     if (parallelRunLocked(run) || run.status !== "queued") {
       throw new Error("Only queued parallel runs with no active solver task can be deleted.");
+    }
+    if (run.sourceType === "failure_pool") {
+      this.restoreFailurePoolEntries(run.rangePath, run.datasetName, run.totalIndices);
     }
     this.options.db.deleteParallelSolverRuns([id]);
     return { deletedRunId: id };
@@ -286,9 +310,11 @@ export class SolverJobService {
     if (!preview.repoExists) {
       throw new Error("Dataset repo is missing. Confirm the dataset name and create the repo before submitting this failure pool.");
     }
-    const run = await this.createParallelRunFromPreview(preview, "failure_pool", input.queueMode !== "queue_next");
+    const autoStart = input.queueMode !== "queue_next";
+    const run = await this.createParallelRunFromPreview(preview, "failure_pool", false);
     this.options.db.updateParallelFailurePoolEntries(preview.rangePath, preview.datasetName, preview.missingIndices, "queued");
-    return run;
+    if (autoStart) await this.reconcileAndStartQueuedJobs();
+    return this.getParallelRun(run.id);
   }
 
   preview(input: SolverJobPreviewRequest): SolverJobPreview {
@@ -819,6 +845,7 @@ export class SolverJobService {
     });
 
     return {
+      sourceType: "parallel",
       rangePath: basePreview.rangePath,
       rangeName: basePreview.rangeName,
       learned: basePreview.learned,
@@ -829,6 +856,7 @@ export class SolverJobService {
       settings: basePreview.settings,
       selectedServerIds,
       availableServers,
+      totalBoards: allBoards.length,
       missingIndices: indices,
       missingBoardNames: indices.map((index) => allBoards[index - 1] ?? String(index)),
       allocations,
@@ -961,6 +989,7 @@ export class SolverJobService {
     ]);
 
     return {
+      sourceType: "failure_pool",
       rangePath: basePreview.rangePath,
       rangeName: basePreview.rangeName,
       learned: basePreview.learned,
@@ -971,6 +1000,7 @@ export class SolverJobService {
       settings: basePreview.settings,
       selectedServerIds: selectedIds,
       availableServers,
+      totalBoards: allBoards.length,
       missingIndices: indices,
       missingBoardNames: indices.map((index) => allBoards[index - 1] ?? String(index)),
       allocations,
@@ -1004,6 +1034,7 @@ export class SolverJobService {
       settings: preview.settings,
       solverRangeText: preview.solverRangeText,
       status: preview.missingIndices.length === 0 ? "completed" : "queued",
+      reportCleared: false,
       queueOrder: this.options.db.getNextParallelSolverQueueOrder(),
       serverIds: preview.selectedServerIds,
       totalIndices: preview.missingIndices,
@@ -1146,6 +1177,54 @@ export class SolverJobService {
       : null;
     return entries
       .filter((entry) => selected == null || selected.has(entry.boardIndex));
+  }
+
+  private restoreFailurePoolEntries(rangePath: string, datasetName: string, indices: number[]): void {
+    const selected = new Set(indices);
+    const entries = this.options.db.getParallelFailurePoolEntries(rangePath, datasetName)
+      .filter((entry) => selected.has(entry.boardIndex));
+    this.options.db.updateParallelFailurePoolEntries(
+      rangePath,
+      datasetName,
+      entries.filter((entry) => entry.failureReason !== "best_server_skipped").map((entry) => entry.boardIndex),
+      "pending"
+    );
+    this.options.db.updateParallelFailurePoolEntries(
+      rangePath,
+      datasetName,
+      entries.filter((entry) => entry.failureReason === "best_server_skipped").map((entry) => entry.boardIndex),
+      "failed"
+    );
+  }
+
+  private recordCanceledSliceFailures(run: ParallelSolverRun, slice: ParallelSolverSlice): void {
+    const completed = new Set(
+      (slice.job?.pipeline?.completedIndices ?? []).filter((index) => slice.assignedIndices.includes(index))
+    );
+    const now = new Date().toISOString();
+    slice.assignedIndices.forEach((index, position) => {
+      if (completed.has(index)) return;
+      const boardName = slice.assignedBoardNames[position] ?? String(index);
+      this.options.db.upsertParallelFailurePoolEntry({
+        id: randomUUID(),
+        rangePath: run.rangePath,
+        datasetName: run.datasetName,
+        repoId: run.repoId,
+        scenario: run.scenario,
+        boardIndex: index,
+        boardName,
+        boardKey: boardKeyFromName(boardName),
+        status: "pending",
+        failureReason: "abnormal_end",
+        attemptCount: 1,
+        lastRunId: run.id,
+        lastSliceId: slice.id,
+        lastServerId: slice.serverId || null,
+        lastError: "Parallel run canceled before this board completed.",
+        createdAt: now,
+        updatedAt: now
+      });
+    });
   }
 
   private reconcileCompletedJobs(): void {
@@ -1536,6 +1615,21 @@ export class SolverJobService {
     if (isPipelineActive(server.pipeline)) return false;
     const candidate = this.nextQueuedParallelSliceForServer(server.id);
     if (!candidate) return false;
+    const cardsCheck = await this.validateServerCardsForSlice(server, candidate.slice);
+    if (!cardsCheck.ready) {
+      const now = new Date().toISOString();
+      this.options.db.updateParallelSolverSlice(candidate.slice.id, {
+        lastError: cardsCheck.reason,
+        updatedAt: now
+      });
+      if (candidate.job) {
+        this.options.db.updateSolverJob(candidate.job.id, {
+          lastError: cardsCheck.reason,
+          updatedAt: now
+        });
+      }
+      return false;
+    }
     if (candidate.job && candidate.job.serverId === server.id) {
       return this.startQueuedJobIfDispatchReady(candidate.job);
     }
@@ -1643,26 +1737,99 @@ export class SolverJobService {
     if (!this.options.credentials) {
       throw new Error("SSH credentials are required to read remote solver cards for parallel allocation.");
     }
-    const remoteErrors: string[] = [];
-    for (const server of servers) {
+    const onlineServers = servers.filter(serverIsOnline);
+    const targets = onlineServers.length > 0 ? onlineServers : servers;
+    const reads = await Promise.all(targets.map(async (server) => {
       const solverRoot = effectiveSolverRoot(server);
       try {
-        return parseSolverCards(await this.executor.run(
+        const cards = parseSolverCards(await this.executor.run(
           server,
-          this.options.credentials,
+          this.options.credentials!,
           buildReadSolverCardsCommand(solverRoot)
         ));
+        return { ok: true as const, server, cards };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        remoteErrors.push(`${server.id} (${joinRemotePath(solverRoot, "cards", "cards.txt")}): ${message}`);
+        return {
+          ok: false as const,
+          server,
+          error: `${server.id} (${joinRemotePath(solverRoot, "cards", "cards.txt")}): ${message}`
+        };
       }
+    }));
+    const successfulReads = reads.filter((read) => read.ok);
+    if (successfulReads.length === 0) {
+      const remoteErrors = reads.filter((read) => !read.ok).map((read) => read.error);
+      throw new Error(
+        "Unable to read remote solver cards.txt for parallel allocation. " +
+        "Parallel allocation reads cards/cards.txt from the selected server solverRoot over SSH. " +
+        `Remote errors: ${remoteErrors.join("; ") || "none"}.`
+      );
     }
 
-    throw new Error(
-      "Unable to read remote solver cards.txt for parallel allocation. " +
-      "Parallel allocation reads cards/cards.txt from the selected server solverRoot over SSH. " +
-      `Remote errors: ${remoteErrors.join("; ") || "none"}.`
-    );
+    const baseline = successfulReads[0]!;
+    const mismatches = successfulReads.slice(1).flatMap((read) => {
+      const mismatchIndex = firstSolverCardMismatchIndex(baseline.cards, read.cards);
+      return mismatchIndex < 0
+        ? []
+        : [`${read.server.id}=${read.cards.length} boards (first mismatch at index ${mismatchIndex + 1})`];
+    });
+    if (mismatches.length > 0) {
+      throw new Error(
+        `Remote solver cards.txt is inconsistent. ${baseline.server.id}=${baseline.cards.length} boards; ` +
+        `${mismatches.join("; ")}. Synchronize solver data before creating a parallel queue.`
+      );
+    }
+    if (baseline.cards.length !== SOLVER_TOTAL_BOARD_COUNT) {
+      throw new Error(
+        `Remote solver cards.txt must contain ${SOLVER_TOTAL_BOARD_COUNT} boards, but ` +
+        `${baseline.server.id} contains ${baseline.cards.length}. Synchronize solver data before creating a parallel queue.`
+      );
+    }
+    return baseline.cards;
+  }
+
+  private async validateServerCardsForSlice(
+    server: ServerRow,
+    slice: ParallelSolverSlice
+  ): Promise<{ ready: boolean; reason: string | null }> {
+    if (!this.options.credentials) {
+      return { ready: false, reason: "Dispatch pending: SSH credentials are required to validate solver cards.txt." };
+    }
+    try {
+      const cards = parseSolverCards(await this.executor.run(
+        server,
+        this.options.credentials,
+        buildReadSolverCardsCommand(effectiveSolverRoot(server))
+      ));
+      if (cards.length !== SOLVER_TOTAL_BOARD_COUNT) {
+        return {
+          ready: false,
+          reason: `Dispatch pending: solver cards.txt on ${server.id} must contain ${SOLVER_TOTAL_BOARD_COUNT} boards, ` +
+            `but contains ${cards.length}. Synchronize solver data before retrying.`
+        };
+      }
+      const mismatchPosition = slice.assignedIndices.findIndex((boardIndex, position) =>
+        cards[boardIndex - 1] !== slice.assignedBoardNames[position]
+      );
+      if (mismatchPosition >= 0) {
+        const boardIndex = slice.assignedIndices[mismatchPosition]!;
+        const expected = slice.assignedBoardNames[mismatchPosition] ?? "<missing>";
+        const actual = cards[boardIndex - 1] ?? "<missing>";
+        return {
+          ready: false,
+          reason: `Dispatch pending: solver cards.txt mismatch on ${server.id} at index ${boardIndex} ` +
+            `(expected ${expected}, found ${actual}). Synchronize solver data before retrying.`
+        };
+      }
+      return { ready: true, reason: null };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return {
+        ready: false,
+        reason: `Dispatch pending: unable to validate solver cards.txt on ${server.id}: ${message}`
+      };
+    }
   }
 
   private recordEvent(jobId: string, type: string, message: string, commandPreview: string | null): void {
@@ -2603,6 +2770,14 @@ function parseSolverCards(raw: string): string[] {
   return cards;
 }
 
+function firstSolverCardMismatchIndex(left: string[], right: string[]): number {
+  const sharedLength = Math.min(left.length, right.length);
+  for (let index = 0; index < sharedLength; index += 1) {
+    if (left[index] !== right[index]) return index;
+  }
+  return left.length === right.length ? -1 : sharedLength;
+}
+
 export function parseUploadCandidatesOutput(output: string, serverId: string, repoNamespace = "Tsumugii"): ServerUploadCandidate[] {
   return output
     .split(/\r?\n/)
@@ -2963,8 +3138,8 @@ function parallelRunState(
   if (statuses.every((status) => status === "completed")) {
     return { status: "completed", startedAt, finishedAt, lastError: null };
   }
-  if (statuses.every((status) => status === "canceled")) {
-    return { status: "canceled", startedAt, finishedAt, lastError: "All slices were canceled." };
+  if (statuses.some((status) => status === "canceled") && !statuses.some((status) => status === "failed")) {
+    return { status: "canceled", startedAt, finishedAt, lastError: "Parallel run canceled before all slices completed." };
   }
   return { status: "completed_with_failures", startedAt, finishedAt, lastError: "One or more slices failed." };
 }

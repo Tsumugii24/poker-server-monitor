@@ -5676,6 +5676,81 @@ td .port-value {
   background: color-mix(in srgb, var(--bg-elevated) 88%, var(--bg-base));
 }
 
+.parallel-history-heading > div:first-child span {
+  text-align: left;
+}
+
+.parallel-history-filters {
+  display: flex;
+  min-width: 0;
+  gap: 6px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+  scrollbar-width: thin;
+}
+
+.parallel-history-filters button {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 5px;
+  min-height: 30px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 5px 8px;
+  color: var(--text-secondary);
+  background: var(--bg-base);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.parallel-history-filters button small {
+  color: var(--text-tertiary);
+  font-size: 10px;
+  font-weight: 750;
+}
+
+.parallel-history-filters button em {
+  min-width: 18px;
+  border-radius: var(--radius-pill);
+  padding: 1px 5px;
+  color: var(--text-tertiary);
+  background: var(--bg-elevated);
+  font-size: 10px;
+  font-style: normal;
+  text-align: center;
+}
+
+.parallel-history-filters button:hover,
+.parallel-history-filters button:focus-visible {
+  border-color: color-mix(in srgb, var(--accent) 42%, var(--border));
+}
+
+.parallel-history-filters button:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 52%, transparent);
+  outline-offset: 1px;
+}
+
+.parallel-history-filters button.active {
+  color: var(--accent-strong);
+  border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
+  background: var(--accent-subtle);
+}
+
+.parallel-history-filters button.completed.active {
+  color: var(--green-text);
+  border-color: color-mix(in srgb, var(--green) 42%, var(--border));
+  background: var(--green-bg);
+}
+
+.parallel-history-filters button.completed-with-failures.active {
+  color: var(--yellow-text);
+  border-color: color-mix(in srgb, var(--yellow) 48%, var(--border));
+  background: var(--yellow-bg);
+}
+
 .parallel-history-lane {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 380px), 1fr));

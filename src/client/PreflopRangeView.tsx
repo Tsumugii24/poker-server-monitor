@@ -111,6 +111,7 @@ type PendingStatusChange = {
 
 type RangeStatusView = "labeling" | "already";
 type ParallelServerStatusTab = "all" | "available" | "unavailable";
+type ParallelHistoryFilter = "all" | "completed" | "completed_with_failures";
 
 type OfflineServerNotice = {
   serverId: string;
@@ -254,6 +255,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
   const [pendingDatasetRepoAction, setPendingDatasetRepoAction] = useState<PendingDatasetRepoAction | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const folderInputRef = useRef<HTMLInputElement | null>(null);
+  const rangeOpenRequestRef = useRef(0);
 
   const loadTree = useCallback(async () => {
     setLoading(true);
@@ -406,6 +408,21 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
   useEffect(() => {
     setJobPreview(null);
     setParallelPreview(null);
+    const activeParallelRun = activeSolverJobTab === "parallel"
+      ? parallelRuns.find((run) => run.id === activeParallelRunId && run.rangePath === selectedPath?.path)
+      : null;
+    if (activeParallelRun) {
+      setSelectedJobScenario(activeParallelRun.scenario);
+      setJobDatasetName(activeParallelRun.datasetName);
+      setJobDatasetNameTouched(true);
+      setJobSettings(activeParallelRun.settings);
+      setDatasetRepoStatus(null);
+      setDatasetRepoDialog(null);
+      setDatasetRepoConfirmed(false);
+      setPendingDatasetRepoAction(null);
+      setConfirmUnstudied(false);
+      return;
+    }
     setSelectedJobScenario("");
     setJobDatasetName("");
     setJobDatasetNameTouched(false);
@@ -447,6 +464,8 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
   }, [scenarioManageMode, selectedScenarioLibraryItem]);
 
   const clearSelectedRange = () => {
+    rangeOpenRequestRef.current += 1;
+    setActiveParallelRunId(null);
     setSelectedPath(null);
     setSelectedFile(null);
     setDraft(null);
@@ -467,6 +486,8 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
   };
 
   const selectFolder = (path: string) => {
+    rangeOpenRequestRef.current += 1;
+    setActiveParallelRunId(null);
     setCurrentFolderPath(path);
     expandAncestors(path, setExpandedFolders);
     setSelectedPath({ type: "folder", path, name: folderName(path) });
@@ -479,17 +500,28 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
       clearSelectedRange();
       return;
     }
+    setActiveParallelRunId(null);
+    await openRangeFile(item.path, item.name);
+  };
+
+  const openRangeFile = async (rangePath: string, rangeName: string) => {
+    const requestId = rangeOpenRequestRef.current + 1;
+    rangeOpenRequestRef.current = requestId;
     setError(null);
+    setSelectedPath({ type: "file", path: rangePath, name: rangeName });
+    setSelectedFile(null);
+    setDraft(null);
     try {
       const response = normalizeRangeFileResponse(await fetchPreflopJson<PreflopRangeFileResponse>(
-        `/api/preflop-ranges/file?path=${encodeURIComponent(item.path)}`
+        `/api/preflop-ranges/file?path=${encodeURIComponent(rangePath)}`
       ));
-      setSelectedPath({ type: "file", path: item.path, name: item.name });
+      if (rangeOpenRequestRef.current !== requestId) return;
       setSelectedFile(response);
       setDraft(response.summary.data);
       setSelectedHand(DEFAULT_SELECTED_HAND);
       setActivePlayer(preferredActivePlayer(response.summary));
     } catch (caught) {
+      if (rangeOpenRequestRef.current !== requestId) return;
       setError(caught instanceof Error ? caught.message : String(caught));
     }
   };
@@ -908,6 +940,29 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
     }
   };
 
+  const previewFailurePool = async () => {
+    const requestPayload = parallelJobRequest();
+    if (!requestPayload) return;
+    setJobBusy("pool-preview");
+    setJobError(null);
+    try {
+      const preview = await fetchPreflopJson<ParallelSolverJobPreview>("/api/parallel-jobs/failure-pool/preview", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ...requestPayload,
+          bestServerId: parallelBestServerId.trim() || undefined
+        })
+      });
+      setParallelPreview(preview);
+      setJobDatasetName(preview.datasetName);
+    } catch (caught) {
+      setJobError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setJobBusy(null);
+    }
+  };
+
   const createParallelJob = async (queueMode: "start_now" | "queue_next") => {
     const requestPayload = parallelJobRequest();
     if (!requestPayload) return;
@@ -953,6 +1008,14 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
   const submitFailurePool = async (queueMode: "start_now" | "queue_next") => {
     const requestPayload = parallelJobRequest();
     if (!requestPayload) return;
+    if (
+      parallelPreview?.sourceType !== "failure_pool" ||
+      parallelPreview.rangePath !== requestPayload.rangePath ||
+      parallelPreview.datasetName !== (requestPayload.datasetName?.trim() || parallelPreview.datasetName)
+    ) {
+      setJobError("Preview the selected failure pool before adding it to the queue.");
+      return;
+    }
     const gateRequest = datasetGateRequestForParallel(requestPayload);
     if (!gateRequest) return;
     setJobBusy("pool-submit");
@@ -1571,6 +1634,22 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
     if (tab === "parallel") {
       setActiveParallelRunId(resolveDefaultParallelRunId(parallelRuns));
     }
+  };
+
+  const selectParallelRun = (runId: string) => {
+    const run = parallelRuns.find((candidate) => candidate.id === runId);
+    setActiveParallelRunId(runId);
+    setParallelPreview(null);
+    if (!run) return;
+    setSelectedJobScenario(run.scenario);
+    setJobDatasetName(run.datasetName);
+    setJobDatasetNameTouched(true);
+    setJobSettings(run.settings);
+    setRangeManageMode(false);
+    const parentPath = run.rangePath.split("/").slice(0, -1).join("/");
+    setCurrentFolderPath(parentPath);
+    expandAncestors(parentPath, setExpandedFolders);
+    void openRangeFile(run.rangePath, run.rangePath.split("/").at(-1) ?? run.rangeName);
   };
 
   return (
@@ -2220,9 +2299,10 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
           onStartNow={() => void createSolverJob("manual", true)}
           onQueueNext={() => void createSolverJob("queue_next", false)}
           onParallelPreview={() => void previewParallelJob()}
+          onFailurePoolPreview={() => void previewFailurePool()}
           onParallelStart={() => void createParallelJob("start_now")}
           onParallelQueueNext={() => void createParallelJob("queue_next")}
-          onParallelRunSelect={setActiveParallelRunId}
+          onParallelRunSelect={selectParallelRun}
           onParallelQueueDelete={requestDeleteParallelQueueRun}
           onFailurePoolSubmit={() => void submitFailurePool("queue_next")}
           onFailurePoolClear={requestClearFailurePool}
@@ -2743,6 +2823,7 @@ function SolverJobPanel({
   onStartNow,
   onQueueNext,
   onParallelPreview,
+  onFailurePoolPreview,
   onParallelStart,
   onParallelQueueNext,
   onParallelRunSelect,
@@ -2816,6 +2897,7 @@ function SolverJobPanel({
   onStartNow: () => void;
   onQueueNext: () => void;
   onParallelPreview: () => void;
+  onFailurePoolPreview: () => void;
   onParallelStart: () => void;
   onParallelQueueNext: () => void;
   onParallelRunSelect: (runId: string) => void;
@@ -3181,6 +3263,7 @@ function SolverJobPanel({
           onSettingsChange={onSettingsChange}
           onScenarioChange={onScenarioChange}
           onPreview={onParallelPreview}
+          onFailurePoolPreview={onFailurePoolPreview}
           onStart={onParallelStart}
           onQueueNext={onParallelQueueNext}
           onRunSelect={onParallelRunSelect}
@@ -3386,6 +3469,7 @@ function ParallelSolverJobPanel({
   onSettingsChange,
   onScenarioChange,
   onPreview,
+  onFailurePoolPreview,
   onStart,
   onQueueNext,
   onRunSelect,
@@ -3423,6 +3507,7 @@ function ParallelSolverJobPanel({
   onSettingsChange: (patch: Partial<SolverJobSettings>) => void;
   onScenarioChange: (scenario: SolverScenario | "") => void;
   onPreview: () => void;
+  onFailurePoolPreview: () => void;
   onStart: () => void;
   onQueueNext: () => void;
   onRunSelect: (runId: string) => void;
@@ -3460,9 +3545,11 @@ function ParallelSolverJobPanel({
   );
   const baseSubmitDisabled = !selectedRangePath || !selectedRangeLearned || busy != null;
   const submitDisabled = baseSubmitDisabled || !hasTargetServers;
-  const previewHasNoMissingBoards = preview != null && preview.missingIndices.length === 0;
-  const previewRequired = preview == null;
-  const startDisabled = submitDisabled || queueRuns.length > 0 || previewHasNoMissingBoards;
+  const parallelPreviewReady = preview?.sourceType === "parallel";
+  const failurePoolPreviewReady = preview?.sourceType === "failure_pool";
+  const previewHasNoMissingBoards = parallelPreviewReady && preview.missingIndices.length === 0;
+  const previewRequired = !parallelPreviewReady;
+  const startDisabled = submitDisabled || queueRuns.length > 0 || previewHasNoMissingBoards || previewRequired;
   const queueNextDisabled = submitDisabled || previewHasNoMissingBoards || previewRequired;
   const inspectedRuns = activeInspectionRun ? [activeInspectionRun] : [];
   const clearableRuns = terminalParallelReportRuns(runs);
@@ -3470,12 +3557,15 @@ function ParallelSolverJobPanel({
   const failurePoolReasons = summarizeFailurePoolReasons(visibleFailurePool);
   const retryableFailurePoolCount = visibleFailurePool.filter((entry) => failurePoolEntryIsRetryable(entry)).length;
   const skippedFailurePoolCount = visibleFailurePool.filter((entry) => entry.failureReason === "skipped").length;
-  const failurePoolSubmitDisabled =
+  const failurePoolPreviewDisabled =
     baseSubmitDisabled ||
     !hasTargetServers ||
-    previewRequired ||
     retryableFailurePoolCount === 0 ||
     (skippedFailurePoolCount > 0 && !bestServerId.trim());
+  const failurePoolSubmitDisabled =
+    failurePoolPreviewDisabled ||
+    !failurePoolPreviewReady ||
+    (preview?.missingIndices.length ?? 0) === 0;
 
   return (
     <div className="parallel-job-shell">
@@ -3636,6 +3726,10 @@ function ParallelSolverJobPanel({
             <Send size={15} />
             Queue Next
           </button>
+          <button className="icon-button compact" onClick={onFailurePoolPreview} disabled={failurePoolPreviewDisabled}>
+            <Search size={15} />
+            Preview Failure Pool
+          </button>
           <button className="icon-button compact" onClick={onFailurePoolSubmit} disabled={failurePoolSubmitDisabled}>
             <RotateCcw size={15} />
             Queue Failure Pool
@@ -3648,12 +3742,19 @@ function ParallelSolverJobPanel({
         {previewRequired && selectedRangePath && selectedRangeLearned && hasTargetServers ? (
           <div className="notice warning compact-notice">Preview distribution before queuing a parallel run.</div>
         ) : null}
+        {retryableFailurePoolCount > 0 && !failurePoolPreviewReady ? (
+          <div className="notice warning compact-notice">Preview the failure pool separately before adding retry boards to the queue.</div>
+        ) : null}
 
         {preview ? (
           <div className="parallel-preview-panel">
             <div className="parallel-preview-summary">
               <div><span>Repo</span><strong>{displayDatasetName(preview.repoId)}</strong></div>
-              <div><span>Missing</span><strong>{preview.missingIndices.length}</strong></div>
+              <div><span>Dataset Total</span><strong>{preview.totalBoards}</strong></div>
+              <div>
+                <span>{preview.sourceType === "failure_pool" ? "Retry Boards" : "Missing"}</span>
+                <strong>{preview.missingIndices.length}</strong>
+              </div>
               <div><span>Chunks</span><strong>{preview.allocations.filter((item) => item.indices.length > 0).length}</strong></div>
               <div><span>Repo Status</span><strong>{preview.repoExists ? "Exists" : "Missing"}</strong></div>
             </div>
@@ -3784,7 +3885,7 @@ function ParallelSolverJobPanel({
                 <em className={`solver-job-status ${dispatch.className || run.status}`}>{dispatch.label}</em>
               </div>
               <div className="parallel-run-metrics">
-                <div><span>Total</span><strong>{run.report.totalBoards}</strong></div>
+                <div><span>Assigned</span><strong>{run.report.totalBoards}</strong></div>
                 <div><span>Dispatch</span><strong>{dispatch.metric}</strong></div>
                 <div><span>Done</span><strong>{run.report.completedBoards}</strong></div>
                 <div><span>Failed</span><strong>{run.report.failedBoards}</strong></div>
@@ -3959,18 +4060,52 @@ function ParallelHistoryBoard({
   onRunSelect: (runId: string) => void;
 }) {
   const historyRuns = parallelHistoryRuns(runs);
+  const [filter, setFilter] = useState<ParallelHistoryFilter>("all");
+  const completedCount = historyRuns.filter((run) => run.status === "completed").length;
+  const completedWithFailuresCount = historyRuns.filter((run) => run.status === "completed_with_failures").length;
+  const visibleRuns = filter === "all" ? historyRuns : historyRuns.filter((run) => run.status === filter);
 
   return (
     <section className="parallel-history-board">
-      <div className="parallel-section-title">
-        <strong>Parallel History</strong>
-        <span>{historyRuns.length} finished · select to inspect reports and failure pool</span>
+      <div className="parallel-section-title parallel-section-title-with-actions parallel-history-heading">
+        <div>
+          <strong>Parallel History</strong>
+          <span>{historyRuns.length} finished · select to inspect reports and failure pool</span>
+        </div>
+        <div className="parallel-history-filters" role="group" aria-label="Filter parallel history by completion status">
+          <button
+            type="button"
+            className={filter === "all" ? "active" : ""}
+            aria-pressed={filter === "all"}
+            onClick={() => setFilter("all")}
+          >
+            All <em>{historyRuns.length}</em>
+          </button>
+          <button
+            type="button"
+            className={`completed ${filter === "completed" ? "active" : ""}`}
+            aria-pressed={filter === "completed"}
+            onClick={() => setFilter("completed")}
+          >
+            Completed <small>All Successful</small> <em>{completedCount}</em>
+          </button>
+          <button
+            type="button"
+            className={`completed-with-failures ${filter === "completed_with_failures" ? "active" : ""}`}
+            aria-pressed={filter === "completed_with_failures"}
+            onClick={() => setFilter("completed_with_failures")}
+          >
+            Completed with Failures <em>{completedWithFailuresCount}</em>
+          </button>
+        </div>
       </div>
       {historyRuns.length === 0 ? (
         <p className="solver-job-empty">No finished parallel runs yet.</p>
+      ) : visibleRuns.length === 0 ? (
+        <p className="solver-job-empty">No parallel runs match this status.</p>
       ) : (
         <div className="parallel-history-lane" aria-label="Parallel run history">
-          {historyRuns.map((run) => {
+          {visibleRuns.map((run) => {
             const active = activeRunId === run.id;
             const failureCount = run.report.failedBoards;
             return (
@@ -4828,23 +4963,22 @@ function parallelHistoryRuns(runs: ParallelSolverRun[]): ParallelSolverRun[] {
 }
 
 function resolveInspectionRun(runs: ParallelSolverRun[], activeRunId: string | null): ParallelSolverRun | null {
-  if (activeRunId) {
-    const selected = runs.find((run) => run.id === activeRunId);
-    if (selected) return selected;
-  }
-  return parallelQueueRuns(runs)[0] ?? parallelHistoryRuns(runs)[0] ?? null;
+  if (!activeRunId) return null;
+  return runs.find((run) => run.id === activeRunId) ?? null;
 }
 
 function resolveDefaultParallelRunId(runs: ParallelSolverRun[]): string | null {
-  return resolveInspectionRun(runs, null)?.id ?? null;
+  return parallelQueueRuns(runs)[0]?.id ?? parallelHistoryRuns(runs)[0]?.id ?? null;
 }
 
 function terminalParallelReportRuns(runs: ParallelSolverRun[]): ParallelSolverRun[] {
   return runs.filter((run) =>
-    run.status === "completed" ||
-    run.status === "completed_with_failures" ||
-    run.status === "failed" ||
-    run.status === "canceled"
+    !run.reportCleared && (
+      run.status === "completed" ||
+      run.status === "completed_with_failures" ||
+      run.status === "failed" ||
+      run.status === "canceled"
+    )
   );
 }
 
