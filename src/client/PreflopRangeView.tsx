@@ -153,7 +153,7 @@ type PendingParallelQueueDeleteAction = {
 };
 
 type PendingServerOperationAction = {
-  action: "sync" | "network_sync" | "upload" | "retry" | "clear";
+  action: "sync" | "network_sync" | "network_check" | "upload" | "retry" | "clear";
   serverCount: number;
   itemCount: number;
   serverIds?: string[];
@@ -1304,6 +1304,23 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
     });
   };
 
+  const requestNetworkCheckOperations = () => {
+    const targetServers = servers
+      .slice()
+      .sort(compareServersByNaturalId)
+      .filter((server) => server.enabled && serverIsOnlineForJob(server));
+    if (targetServers.length === 0) {
+      setJobError("No online enabled servers are available for network checks.");
+      return;
+    }
+    setPendingServerOperationAction({
+      action: "network_check",
+      serverCount: targetServers.length,
+      itemCount: targetServers.length,
+      serverIds: targetServers.map((server) => server.id)
+    });
+  };
+
   const requestUploadOperation = () => {
     const targetServers = servers
       .slice()
@@ -1346,6 +1363,13 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
         applyServerOperationsResponse(response);
       } else if (pending.action === "network_sync") {
         const response = await fetchPreflopJson<ServerOperationsResponse>("/api/server-operations/network-sync", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ serverIds: pending.serverIds ?? [] })
+        });
+        applyServerOperationsResponse(response);
+      } else if (pending.action === "network_check") {
+        const response = await fetchPreflopJson<ServerOperationsResponse>("/api/server-operations/network-check", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ serverIds: pending.serverIds ?? [] })
@@ -2354,6 +2378,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
           onOperationScanUploads={() => void scanUploadCandidates()}
           onOperationSync={requestSyncOperations}
           onOperationNetworkSync={requestNetworkSyncOperations}
+          onOperationNetworkCheck={requestNetworkCheckOperations}
           onOperationUpload={requestUploadOperation}
           onOperationStop={(operation) => void stopServerOperation(operation)}
           onOperationRetry={requestRetryServerOperation}
@@ -2697,7 +2722,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
             <div className="preflop-confirm-icon">
               {pendingServerOperationAction.action === "clear" ? <Trash2 size={18} /> : (
                 pendingServerOperationAction.action === "sync" ? <RefreshCw size={18} /> : (
-                  pendingServerOperationAction.action === "network_sync" ? <Wifi size={18} /> : (
+                  pendingServerOperationAction.action === "network_sync" || pendingServerOperationAction.action === "network_check" ? <Wifi size={18} /> : (
                     pendingServerOperationAction.action === "retry" ? <RotateCcw size={18} /> : <Upload size={18} />
                   )
                 )
@@ -2915,6 +2940,7 @@ function SolverJobPanel({
   onOperationScanUploads,
   onOperationSync,
   onOperationNetworkSync,
+  onOperationNetworkCheck,
   onOperationUpload,
   onOperationStop,
   onOperationRetry,
@@ -2995,6 +3021,7 @@ function SolverJobPanel({
   onOperationScanUploads: () => void;
   onOperationSync: () => void;
   onOperationNetworkSync: () => void;
+  onOperationNetworkCheck: () => void;
   onOperationUpload: () => void;
   onOperationStop: (operation: ServerOperation) => void;
   onOperationRetry: (operation: ServerOperation) => void;
@@ -3411,6 +3438,7 @@ function SolverJobPanel({
           onScanUploads={onOperationScanUploads}
           onSync={onOperationSync}
           onNetworkSync={onOperationNetworkSync}
+          onNetworkCheck={onOperationNetworkCheck}
           onUpload={onOperationUpload}
           onStop={onOperationStop}
           onRetry={onOperationRetry}
@@ -4286,10 +4314,10 @@ function ServerOperationsPanel({
   onScanUploads,
   onSync,
   onNetworkSync,
+  onNetworkCheck,
   onUpload,
   onStop,
   onRetry,
-  onClear,
   onBestServerChange
 }: {
   servers: ServerRow[];
@@ -4302,6 +4330,7 @@ function ServerOperationsPanel({
   onScanUploads: () => void;
   onSync: () => void;
   onNetworkSync: () => void;
+  onNetworkCheck: () => void;
   onUpload: () => void;
   onStop: (operation: ServerOperation) => void;
   onRetry: (operation: ServerOperation) => void;
@@ -4309,19 +4338,21 @@ function ServerOperationsPanel({
   onBestServerChange: (serverId: string) => void;
 }) {
   const orderedServers = servers.slice().sort(compareServersByNaturalId);
-  const onlineServers = orderedServers.filter((server) => server.enabled && serverIsOnlineForJob(server));
-  const offlineServers = orderedServers.filter((server) => server.enabled && !serverIsOnlineForJob(server));
+  const enabledServers = orderedServers.filter((server) => server.enabled);
+  const onlineServers = enabledServers.filter((server) => serverIsOnlineForJob(server));
+  const offlineServers = enabledServers.filter((server) => !serverIsOnlineForJob(server));
   const bestServer = orderedServers.find((server) => server.id === bestServerId) ?? null;
-  const terminalCount = operations.filter((operation) => serverOperationIsTerminal(operation)).length;
-  const operationSummary = summarizeServerOperations(operations);
-  const [reportFilter, setReportFilter] = useState<"all" | ServerOperation["type"]>("all");
   const candidateSummary = summarizeUploadCandidates(uploadCandidates);
   const activeOperations = operations
     .filter((operation) => !serverOperationIsTerminal(operation))
     .sort(compareServerOperations);
-  const operationRows = operations
-    .filter((operation) => reportFilter === "all" || operation.type === reportFilter)
-    .sort(compareServerOperations);
+  const operationsByServer = new Map<string, Map<ServerOperation["type"], ServerOperation>>();
+  for (const operation of operations) {
+    const byType = operationsByServer.get(operation.serverId) ?? new Map<ServerOperation["type"], ServerOperation>();
+    const current = byType.get(operation.type);
+    if (!current || Date.parse(operation.updatedAt) > Date.parse(current.updatedAt)) byType.set(operation.type, operation);
+    operationsByServer.set(operation.serverId, byType);
+  }
   const operationBusy = busy?.startsWith("operation-") ?? false;
 
   return (
@@ -4329,7 +4360,7 @@ function ServerOperationsPanel({
       <section className="server-ops-command-center">
         <div className="server-ops-command-copy">
           <strong>Server Operations</strong>
-          <span>{onlineServers.length} SSH-ready · {offlineServers.length} unavailable · {operations.length} tracked operations</span>
+          <span>{enabledServers.length} enabled · {onlineServers.length} SSH-ready · {offlineServers.length} unavailable · {activeOperations.length} active</span>
         </div>
         <label className="solver-job-field best-server-field">
           <span>Best Server</span>
@@ -4346,13 +4377,6 @@ function ServerOperationsPanel({
       {inventoryLoaded && bestServerId && !bestServer ? (
         <div className="notice warning compact-notice">Best Server ID is not in the current server inventory.</div>
       ) : null}
-
-      <div className="server-ops-overview-grid">
-        <ServerOperationMetric label="Active" value={activeOperations.length} detail="operations in progress" />
-        <ServerOperationMetric label="Code Sync" value={operationSummary.syncSynced + operationSummary.syncLatest} detail={`${operationSummary.syncLatest} latest · ${operationSummary.syncFailed} failed`} />
-        <ServerOperationMetric label="Network Ready" value={operationSummary.networkReady} detail={`${operationSummary.networkFailed} failed`} />
-        <ServerOperationMetric label="Uploaded" value={operationSummary.uploadSuccess} detail={`${operationSummary.uploadFailed} failed · ${operationSummary.filesRequested} files`} />
-      </div>
 
       <div className="server-ops-grid">
         <section className="server-ops-card">
@@ -4388,18 +4412,24 @@ function ServerOperationsPanel({
                 {` · ${onlineServers.length} target${onlineServers.length === 1 ? "" : "s"}`}
               </span>
             </div>
-            <button className="icon-button compact primary" type="button" onClick={onNetworkSync} disabled={operationBusy || onlineServers.length === 0 || !networkSyncConfigured}>
-              <Wifi size={14} />
-              New Network Tmux
-            </button>
+            <div className="server-ops-card-actions">
+              <button className="icon-button compact" type="button" onClick={onNetworkCheck} disabled={operationBusy || onlineServers.length === 0}>
+                <Search size={14} />
+                Check Network
+              </button>
+              <button className="icon-button compact primary" type="button" onClick={onNetworkSync} disabled={operationBusy || onlineServers.length === 0 || !networkSyncConfigured}>
+                <Wifi size={14} />
+                New Network Tmux
+              </button>
+            </div>
           </div>
           <div className="server-ops-network-flow" aria-label="Network sync workflow">
-            <span>Clone / update</span>
+            <span>Pull latest</span>
             <span>Download config</span>
             <span>Validate</span>
             <span>Restart mihomo</span>
           </div>
-          <pre className="server-ops-command-preview">{`cd "$HOME" && git clone https://gitee.com/Tsumugii24/mihomo-release && cd "$HOME/mihomo-release" && gzip -dc mihomo.gz > mihomo && chmod +x mihomo && wget -O config.yaml "$SUBSCRIPTION_URL" && ./mihomo -t -d . && tmux new-session -d -s mihomo -c "$HOME/mihomo-release" "exec ./mihomo -d ."`}</pre>
+          <pre className="server-ops-command-preview">{`cd "$HOME/mihomo-release" && git stash && git pull --rebase https://gitee.com/Tsumugii24/mihomo-release master && wget -O config.yaml.next "$SUBSCRIPTION_URL" && mv config.yaml.next config.yaml && ./mihomo -t -d . && tmux kill-session -t mihomo && tmux new-session -d -s mihomo -c "$HOME/mihomo-release" "exec ./mihomo -d ."`}</pre>
         </section>
 
         <section className="server-ops-card">
@@ -4450,61 +4480,34 @@ function ServerOperationsPanel({
         </section>
       </div>
 
-      <section className="server-ops-card">
-        <div className="parallel-section-title parallel-section-title-with-actions">
+      <section className="server-ops-card server-ops-inventory-card">
+        <div className="parallel-section-title">
           <div>
-            <strong>Operation Report</strong>
-            <span>{activeOperations.length} active · {operations.length} recorded · {terminalCount} clearable</span>
+            <strong>Server Operation Inventory</strong>
+            <span>Latest state per enabled server · ordered by Server ID</span>
           </div>
-          <button className="icon-button compact danger" type="button" onClick={onClear} disabled={operationBusy || terminalCount === 0}>
-            <Trash2 size={14} />
-            Clear
-          </button>
         </div>
-        <div className="server-ops-report-grid">
-          <ServerOperationMetric label="Code" value={`${operationSummary.syncSynced} synced`} detail={`${operationSummary.syncLatest} latest · ${operationSummary.syncFailed} failed`} />
-          <ServerOperationMetric label="Network" value={`${operationSummary.networkReady} ready`} detail={`${operationSummary.networkCloned} installed · ${operationSummary.networkUpdated} updated`} />
-          <ServerOperationMetric label="Upload" value={`${operationSummary.uploadSuccess} complete`} detail={`${operationSummary.uploadFailed} failed · ${operationSummary.noFiles} empty`} />
-          <ServerOperationMetric label="Workload" value={operationSummary.filesRequested} detail="files requested for upload" />
-        </div>
-        <div className="server-ops-report-filters" role="tablist" aria-label="Operation report filter">
-          {([
-            ["all", "All"],
-            ["sync", "Code"],
-            ["network_sync", "Network"],
-            ["upload", "Upload"]
-          ] as const).map(([value, label]) => (
-            <button
-              key={value}
-              type="button"
-              className={reportFilter === value ? "active" : ""}
-              onClick={() => setReportFilter(value)}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
-        {operationRows.length === 0 ? (
-          <p className="solver-job-empty">{operations.length === 0 ? "No server operation has been recorded." : "No operation matches this filter."}</p>
-        ) : null}
-        {operationRows.length > 0 ? (
+        {enabledServers.length > 0 ? (
           <div className="server-ops-history-table-wrap">
-            <table className="server-ops-history-table">
+            <table className="server-ops-history-table server-ops-inventory-table">
               <thead>
                 <tr>
                   <th>Server ID</th>
-                  <th>Operation</th>
-                  <th>Status</th>
-                  <th>Result</th>
-                  <th>Created</th>
+                  <th>SSH</th>
+                  <th>Code Sync</th>
+                  <th>Network</th>
+                  <th>Network Check</th>
+                  <th>Upload</th>
+                  <th>Last Check</th>
                   <th aria-label="Actions" />
                 </tr>
               </thead>
               <tbody>
-                {operationRows.map((operation) => (
+                {enabledServers.map((server) => (
                   <ServerOperationRow
-                    key={operation.id}
-                    operation={operation}
+                    key={server.id}
+                    server={server}
+                    operations={operationsByServer.get(server.id) ?? new Map()}
                     busy={busy}
                     onStop={onStop}
                     onRetry={onRetry}
@@ -4513,68 +4516,76 @@ function ServerOperationsPanel({
               </tbody>
             </table>
           </div>
-        ) : null}
+        ) : <p className="solver-job-empty">No enabled server is configured.</p>}
       </section>
     </div>
   );
 }
 
 function ServerOperationRow({
-  operation,
+  server,
+  operations,
   busy,
   onStop,
   onRetry
 }: {
-  operation: ServerOperation;
+  server: ServerRow;
+  operations: Map<ServerOperation["type"], ServerOperation>;
   busy: string | null;
   onStop: (operation: ServerOperation) => void;
   onRetry: (operation: ServerOperation) => void;
 }) {
-  const active = !serverOperationIsTerminal(operation);
-  const stopping = busy === `operation-stop:${operation.id}`;
-  const retryable = operation.status === "failed" || operation.status === "canceled";
-  const retrying = busy === "operation-retry";
-  const result = serverOperationCompactResult(operation);
-  const failureDetail = serverOperationFailureDetail(operation);
+  const operationList = Array.from(operations.values());
+  const actionable = operationList.filter((operation) => (
+    !serverOperationIsTerminal(operation) || operation.status === "failed" || operation.status === "canceled"
+  ));
+  const networkCheck = operations.get("network_check") ?? null;
   return (
-    <tr className={`server-ops-history-row ${operation.status} ${operation.type}`}>
+    <tr className="server-ops-history-row server-ops-inventory-row">
       <td>
-        <strong>{operation.serverId}</strong>
-      </td>
-      <td>{serverOperationTypeLabel(operation.type)}</td>
-      <td>
-        <span className={`server-ops-status-pill ${operation.status}`}>{formatServerOperationStatus(operation.status)}</span>
+        <strong>{server.id}</strong>
       </td>
       <td>
-        <div className="server-ops-result-cell">
-          <span className={`server-ops-result-pill ${result.tone}`}>{result.label}</span>
-          {failureDetail ? <small title={failureDetail}>{failureDetail}</small> : null}
+        <ConnectionBadge status={server.latest?.connectionStatus ?? "unknown"} />
+      </td>
+      <td><ServerOperationState operation={operations.get("sync") ?? null} /></td>
+      <td><ServerOperationState operation={operations.get("network_sync") ?? null} /></td>
+      <td><ServerOperationState operation={networkCheck} /></td>
+      <td><ServerOperationState operation={operations.get("upload") ?? null} /></td>
+      <td>{networkCheck ? formatShortDateTime(networkCheck.finishedAt ?? networkCheck.updatedAt) : <span className="server-ops-never">Never</span>}</td>
+      <td>
+        <div className="server-ops-row-actions">
+          {actionable.map((operation) => {
+            const active = !serverOperationIsTerminal(operation);
+            const working = busy === `operation-stop:${operation.id}` || busy === "operation-retry";
+            return (
+              <button
+                key={operation.id}
+                className={`inventory-confirm-button ${active ? "danger" : ""}`}
+                type="button"
+                title={`${active ? "Stop" : "Retry"} ${serverOperationTypeLabel(operation.type)}`}
+                onClick={() => active ? onStop(operation) : onRetry(operation)}
+                disabled={working}
+              >
+                {active ? <Square size={14} /> : <RotateCcw size={14} />}
+                {active ? "Stop" : "Retry"} {serverOperationShortLabel(operation.type)}
+              </button>
+            );
+          })}
         </div>
-      </td>
-      <td>{formatShortDateTime(operation.createdAt)}</td>
-      <td>
-        {active ? (
-          <button className="inventory-confirm-button danger" type="button" onClick={() => onStop(operation)} disabled={stopping}>
-            <Square size={14} />
-            {stopping ? "Stopping" : "Stop"}
-          </button>
-        ) : retryable ? (
-          <button className="inventory-confirm-button" type="button" onClick={() => onRetry(operation)} disabled={retrying}>
-            <RotateCcw size={14} />
-            {retrying ? "Retrying" : "Retry"}
-          </button>
-        ) : null}
       </td>
     </tr>
   );
 }
 
-function ServerOperationMetric({ label, value, detail }: { label: string; value: number | string; detail: string }) {
+function ServerOperationState({ operation }: { operation: ServerOperation | null }) {
+  if (!operation) return <span className="server-ops-never">Not run</span>;
+  const result = serverOperationCompactResult(operation);
+  const detail = serverOperationResultDetail(operation);
   return (
-    <div className="server-ops-overview-metric">
-      <span>{label}</span>
-      <strong>{value}</strong>
-      <em>{detail}</em>
+    <div className="server-ops-result-cell" title={detail ?? undefined}>
+      <span className={`server-ops-result-pill ${result.tone}`}>{result.label}</span>
+      <small>{formatServerOperationStatus(operation.status)}</small>
     </div>
   );
 }
@@ -5012,6 +5023,14 @@ function formatServerOperationStatus(status: ServerOperation["status"]): string 
 function serverOperationTypeLabel(type: ServerOperation["type"]): string {
   if (type === "sync") return "Code Sync";
   if (type === "network_sync") return "Network Sync";
+  if (type === "network_check") return "Network Check";
+  return "Upload";
+}
+
+function serverOperationShortLabel(type: ServerOperation["type"]): string {
+  if (type === "sync") return "Code";
+  if (type === "network_sync") return "Network";
+  if (type === "network_check") return "Check";
   return "Upload";
 }
 
@@ -5033,62 +5052,6 @@ function summarizeUploadCandidates(candidates: ServerUploadCandidate[]): { folde
   };
 }
 
-function summarizeServerOperations(operations: ServerOperation[]): {
-  syncTotal: number;
-  syncSynced: number;
-  syncLatest: number;
-  syncFailed: number;
-  networkTotal: number;
-  networkReady: number;
-  networkFailed: number;
-  networkCloned: number;
-  networkUpdated: number;
-  uploadTotal: number;
-  uploadSuccess: number;
-  uploadFailed: number;
-  filesRequested: number;
-  noFiles: number;
-} {
-  const summary = {
-    syncTotal: 0,
-    syncSynced: 0,
-    syncLatest: 0,
-    syncFailed: 0,
-    networkTotal: 0,
-    networkReady: 0,
-    networkFailed: 0,
-    networkCloned: 0,
-    networkUpdated: 0,
-    uploadTotal: 0,
-    uploadSuccess: 0,
-    uploadFailed: 0,
-    filesRequested: 0,
-    noFiles: 0
-  };
-  for (const operation of operations) {
-    const result = operation.result?.summary ?? {};
-    if (operation.type === "sync") {
-      summary.syncTotal += 1;
-      summary.syncLatest += numericResult(result.latest);
-      summary.syncSynced += numericResult(result.synced);
-      summary.syncFailed += operation.status === "failed" ? 1 : numericResult(result.failed);
-    } else if (operation.type === "network_sync") {
-      summary.networkTotal += 1;
-      summary.networkReady += numericResult(result.network_ready);
-      summary.networkFailed += operation.status === "failed" ? Math.max(1, numericResult(result.network_failed)) : numericResult(result.network_failed);
-      summary.networkCloned += numericResult(result.cloned);
-      summary.networkUpdated += numericResult(result.updated);
-    } else {
-      summary.uploadTotal += 1;
-      summary.uploadSuccess += numericResult(result.upload_success);
-      summary.uploadFailed += operation.status === "failed" ? Math.max(1, numericResult(result.upload_failed)) : numericResult(result.upload_failed);
-      summary.filesRequested += numericResult(result.files_requested);
-      summary.noFiles += numericResult(result.no_files);
-    }
-  }
-  return summary;
-}
-
 function serverOperationCompactResult(operation: ServerOperation): { label: string; tone: "success" | "danger" | "warning" | "neutral" | "active" } {
   const summary = operation.result?.summary ?? {};
   if (operation.type === "sync") {
@@ -5108,6 +5071,14 @@ function serverOperationCompactResult(operation: ServerOperation): { label: stri
     return { label: formatServerOperationStatus(operation.status), tone: operation.status === "completed" ? "success" : "neutral" };
   }
 
+  if (operation.type === "network_check") {
+    if (operation.status === "failed" || numericResult(summary.unreachable) > 0) return { label: "unreachable", tone: "danger" };
+    if (numericResult(summary.connected) > 0) return { label: "connected", tone: "success" };
+    if (operation.status === "canceled") return { label: "canceled", tone: "warning" };
+    if (!serverOperationIsTerminal(operation)) return { label: "checking", tone: "active" };
+    return { label: formatServerOperationStatus(operation.status), tone: operation.status === "completed" ? "success" : "neutral" };
+  }
+
   const success = numericResult(summary.upload_success);
   const failed = numericResult(summary.upload_failed);
   if (operation.status === "failed" || failed > 0) {
@@ -5120,13 +5091,14 @@ function serverOperationCompactResult(operation: ServerOperation): { label: stri
   return { label: formatServerOperationStatus(operation.status), tone: operation.status === "completed" ? "success" : "neutral" };
 }
 
-function serverOperationFailureDetail(operation: ServerOperation): string | null {
+function serverOperationResultDetail(operation: ServerOperation): string | null {
   if (operation.status !== "failed") return null;
   const detail = operation.result?.details[0];
   if (detail && operation.type === "network_sync") {
     const stages: Array<[string, unknown]> = [
       ["Git update", detail.git_code],
-      ["Binary extract", detail.extract_code],
+      ["Mihomo binary", detail.binary_code],
+      ["Config backup", detail.backup_code],
       ["Config download", detail.download_code],
       ["Config validation", detail.validate_code],
       ["Mihomo start", detail.start_code],
@@ -5146,6 +5118,11 @@ function serverOperationFailureDetail(operation: ServerOperation): string | null
       return lastLine ? `${failedStage[0]} ${reason}: ${lastLine}` : `${failedStage[0]} ${reason}`;
     }
   }
+  if (detail && operation.type === "network_check") {
+    const output = typeof detail.output === "string" ? detail.output.trim() : "";
+    const httpCode = typeof detail.http_code === "string" ? detail.http_code : "000";
+    return output || `Hugging Face was unreachable through the proxy (HTTP ${httpCode}).`;
+  }
   if (operation.lastError && !/^Exit code\b/i.test(operation.lastError)) return operation.lastError;
   return operation.lastError ?? "Remote operation failed.";
 }
@@ -5157,6 +5134,7 @@ function numericResult(value: unknown): number {
 function serverOperationConfirmTitle(action: PendingServerOperationAction["action"]): string {
   if (action === "sync") return "Start sync tmux?";
   if (action === "network_sync") return "Start network sync tmux?";
+  if (action === "network_check") return "Check server network?";
   if (action === "upload") return "Start upload tmux?";
   if (action === "retry") return "Retry server operation?";
   return "Clear operation history?";
@@ -5167,7 +5145,10 @@ function serverOperationConfirmCopy(action: PendingServerOperationAction): strin
     return `This will start sync tmux sessions on ${action.serverCount} online enabled server${action.serverCount === 1 ? "" : "s"}.`;
   }
   if (action.action === "network_sync") {
-    return `This will update Mihomo, refresh the subscription config, validate it, and restart the mihomo tmux session on ${action.serverCount} online enabled server${action.serverCount === 1 ? "" : "s"}.`;
+    return `This will pull the latest Mihomo repository, refresh config.yaml, validate it, and restart the mihomo tmux session on ${action.serverCount} online enabled server${action.serverCount === 1 ? "" : "s"}.`;
+  }
+  if (action.action === "network_check") {
+    return `This will test access to huggingface.co through the 127.0.0.1:7890 proxy on ${action.serverCount} online enabled server${action.serverCount === 1 ? "" : "s"}.`;
   }
   if (action.action === "upload") {
     const preview = action.itemCount > 0 ? ` Last scan found ${action.itemCount} retained folder${action.itemCount === 1 ? "" : "s"}.` : "";

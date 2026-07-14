@@ -67,6 +67,7 @@ import {
   type SolverScenarioLibraryItem
 } from "../shared/solverJobs";
 import type {
+  ServerNetworkCheckRequest,
   ServerNetworkSyncRequest,
   ServerSyncRequest,
   ServerUploadRequest
@@ -819,6 +820,19 @@ export function createApp({
       response.status(201).json(await solverJobService.startNetworkSyncOperations(request.body));
     } catch (error) {
       respondSolverJobError(response, error, "server_network_sync_operation_failed");
+    }
+  });
+
+  app.post("/api/server-operations/network-check", async (request, response) => {
+    if (!isServerNetworkCheckRequest(request.body)) {
+      response.status(400).json({ error: "invalid_server_network_check_operation" });
+      return;
+    }
+
+    try {
+      response.status(201).json(await solverJobService.startNetworkCheckOperations(request.body));
+    } catch (error) {
+      respondSolverJobError(response, error, "server_network_check_operation_failed");
     }
   });
 
@@ -1638,6 +1652,10 @@ function isServerSyncRequest(value: unknown): value is ServerSyncRequest {
 }
 
 function isServerNetworkSyncRequest(value: unknown): value is ServerNetworkSyncRequest {
+  return isServerSyncRequest(value);
+}
+
+function isServerNetworkCheckRequest(value: unknown): value is ServerNetworkCheckRequest {
   return isServerSyncRequest(value);
 }
 

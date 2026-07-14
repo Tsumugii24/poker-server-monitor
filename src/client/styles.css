@@ -6672,6 +6672,13 @@ td .port-value {
   gap: 6px;
 }
 
+.server-ops-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 7px;
+}
+
 .server-ops-network-flow span {
   min-height: 30px;
   display: inline-flex;
@@ -6747,6 +6754,38 @@ td .port-value {
   border-collapse: collapse;
 }
 
+.server-ops-inventory-card {
+  padding: 0;
+  overflow: hidden;
+}
+
+.server-ops-inventory-card > .parallel-section-title {
+  padding: 12px 12px 0;
+}
+
+.server-ops-inventory-card .server-ops-history-table-wrap {
+  border-right: 0;
+  border-bottom: 0;
+  border-left: 0;
+  border-radius: 0;
+}
+
+.server-ops-inventory-table {
+  min-width: 1080px;
+}
+
+.server-ops-inventory-table th:first-child,
+.server-ops-inventory-table td:first-child {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  background: var(--bg-base);
+}
+
+.server-ops-inventory-table th:first-child {
+  background: var(--bg-elevated);
+}
+
 .server-ops-history-table th,
 .server-ops-history-table td {
   border-bottom: 1px solid var(--border);
@@ -6794,6 +6833,18 @@ td .port-value {
   font-size: 10px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.server-ops-never {
+  color: var(--text-tertiary);
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.server-ops-row-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
 }
 
 .server-ops-status-pill,

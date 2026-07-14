@@ -15,6 +15,7 @@ import {
   buildGracefulStopPipelineCommand,
   buildRunPipelineCommand,
   buildReadServerOperationStatusCommand,
+  buildServerNetworkCheckCommand,
   buildServerNetworkSyncCommand,
   buildServerSyncCommand,
   buildServerUploadCommand,
@@ -158,18 +159,27 @@ describe("solver job helpers", () => {
     expect(command).toContain("git pull --rebase");
   });
 
-  it("builds a redacted Mihomo network sync command", () => {
+  it("builds a redacted Mihomo repository and config sync command", () => {
     const command = buildServerNetworkSyncCommand({ redactSecrets: true });
 
-    expect(command).toContain('REPO_URL="https://gitee.com/Tsumugii24/mihomo-release"');
     expect(command).toContain("SUBSCRIPTION_URL=$SUBSCRIPTION_URL");
+    expect(command).toContain('REPO_URL="https://gitee.com/Tsumugii24/mihomo-release"');
     expect(command).toContain("export GIT_TERMINAL_PROMPT=0");
-    expect(command).toContain('git remote set-url origin "$REPO_URL"');
-    expect(command).toContain("timeout 120 git -c credential.interactive=never pull --rebase");
+    expect(command).toContain('pull --rebase "$REPO_URL" master');
+    expect(command).toContain('clone --branch master --single-branch "$REPO_URL"');
     expect(command).toContain("timeout 90 wget --timeout=30 --tries=2");
-    expect(command).toContain("gzip -dc mihomo.gz > mihomo");
+    expect(command).toContain("config.yaml.previous");
     expect(command).toContain("./mihomo -t -d .");
     expect(command).toContain('tmux new-session -d -s mihomo');
+  });
+
+  it("checks Hugging Face through the configured remote proxy", () => {
+    const command = buildServerNetworkCheckCommand("http://127.0.0.1:7890");
+
+    expect(command).toContain("--proxy \"$PROXY_URL\" https://huggingface.co/");
+    expect(command).toContain("--connect-timeout 10");
+    expect(command).toContain('CHECK_KIND=connected');
+    expect(command).toContain('"connected": 1 if kind == "connected" else 0');
   });
 
   it("probes operation status files and tmux liveness together", () => {
@@ -634,7 +644,67 @@ describe("solver job API", () => {
     expect(commands.some((command) => command.includes("tmux send-keys"))).toBe(true);
   });
 
-  it("retries a failed network operation as a new non-interactive tmux operation", async () => {
+  it("starts and persists a Hugging Face network check per server", async () => {
+    const executor: SshExecutor = {
+      run: vi.fn(async (_server, _credentials, command) => {
+        commands.push(command);
+        return "ok";
+      })
+    };
+    const solverJobService = new SolverJobService({
+      db,
+      preflopRangesPath,
+      credentials: { username: "root", password: "secret" },
+      executor,
+      solverHfProxyUrl: "http://127.0.0.1:7890",
+      getHfProxySettings: () => ({ hfProxyEnabled: false, solverHfProxyEnabled: true })
+    });
+    const app = createApp({ db, refreshService, preflopRangesPath, solverJobService });
+
+    const started = await request(app)
+      .post("/api/server-operations/network-check")
+      .send({ serverIds: ["solver-01"] });
+
+    expect(started.status).toBe(201);
+    expect(started.body.operations).toHaveLength(1);
+    expect(started.body.operations[0]).toMatchObject({
+      type: "network_check",
+      serverId: "solver-01",
+      status: "running"
+    });
+    expect(commands.some((command) => command.includes("https://huggingface.co/"))).toBe(true);
+    expect(commands.some((command) => command.includes("--proxy"))).toBe(true);
+  });
+
+  it("reuses the latest operation ID for a repeated server operation", async () => {
+    const executor: SshExecutor = { run: vi.fn(async () => "ok") };
+    const solverJobService = new SolverJobService({
+      db,
+      preflopRangesPath,
+      credentials: { username: "root", password: "secret" },
+      executor,
+      networkSubscriptionUrl: "https://subscription.example/token"
+    });
+    const app = createApp({ db, refreshService, preflopRangesPath, solverJobService });
+    const first = await request(app)
+      .post("/api/server-operations/network-sync")
+      .send({ serverIds: ["solver-01"] });
+    const operationId = first.body.operations[0].id as string;
+    db.updateServerOperation(operationId, {
+      status: "completed",
+      finishedAt: new Date().toISOString()
+    });
+
+    const repeated = await request(app)
+      .post("/api/server-operations/network-sync")
+      .send({ serverIds: ["solver-01"] });
+
+    expect(repeated.status).toBe(201);
+    expect(repeated.body.operations).toHaveLength(1);
+    expect(repeated.body.operations[0]).toMatchObject({ id: operationId, status: "running" });
+  });
+
+  it("retries a failed network operation in place", async () => {
     const previous = {
       ...runningServerOperation(),
       type: "network_sync" as const,
@@ -663,12 +733,15 @@ describe("solver job API", () => {
       .send({});
 
     expect(response.status).toBe(201);
-    expect(response.body.operations).toHaveLength(2);
-    expect(response.body.operations).toEqual(expect.arrayContaining([
-      expect.objectContaining({ id: previous.id, status: "failed" }),
-      expect.objectContaining({ type: "network_sync", serverId: "solver-01", status: "running" })
-    ]));
-    expect(commands.some((command) => command.includes("export GIT_TERMINAL_PROMPT=0"))).toBe(true);
+    expect(response.body.operations).toHaveLength(1);
+    expect(response.body.operations[0]).toMatchObject({
+      id: previous.id,
+      type: "network_sync",
+      serverId: "solver-01",
+      status: "running"
+    });
+    expect(commands.some((command) => command.includes("config.yaml.previous"))).toBe(true);
+    expect(commands.some((command) => command.includes("pull --rebase"))).toBe(true);
     expect(commands.some((command) => command.includes("secret-token"))).toBe(true);
   });
 

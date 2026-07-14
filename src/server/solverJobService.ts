@@ -53,6 +53,7 @@ import type {
   ServerOperationEvent,
   ServerOperationResult,
   ServerOperationsResponse,
+  ServerNetworkCheckRequest,
   ServerNetworkSyncRequest,
   ServerSyncRequest,
   ServerUploadCandidate,
@@ -568,7 +569,7 @@ export class SolverJobService {
 
   async listServerOperations(): Promise<ServerOperationsResponse> {
     return {
-      operations: this.options.db.getServerOperations(),
+      operations: this.options.db.getServerOperationInventory(),
       events: this.options.db.getServerOperationEvents(),
       capabilities: {
         networkSyncConfigured: Boolean(this.networkSubscriptionUrl)
@@ -625,8 +626,9 @@ export class SolverJobService {
       throw new Error("No online servers are available for sync.");
     }
     await forEachWithConcurrency(servers, 6, async (server) => {
-      const operation = this.createSyncOperation(server);
-      this.options.db.insertServerOperation(operation);
+      const operation = this.prepareServerOperation(server, "sync", (id) => this.createSyncOperation(server, id));
+      if (!operation) return;
+      this.options.db.upsertServerOperation(operation);
       this.recordOperationEvent(operation.id, "created", `Created sync operation for ${server.id}.`, operation.command);
       await this.startServerOperation(operation, server);
     });
@@ -643,7 +645,8 @@ export class SolverJobService {
       throw new Error("No online servers are available for network sync.");
     }
     await forEachWithConcurrency(servers, 6, async (server) => {
-      const operation = this.createNetworkSyncOperation(server);
+      const operation = this.prepareServerOperation(server, "network_sync", (id) => this.createNetworkSyncOperation(server, id));
+      if (!operation) return;
       const executionCommand = buildTrackedServerOperationCommand({
         id: operation.id,
         type: operation.type,
@@ -654,9 +657,25 @@ export class SolverJobService {
           redactSecrets: false
         })
       });
-      this.options.db.insertServerOperation(operation);
+      this.options.db.upsertServerOperation(operation);
       this.recordOperationEvent(operation.id, "created", `Created network sync operation for ${server.id}.`, operation.command);
       await this.startServerOperation(operation, server, executionCommand);
+    });
+    return this.listServerOperations();
+  }
+
+  async startNetworkCheckOperations(input: ServerNetworkCheckRequest = {}): Promise<ServerOperationsResponse> {
+    this.ensureCredentials();
+    const servers = this.operationTargetServers(input.serverIds);
+    if (servers.length === 0) {
+      throw new Error("No online servers are available for network checks.");
+    }
+    await forEachWithConcurrency(servers, 6, async (server) => {
+      const operation = this.prepareServerOperation(server, "network_check", (id) => this.createNetworkCheckOperation(server, id));
+      if (!operation) return;
+      this.options.db.upsertServerOperation(operation);
+      this.recordOperationEvent(operation.id, "created", `Created network check for ${server.id}.`, operation.command);
+      await this.startServerOperation(operation, server);
     });
     return this.listServerOperations();
   }
@@ -690,7 +709,10 @@ export class SolverJobService {
         scanFailedServerIds.add(failed.serverId);
         const server = targetServers.find((candidate) => candidate.id === failed.serverId);
         if (!server) continue;
-        const operation = this.createUploadOperation(server, [], {
+        const operation = this.prepareServerOperation(
+          server,
+          "upload",
+          (id) => this.createUploadOperation(server, [], {
           summary: {
             scanned: false,
             upload_success: 0,
@@ -699,8 +721,10 @@ export class SolverJobService {
             scan_failed: 1
           },
           details: [{ server_id: failed.serverId, error: failed.message }]
-        });
-        this.options.db.insertServerOperation(operation);
+          }, id)
+        );
+        if (!operation) continue;
+        this.options.db.upsertServerOperation(operation);
         this.options.db.updateServerOperation(operation.id, {
           status: "failed",
           finishedAt: new Date().toISOString(),
@@ -715,8 +739,9 @@ export class SolverJobService {
     await forEachWithConcurrency(targetServers, 6, async (server) => {
       if (scanFailedServerIds.has(server.id)) return;
       const operationItems = itemsByServer.get(server.id) ?? [];
-      const operation = this.createUploadOperation(server, operationItems);
-      this.options.db.insertServerOperation(operation);
+      const operation = this.prepareServerOperation(server, "upload", (id) => this.createUploadOperation(server, operationItems, null, id));
+      if (!operation) return;
+      this.options.db.upsertServerOperation(operation);
       this.recordOperationEvent(
         operation.id,
         "created",
@@ -773,10 +798,12 @@ export class SolverJobService {
     }
 
     const operation = previous.type === "sync"
-      ? this.createSyncOperation(server)
+      ? this.createSyncOperation(server, previous.id)
       : previous.type === "network_sync"
-        ? this.createNetworkSyncOperation(server)
-        : this.createUploadOperation(server, uploadItems);
+        ? this.createNetworkSyncOperation(server, previous.id)
+        : previous.type === "network_check"
+          ? this.createNetworkCheckOperation(server, previous.id)
+          : this.createUploadOperation(server, uploadItems, null, previous.id);
     const executionCommand = previous.type === "network_sync"
       ? buildTrackedServerOperationCommand({
           id: operation.id,
@@ -790,11 +817,11 @@ export class SolverJobService {
         })
       : operation.command;
 
-    this.options.db.insertServerOperation(operation);
+    this.options.db.upsertServerOperation(operation);
     this.recordOperationEvent(
       operation.id,
       "retried",
-      `Retry of ${previous.type} operation ${previous.id} for ${server.id}.`,
+      `Retrying ${previous.type} operation for ${server.id}.`,
       operation.command
     );
     await this.startServerOperation(operation, server, executionCommand);
@@ -1479,8 +1506,17 @@ export class SolverJobService {
     });
   }
 
-  private createSyncOperation(server: ServerRow): ServerOperation {
-    const id = randomUUID();
+  private prepareServerOperation(
+    server: ServerRow,
+    type: ServerOperation["type"],
+    create: (id: string) => ServerOperation
+  ): ServerOperation | null {
+    const current = this.options.db.getLatestServerOperation(server.id, type);
+    if (current && ACTIVE_SERVER_OPERATION_STATUSES.has(current.status)) return null;
+    return create(current?.id ?? randomUUID());
+  }
+
+  private createSyncOperation(server: ServerRow, id: string = randomUUID()): ServerOperation {
     const solverRoot = effectiveSolverRoot(server);
     const paths = serverOperationPaths(id);
     const body = buildServerSyncCommand({
@@ -1514,8 +1550,7 @@ export class SolverJobService {
     };
   }
 
-  private createNetworkSyncOperation(server: ServerRow): ServerOperation {
-    const id = randomUUID();
+  private createNetworkSyncOperation(server: ServerRow, id: string = randomUUID()): ServerOperation {
     const solverRoot = effectiveSolverRoot(server);
     const paths = serverOperationPaths(id);
     const body = buildServerNetworkSyncCommand({ redactSecrets: true });
@@ -1546,8 +1581,43 @@ export class SolverJobService {
     };
   }
 
-  private createUploadOperation(server: ServerRow, items: ServerUploadItem[], initialResult: ServerOperationResult | null = null): ServerOperation {
-    const id = randomUUID();
+  private createNetworkCheckOperation(server: ServerRow, id: string = randomUUID()): ServerOperation {
+    const solverRoot = effectiveSolverRoot(server);
+    const paths = serverOperationPaths(id);
+    const body = buildServerNetworkCheckCommand(this.effectiveRemoteOperationProxyUrl());
+    const command = buildTrackedServerOperationCommand({
+      id,
+      type: "network_check",
+      statusFilePath: paths.statusFilePath,
+      logFilePath: paths.logFilePath,
+      bodyCommand: body
+    });
+    const now = new Date().toISOString();
+    return {
+      id,
+      type: "network_check",
+      serverId: server.id,
+      status: "queued",
+      tmuxSession: `network-check-${safeTmuxName(server.id)}-${id.slice(0, 8)}`,
+      command,
+      items: [{ serverId: server.id, solverRoot }],
+      statusFilePath: paths.statusFilePath,
+      logFilePath: paths.logFilePath,
+      createdAt: now,
+      updatedAt: now,
+      startedAt: null,
+      finishedAt: null,
+      lastError: null,
+      result: null
+    };
+  }
+
+  private createUploadOperation(
+    server: ServerRow,
+    items: ServerUploadItem[],
+    initialResult: ServerOperationResult | null = null,
+    id: string = randomUUID()
+  ): ServerOperation {
     const solverRoot = effectiveSolverRoot(server);
     const paths = serverOperationPaths(id);
     const body = buildServerUploadCommand({
@@ -2453,13 +2523,15 @@ export function buildServerNetworkSyncCommand({
     ? "SUBSCRIPTION_URL=$SUBSCRIPTION_URL"
     : `SUBSCRIPTION_URL=${shellQuote(normalizedUrl!)}`;
   return String.raw`set +e
-cd "$HOME"
-NETWORK_STARTED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 REPO_DIR="$HOME/mihomo-release"
 REPO_URL="https://gitee.com/Tsumugii24/mihomo-release"
+cd "$HOME"
+NETWORK_STARTED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 export GIT_TERMINAL_PROMPT=0
 export GIT_ASKPASS=/bin/false
 export SSH_ASKPASS=/bin/false
+export GIT_CONFIG_NOSYSTEM=1
+export GIT_CONFIG_GLOBAL=/dev/null
 ${subscriptionAssignment}
 if [ -d "$REPO_DIR/.git" ]; then
   cd "$REPO_DIR"
@@ -2467,7 +2539,7 @@ if [ -d "$REPO_DIR/.git" ]; then
   REMOTE_OUTPUT=$(git remote set-url origin "$REPO_URL" 2>&1)
   REMOTE_CODE=$?
   if [ "$REMOTE_CODE" -eq 0 ]; then
-    GIT_OUTPUT=$(timeout 120 git -c credential.interactive=never pull --rebase 2>&1)
+    GIT_OUTPUT=$(timeout 120 git -c credential.helper= -c core.askPass=/bin/false -c credential.interactive=never pull --rebase "$REPO_URL" master 2>&1)
     GIT_CODE=$?
   else
     GIT_OUTPUT="$REMOTE_OUTPUT"
@@ -2479,23 +2551,53 @@ elif [ -e "$REPO_DIR" ]; then
   GIT_CODE=1
   INSTALL_KIND=invalid
 else
-  GIT_OUTPUT=$(timeout 120 git -c credential.interactive=never clone "$REPO_URL" "$REPO_DIR" 2>&1)
+  GIT_OUTPUT=$(timeout 120 git -c credential.helper= -c core.askPass=/bin/false -c credential.interactive=never clone --branch master --single-branch "$REPO_URL" "$REPO_DIR" 2>&1)
   GIT_CODE=$?
   INSTALL_KIND=cloned
 fi
 if [ "$GIT_CODE" -eq 0 ]; then
   cd "$REPO_DIR"
-  gzip -dc mihomo.gz > mihomo
-  EXTRACT_CODE=$?
-  chmod +x mihomo 2>/dev/null
+  if [ -f "$REPO_DIR/mihomo.gz" ]; then
+    gzip -dc "$REPO_DIR/mihomo.gz" > "$REPO_DIR/mihomo.next"
+    BINARY_CODE=$?
+    if [ "$BINARY_CODE" -eq 0 ]; then
+      mv "$REPO_DIR/mihomo.next" "$REPO_DIR/mihomo"
+      chmod +x "$REPO_DIR/mihomo"
+    else
+      rm -f "$REPO_DIR/mihomo.next"
+    fi
+  elif [ -x "$REPO_DIR/mihomo" ]; then
+    BINARY_CODE=0
+  else
+    BINARY_CODE=1
+  fi
 else
-  EXTRACT_CODE=1
+  BINARY_CODE=1
 fi
-if [ "$EXTRACT_CODE" -eq 0 ]; then
-  timeout 90 wget --timeout=30 --tries=2 -q -O config.yaml "$SUBSCRIPTION_URL"
-  DOWNLOAD_CODE=$?
+if [ "$BINARY_CODE" -eq 0 ]; then
+  if [ -f config.yaml ]; then
+    cp config.yaml config.yaml.previous
+    BACKUP_CODE=$?
+  else
+    BACKUP_CODE=0
+    rm -f config.yaml.previous
+  fi
+  if [ "$BACKUP_CODE" -eq 0 ]; then
+    timeout 90 wget --timeout=30 --tries=2 -q -O config.yaml.next "$SUBSCRIPTION_URL"
+    DOWNLOAD_CODE=$?
+    if [ "$DOWNLOAD_CODE" -eq 0 ] && [ -s config.yaml.next ]; then
+      mv config.yaml.next config.yaml
+    else
+      DOWNLOAD_CODE=1
+      rm -f config.yaml.next
+    fi
+  else
+    DOWNLOAD_CODE=1
+    rm -f config.yaml.next
+  fi
 else
   DOWNLOAD_CODE=1
+  BACKUP_CODE=1
 fi
 if [ "$DOWNLOAD_CODE" -eq 0 ]; then
   VALIDATE_OUTPUT=$(timeout 30 ./mihomo -t -d . 2>&1)
@@ -2503,6 +2605,15 @@ if [ "$DOWNLOAD_CODE" -eq 0 ]; then
 else
   VALIDATE_OUTPUT=""
   VALIDATE_CODE=1
+fi
+if [ "$VALIDATE_CODE" -ne 0 ]; then
+  if [ -f config.yaml.previous ]; then
+    mv config.yaml.previous config.yaml
+  else
+    rm -f config.yaml
+  fi
+else
+  rm -f config.yaml.previous
 fi
 if [ "$VALIDATE_CODE" -eq 0 ]; then
   tmux kill-session -t mihomo 2>/dev/null || true
@@ -2516,23 +2627,24 @@ else
   SESSION_CODE=1
 fi
 NETWORK_FINISHED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-if [ "$GIT_CODE" -eq 0 ] && [ "$EXTRACT_CODE" -eq 0 ] && [ "$DOWNLOAD_CODE" -eq 0 ] && [ "$VALIDATE_CODE" -eq 0 ] && [ "$START_CODE" -eq 0 ] && [ "$SESSION_CODE" -eq 0 ]; then
+if [ "$GIT_CODE" -eq 0 ] && [ "$BINARY_CODE" -eq 0 ] && [ "$BACKUP_CODE" -eq 0 ] && [ "$DOWNLOAD_CODE" -eq 0 ] && [ "$VALIDATE_CODE" -eq 0 ] && [ "$START_CODE" -eq 0 ] && [ "$SESSION_CODE" -eq 0 ]; then
   NETWORK_KIND=ready
 else
   NETWORK_KIND=failed
 fi
 export GIT_OUTPUT VALIDATE_OUTPUT
-python - "$OP_RESULT_FILE" "$NETWORK_KIND" "$INSTALL_KIND" "$GIT_CODE" "$EXTRACT_CODE" "$DOWNLOAD_CODE" "$VALIDATE_CODE" "$START_CODE" "$SESSION_CODE" "$NETWORK_STARTED_AT" "$NETWORK_FINISHED_AT" <<'PY'
+python - "$OP_RESULT_FILE" "$NETWORK_KIND" "$INSTALL_KIND" "$GIT_CODE" "$BINARY_CODE" "$BACKUP_CODE" "$DOWNLOAD_CODE" "$VALIDATE_CODE" "$START_CODE" "$SESSION_CODE" "$NETWORK_STARTED_AT" "$NETWORK_FINISHED_AT" <<'PY'
 import json
 import os
 import sys
 
-(path, kind, install_kind, git_code, extract_code, download_code, validate_code,
- start_code, session_code, started_at, finished_at) = sys.argv[1:12]
+(path, kind, install_kind, git_code, binary_code, backup_code, download_code,
+ validate_code, start_code, session_code, started_at, finished_at) = sys.argv[1:13]
 result = {
     "summary": {
         "network_ready": 1 if kind == "ready" else 0,
         "network_failed": 1 if kind == "failed" else 0,
+        "config_refreshed": 1 if kind == "ready" else 0,
         "cloned": 1 if install_kind == "cloned" and kind == "ready" else 0,
         "updated": 1 if install_kind == "updated" and kind == "ready" else 0,
     },
@@ -2540,7 +2652,8 @@ result = {
         "kind": kind,
         "install_kind": install_kind,
         "git_code": int(git_code),
-        "extract_code": int(extract_code),
+        "binary_code": int(binary_code),
+        "backup_code": int(backup_code),
         "download_code": int(download_code),
         "validate_code": int(validate_code),
         "start_code": int(start_code),
@@ -2557,6 +2670,48 @@ PY
 printf '%s\n' "$GIT_OUTPUT"
 printf '%s\n' "$VALIDATE_OUTPUT"
 if [ "$NETWORK_KIND" != "ready" ]; then exit 1; fi`;
+}
+
+export function buildServerNetworkCheckCommand(proxyUrl = DEFAULT_REMOTE_PROXY_URL): string {
+  return String.raw`set +e
+CHECK_STARTED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+PROXY_URL=${shellQuote(proxyUrl)}
+CHECK_OUTPUT=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' --connect-timeout 10 --max-time 25 --proxy "$PROXY_URL" https://huggingface.co/ 2>&1)
+CURL_CODE=$?
+HTTP_CODE=$(printf '%s' "$CHECK_OUTPUT" | tail -n 1)
+if [ "$CURL_CODE" -eq 0 ] && [ "$HTTP_CODE" != "000" ]; then
+  CHECK_KIND=connected
+else
+  CHECK_KIND=unreachable
+fi
+CHECK_FINISHED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+export CHECK_OUTPUT
+python - "$OP_RESULT_FILE" "$CHECK_KIND" "$CURL_CODE" "$HTTP_CODE" "$PROXY_URL" "$CHECK_STARTED_AT" "$CHECK_FINISHED_AT" <<'PY'
+import json
+import os
+import sys
+
+path, kind, curl_code, http_code, proxy_url, started_at, finished_at = sys.argv[1:8]
+result = {
+    "summary": {
+        "connected": 1 if kind == "connected" else 0,
+        "unreachable": 1 if kind == "unreachable" else 0,
+    },
+    "details": [{
+        "kind": kind,
+        "curl_code": int(curl_code),
+        "http_code": http_code,
+        "proxy_url": proxy_url,
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "output": os.environ.get("CHECK_OUTPUT", "")[-800:],
+    }],
+}
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(result, handle, ensure_ascii=True)
+PY
+printf '%s\n' "$CHECK_OUTPUT"
+if [ "$CHECK_KIND" != "connected" ]; then exit 1; fi`;
 }
 
 export function buildServerUploadCommand({
@@ -2677,6 +2832,7 @@ LOG_FILE=${shellQuoteRemotePath(logFilePath)}
 OP_RESULT_FILE="${"$"}{STATUS_FILE}.result"
 OP_UPLOAD_PLAN_FILE="${"$"}{STATUS_FILE}.upload-plan.json"
 mkdir -p "$(dirname "$STATUS_FILE")" "$(dirname "$LOG_FILE")"
+rm -f "$OP_RESULT_FILE" "$OP_UPLOAD_PLAN_FILE"
 OP_STARTED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 printf '{"id":"%s","type":"%s","status":"running","started_at":"%s","updated_at":"%s","exit_code":null,"log_file":"%s","result":null}\n' "$OP_ID" "$OP_TYPE" "$OP_STARTED_AT" "$OP_STARTED_AT" "$LOG_FILE" > "$STATUS_FILE"
 set +e

@@ -881,6 +881,48 @@ export class MonitorDatabase {
     this.persist();
   }
 
+  upsertServerOperation(operation: ServerOperation): void {
+    this.database.run(
+      `INSERT INTO server_operations (
+        id, operation_type, server_id, status, tmux_session, command_text, items_json,
+        status_file_path, log_file_path, created_at, updated_at, started_at, finished_at, last_error, result_json
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        operation_type = excluded.operation_type,
+        server_id = excluded.server_id,
+        status = excluded.status,
+        tmux_session = excluded.tmux_session,
+        command_text = excluded.command_text,
+        items_json = excluded.items_json,
+        status_file_path = excluded.status_file_path,
+        log_file_path = excluded.log_file_path,
+        created_at = excluded.created_at,
+        updated_at = excluded.updated_at,
+        started_at = excluded.started_at,
+        finished_at = excluded.finished_at,
+        last_error = excluded.last_error,
+        result_json = excluded.result_json`,
+      [
+        operation.id,
+        operation.type,
+        operation.serverId,
+        operation.status,
+        operation.tmuxSession,
+        operation.command,
+        JSON.stringify(operation.items),
+        operation.statusFilePath,
+        operation.logFilePath,
+        operation.createdAt,
+        operation.updatedAt,
+        operation.startedAt,
+        operation.finishedAt,
+        operation.lastError,
+        operation.result ? JSON.stringify(operation.result) : null
+      ]
+    );
+    this.persist();
+  }
+
   updateServerOperation(
     id: string,
     patch: Partial<Pick<ServerOperation, "status" | "startedAt" | "finishedAt" | "lastError" | "updatedAt" | "result">>
@@ -927,6 +969,36 @@ export class MonitorDatabase {
         [id],
         mapServerOperation
       )[0] ?? null
+    );
+  }
+
+  getLatestServerOperation(serverId: string, type: ServerOperationType): ServerOperation | null {
+    return (
+      this.query<ServerOperation>(
+        `SELECT * FROM server_operations
+         WHERE server_id = ? AND operation_type = ?
+         ORDER BY updated_at DESC, created_at DESC
+         LIMIT 1`,
+        [serverId, type],
+        mapServerOperation
+      )[0] ?? null
+    );
+  }
+
+  getServerOperationInventory(): ServerOperation[] {
+    return this.query<ServerOperation>(
+      `SELECT * FROM (
+         SELECT server_operations.*,
+                ROW_NUMBER() OVER (
+                  PARTITION BY server_id, operation_type
+                  ORDER BY updated_at DESC, created_at DESC
+                ) AS operation_rank
+         FROM server_operations
+       )
+       WHERE operation_rank = 1
+       ORDER BY server_id, operation_type`,
+      [],
+      mapServerOperation
     );
   }
 
@@ -1668,6 +1740,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function normalizeServerOperationType(value: SqlValue): ServerOperationType {
   if (value === "network_sync") return "network_sync";
+  if (value === "network_check") return "network_check";
   return value === "upload" ? "upload" : "sync";
 }
 

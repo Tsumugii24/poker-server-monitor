@@ -1,7 +1,7 @@
 import type { ServerRow } from "./types";
 import type { SolverUploadFormat } from "./solverJobs";
 
-export const SERVER_OPERATION_TYPES = ["sync", "network_sync", "upload"] as const;
+export const SERVER_OPERATION_TYPES = ["sync", "network_sync", "network_check", "upload"] as const;
 export type ServerOperationType = (typeof SERVER_OPERATION_TYPES)[number];
 
 export const SERVER_OPERATION_STATUSES = [
@@ -95,6 +95,10 @@ export type ServerSyncRequest = {
 };
 
 export type ServerNetworkSyncRequest = {
+  serverIds?: string[];
+};
+
+export type ServerNetworkCheckRequest = {
   serverIds?: string[];
 };
 
