@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import type { ConnectionStatus, HealthLevel, MetricSnapshot, ServerConfig } from "../../src/shared/types";
 import { MonitorDatabase } from "../../src/server/db";
 import { RefreshService } from "../../src/server/refreshService";
+import type { AlertService } from "../../src/server/alertService";
 
 const servers: ServerConfig[] = [
   { id: "prod-01", name: "Production 01", host: "10.0.0.1", port: 22, enabled: true, note: "TBD" },
@@ -265,5 +266,58 @@ describe("RefreshService", () => {
     if (!second.accepted) {
       expect(second.code).toBe("refresh_in_progress");
     }
+  });
+
+  it("publishes completed server snapshots before the slowest server finishes", async () => {
+    let release!: () => void;
+    const blocker = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const service = new RefreshService({
+      db,
+      servers,
+      intervalMs: 3_600_000,
+      collect: async (server) => {
+        if (server.id === "prod-02") await blocker;
+        return metric(server.id, "online");
+      }
+    });
+
+    const refresh = service.refreshAll("manual");
+    await vi.waitFor(() => expect(
+      db.getServerRows().find((server) => server.id === "prod-01")?.latest?.connectionStatus
+    ).toBe("online"));
+
+    expect(db.getServerRows().find((server) => server.id === "prod-02")?.latest).toBeNull();
+    expect(service.getState()).toMatchObject({
+      active: true,
+      current: { totalServers: 2, completedServers: 1 }
+    });
+
+    release();
+    await refresh;
+    expect(service.getState()).toMatchObject({ active: false, current: null });
+  });
+
+  it("does not keep refresh active while alert delivery is still pending", async () => {
+    let releaseAlert!: () => void;
+    const alertPending = new Promise<void>((resolve) => {
+      releaseAlert = resolve;
+    });
+    const service = new RefreshService({
+      db,
+      servers,
+      intervalMs: 3_600_000,
+      collect: async (server) => metric(server.id, "online"),
+      alerts: {
+        handleRefresh: async () => alertPending
+      } as unknown as AlertService
+    });
+
+    await service.refreshAll("manual");
+
+    expect(service.getState().active).toBe(false);
+    expect(db.getLastRefreshRun()).toMatchObject({ status: "completed" });
+    releaseAlert();
   });
 });

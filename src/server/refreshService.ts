@@ -34,6 +34,7 @@ export class RefreshService {
   private nextRefreshAtMs: number | null = null;
   private scheduler: NodeJS.Timeout | null = null;
   private intervalMs: number;
+  private current: RefreshState["current"] = null;
   private readonly collect: (server: ServerConfig) => Promise<MetricSnapshot>;
   private readonly collectPipeline: (server: ServerConfig) => Promise<PipelineStatusSnapshot>;
 
@@ -84,25 +85,33 @@ export class RefreshService {
     try {
       const enabledServers = this.options.servers.filter((server) => server.enabled);
       const collectedAt = startedAt;
+      this.current = {
+        trigger,
+        startedAt,
+        totalServers: enabledServers.length,
+        completedServers: 0
+      };
       const collected = await Promise.all(
         enabledServers.map(async (server) => {
           const [metrics, pipeline] = await Promise.all([
             this.collect(server),
             this.collectPipeline(server)
           ]);
-          return {
+          const item = {
             metrics: { ...metrics, collectedAt },
             pipeline: { ...pipeline, collectedAt }
           };
+          this.options.db.insertSnapshot(item.metrics);
+          this.options.db.insertPipelineSnapshot(item.pipeline);
+          if (item.pipeline.datasetName) {
+            this.options.db.updateServerLastDatasetName(item.metrics.serverId, item.pipeline.datasetName);
+          }
+          if (this.current?.startedAt === startedAt) {
+            this.current.completedServers += 1;
+          }
+          return item;
         })
       );
-      for (const item of collected) {
-        this.options.db.insertSnapshot(item.metrics);
-        this.options.db.insertPipelineSnapshot(item.pipeline);
-        if (item.pipeline.datasetName) {
-          this.options.db.updateServerLastDatasetName(item.metrics.serverId, item.pipeline.datasetName);
-        }
-      }
       this.syncDiscoveredServerNames(collected);
       this.options.db.pruneSnapshots(24);
 
@@ -121,14 +130,16 @@ export class RefreshService {
         ).length
       };
       this.options.db.insertRefreshRun(run);
-      await this.options.alerts?.handleRefresh({
-        servers: enabledServers,
-        snapshots,
-        trigger,
-        startedAt
-      }).catch((error: unknown) => {
-        console.error(classifyWeChatSendError(error).logMessage);
-      });
+      if (this.options.alerts) {
+        void this.options.alerts.handleRefresh({
+          servers: enabledServers,
+          snapshots,
+          trigger,
+          startedAt
+        }).catch((error: unknown) => {
+          console.error(classifyWeChatSendError(error).logMessage);
+        });
+      }
 
       return {
         accepted: true,
@@ -136,6 +147,7 @@ export class RefreshService {
       };
     } finally {
       this.active = false;
+      this.current = null;
     }
   }
 
@@ -143,7 +155,8 @@ export class RefreshService {
     return {
       active: this.active,
       nextRefreshAt: this.nextRefreshAt,
-      lastRun: this.options.db.getLastRefreshRun()
+      lastRun: this.options.db.getLastRefreshRun(),
+      current: this.current ? { ...this.current } : null
     };
   }
 

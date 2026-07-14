@@ -596,7 +596,7 @@ export class SolverJobService {
     const servers = this.operationTargetServers(serverIds);
     const candidates: ServerUploadCandidate[] = [];
     const failedServers: Array<{ serverId: string; message: string }> = [];
-    for (const server of servers) {
+    await forEachWithConcurrency(servers, 6, async (server) => {
       try {
         const output = await this.executor.run(
           server,
@@ -610,7 +610,7 @@ export class SolverJobService {
           message: error instanceof Error ? error.message : String(error)
         });
       }
-    }
+    });
     return {
       scannedServers: servers,
       failedServers,
@@ -624,12 +624,12 @@ export class SolverJobService {
     if (servers.length === 0) {
       throw new Error("No online servers are available for sync.");
     }
-    for (const server of servers) {
+    await forEachWithConcurrency(servers, 6, async (server) => {
       const operation = this.createSyncOperation(server);
       this.options.db.insertServerOperation(operation);
       this.recordOperationEvent(operation.id, "created", `Created sync operation for ${server.id}.`, operation.command);
       await this.startServerOperation(operation, server);
-    }
+    });
     return this.listServerOperations();
   }
 
@@ -642,7 +642,7 @@ export class SolverJobService {
     if (servers.length === 0) {
       throw new Error("No online servers are available for network sync.");
     }
-    for (const server of servers) {
+    await forEachWithConcurrency(servers, 6, async (server) => {
       const operation = this.createNetworkSyncOperation(server);
       const executionCommand = buildTrackedServerOperationCommand({
         id: operation.id,
@@ -657,7 +657,7 @@ export class SolverJobService {
       this.options.db.insertServerOperation(operation);
       this.recordOperationEvent(operation.id, "created", `Created network sync operation for ${server.id}.`, operation.command);
       await this.startServerOperation(operation, server, executionCommand);
-    }
+    });
     return this.listServerOperations();
   }
 
@@ -712,8 +712,8 @@ export class SolverJobService {
     }
 
     const itemsByServer = groupUploadItemsByServer(items, targetServers);
-    for (const server of targetServers) {
-      if (scanFailedServerIds.has(server.id)) continue;
+    await forEachWithConcurrency(targetServers, 6, async (server) => {
+      if (scanFailedServerIds.has(server.id)) return;
       const operationItems = itemsByServer.get(server.id) ?? [];
       const operation = this.createUploadOperation(server, operationItems);
       this.options.db.insertServerOperation(operation);
@@ -726,7 +726,7 @@ export class SolverJobService {
         operation.command
       );
       await this.startServerOperation(operation, server);
-    }
+    });
     return this.listServerOperations();
   }
 

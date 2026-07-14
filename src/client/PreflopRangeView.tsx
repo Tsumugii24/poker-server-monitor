@@ -243,6 +243,10 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
   const [confirmUnstudied, setConfirmUnstudied] = useState(false);
   const [jobBusy, setJobBusy] = useState<string | null>(null);
   const [jobError, setJobError] = useState<string | null>(null);
+  const [jobContextLoaded, setJobContextLoaded] = useState(false);
+  const [jobRefreshActive, setJobRefreshActive] = useState(false);
+  const [jobRefreshState, setJobRefreshState] = useState<RefreshState | null>(null);
+  const jobRefreshGeneration = useRef(0);
   const [scenarioLibrary, setScenarioLibrary] = useState<SolverScenarioLibraryItem[]>(DEFAULT_SOLVER_SCENARIO_LIBRARY);
   const [scenarioLibraryUpdatedAt, setScenarioLibraryUpdatedAt] = useState<string | null>(null);
   const [selectedScenarioLibraryId, setSelectedScenarioLibraryId] = useState<string>(DEFAULT_SOLVER_SCENARIO_LIBRARY[0]?.id ?? "");
@@ -312,67 +316,88 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
     void loadTree();
   }, [loadTree]);
 
+  const applyOverviewResponse = useCallback((overviewResponse: OverviewResponse) => {
+    setServers(overviewResponse.servers);
+    setJobContextLoaded(true);
+    const enabledParallelServerCount = overviewResponse.servers.filter((server) => server.enabled).length;
+    if (!parallelChunkCountTouched) {
+      setParallelChunkCount(Math.max(1, enabledParallelServerCount));
+    }
+    setSelectedParallelServerIds((current) => {
+      const enabledIds = overviewResponse.servers
+        .slice()
+        .sort(compareServersByNaturalId)
+        .filter((server) => server.enabled)
+        .map((server) => server.id);
+      const retained = current.filter((id) => enabledIds.includes(id));
+      return retained.length > 0 ? retained : enabledIds;
+    });
+    setSelectedServerId((current) =>
+      current && overviewResponse.servers.some((server) => server.id === current)
+        ? current
+        : defaultSolverServerId(overviewResponse.servers)
+    );
+  }, [parallelChunkCountTouched]);
+
   const loadJobContext = useCallback(async (options: { reconcileParallel?: boolean } = {}) => {
     setJobError(null);
     try {
       const parallelJobsPath = options.reconcileParallel ? "/api/parallel-jobs?reconcile=1" : "/api/parallel-jobs";
-      const [overviewResponse, jobsResponse, parallelResponse, operationsResponse] = await Promise.all([
-        fetchPreflopJson<OverviewResponse>("/api/overview"),
+      const overviewResponse = await fetchPreflopJson<OverviewResponse>("/api/overview");
+      applyOverviewResponse(overviewResponse);
+      const jobsAndParallel = Promise.all([
         fetchPreflopJson<SolverJobsResponse>("/api/jobs"),
-        fetchPreflopJson<ParallelSolverJobsResponse>(parallelJobsPath),
-        fetchPreflopJson<ServerOperationsResponse>("/api/server-operations")
-      ]);
-      setServers(overviewResponse.servers);
+        fetchPreflopJson<ParallelSolverJobsResponse>(parallelJobsPath)
+      ] as const);
+      const operationsResponse = await fetchPreflopJson<ServerOperationsResponse>("/api/server-operations");
+      setServerOperations(operationsResponse.operations);
+      setNetworkSyncConfigured(Boolean(operationsResponse.capabilities?.networkSyncConfigured));
+      const [jobsResponse, parallelResponse] = await jobsAndParallel;
       setJobs(jobsResponse.jobs);
       setJobEvents(jobsResponse.events);
       setParallelRuns(parallelResponse.runs);
       setFailurePool(parallelResponse.failurePool);
-      setServerOperations(operationsResponse.operations);
-      setNetworkSyncConfigured(Boolean(operationsResponse.capabilities?.networkSyncConfigured));
-      const enabledParallelServerCount = overviewResponse.servers.filter((server) => server.enabled).length;
-      if (!parallelChunkCountTouched) {
-        setParallelChunkCount(Math.max(1, enabledParallelServerCount));
-      }
-      setSelectedParallelServerIds((current) => {
-        const enabledIds = overviewResponse.servers
-          .slice()
-          .sort(compareServersByNaturalId)
-          .filter((server) => server.enabled)
-          .map((server) => server.id);
-        const retained = current.filter((id) => enabledIds.includes(id));
-        return retained.length > 0 ? retained : enabledIds;
-      });
-      setSelectedServerId((current) =>
-        current && overviewResponse.servers.some((server) => server.id === current)
-          ? current
-          : defaultSolverServerId(overviewResponse.servers)
-      );
       return parallelResponse;
     } catch (caught) {
       setJobError(caught instanceof Error ? caught.message : String(caught));
       return null;
     }
-  }, [parallelChunkCountTouched]);
+  }, [applyOverviewResponse]);
 
-  const refreshJobContext = useCallback(async () => {
-    setJobBusy("refresh");
+  const refreshJobContext = useCallback(() => {
+    if (jobRefreshActive) return;
+    const generation = jobRefreshGeneration.current + 1;
+    jobRefreshGeneration.current = generation;
+    setJobRefreshActive(true);
     setJobError(null);
-    try {
-      await requestMonitorRefresh();
-      await waitForMonitorRefresh();
-      let parallelResponse = await loadJobContext({ reconcileParallel: true });
-      const deadline = Date.now() + 90_000;
-      while (parallelResponse?.reconciling && Date.now() < deadline) {
-        await waitFor(1_500);
-        parallelResponse = await loadJobContext();
+    void (async () => {
+      try {
+        await requestMonitorRefresh();
+        let parallelResponse = await loadJobContext({ reconcileParallel: true });
+        const deadline = Date.now() + 10 * 60_000;
+        while (Date.now() < deadline && jobRefreshGeneration.current === generation) {
+          const refreshState = await fetchPreflopJson<RefreshState>("/api/refresh/current");
+          setJobRefreshState(refreshState);
+          if (!refreshState.active) {
+            setJobRefreshActive(false);
+            setJobRefreshState(null);
+          }
+          if (!refreshState.active && !parallelResponse?.reconciling) break;
+          await waitFor(2_000);
+          parallelResponse = await loadJobContext();
+        }
+        await loadJobContext();
+      } catch (caught) {
+        setJobError(caught instanceof Error ? caught.message : String(caught));
+        await loadJobContext();
+      } finally {
+        if (jobRefreshGeneration.current === generation) {
+          setJobRefreshActive(false);
+          setJobRefreshState(null);
+        }
       }
-    } catch (caught) {
-      setJobError(caught instanceof Error ? caught.message : String(caught));
-      await loadJobContext({ reconcileParallel: true });
-    } finally {
-      setJobBusy(null);
-    }
-  }, [loadJobContext]);
+    })();
+  }, [jobRefreshActive, loadJobContext]);
 
   useEffect(() => {
     void loadJobContext();
@@ -2292,6 +2317,9 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
           scenarioCopied={scenarioCopied}
           confirmUnstudied={confirmUnstudied}
           busy={jobBusy}
+          inventoryLoaded={jobContextLoaded}
+          refreshActive={jobRefreshActive}
+          refreshState={jobRefreshState}
           error={jobError}
           onRefresh={() => void refreshJobContext()}
           onServerChange={(serverId) => {
@@ -2851,6 +2879,9 @@ function SolverJobPanel({
   scenarioCopied,
   confirmUnstudied,
   busy,
+  inventoryLoaded,
+  refreshActive,
+  refreshState,
   error,
   onRefresh,
   onServerChange,
@@ -2927,6 +2958,9 @@ function SolverJobPanel({
   scenarioCopied: boolean;
   confirmUnstudied: boolean;
   busy: string | null;
+  inventoryLoaded: boolean;
+  refreshActive: boolean;
+  refreshState: RefreshState | null;
   error: string | null;
   onRefresh: () => void;
   onServerChange: (serverId: string) => void;
@@ -2996,9 +3030,9 @@ function SolverJobPanel({
           <ClipboardList size={16} />
           <h3>Solver Jobs</h3>
         </div>
-        <button className="icon-button compact" onClick={onRefresh} disabled={busy != null}>
+        <button className="icon-button compact" onClick={onRefresh} disabled={refreshActive}>
           <RefreshCw size={15} />
-          {busy === "refresh" ? "Refreshing..." : "Refresh Status"}
+          {refreshActive ? formatRefreshStatusLabel(refreshState) : "Refresh Status"}
         </button>
       </div>
 
@@ -3344,6 +3378,7 @@ function SolverJobPanel({
           networkSyncConfigured={networkSyncConfigured}
           uploadCandidates={uploadCandidates}
           busy={busy}
+          inventoryLoaded={inventoryLoaded}
           onScanUploads={onOperationScanUploads}
           onSync={onOperationSync}
           onNetworkSync={onOperationNetworkSync}
@@ -4217,6 +4252,7 @@ function ServerOperationsPanel({
   networkSyncConfigured,
   uploadCandidates,
   busy,
+  inventoryLoaded,
   onScanUploads,
   onSync,
   onNetworkSync,
@@ -4231,6 +4267,7 @@ function ServerOperationsPanel({
   networkSyncConfigured: boolean;
   uploadCandidates: ServerUploadCandidate[];
   busy: string | null;
+  inventoryLoaded: boolean;
   onScanUploads: () => void;
   onSync: () => void;
   onNetworkSync: () => void;
@@ -4274,7 +4311,7 @@ function ServerOperationsPanel({
           </select>
         </label>
       </section>
-      {bestServerId && !bestServer ? (
+      {inventoryLoaded && bestServerId && !bestServer ? (
         <div className="notice warning compact-notice">Best Server ID is not in the current server inventory.</div>
       ) : null}
 
@@ -5370,14 +5407,10 @@ async function requestMonitorRefresh(): Promise<void> {
   throw new Error(`Request failed: ${response.status}`);
 }
 
-async function waitForMonitorRefresh(timeoutMs = 90_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const state = await fetchPreflopJson<RefreshState>("/api/refresh/current");
-    if (!state.active) return;
-    await waitFor(750);
-  }
-  throw new Error("Server status refresh is still running. Try again after the current SSH checks finish.");
+function formatRefreshStatusLabel(state: RefreshState | null): string {
+  const current = state?.current;
+  if (!current) return "Reconciling...";
+  return `Refreshing ${current.completedServers}/${current.totalServers}`;
 }
 
 function normalizeRangeTreeItems(items: PreflopRangeTreeItem[]): PreflopRangeTreeItem[] {

@@ -251,6 +251,12 @@ export type RefreshState = {
   active: boolean;
   nextRefreshAt: string | null;
   lastRun: RefreshRun | null;
+  current: {
+    trigger: RefreshTrigger;
+    startedAt: string;
+    totalServers: number;
+    completedServers: number;
+  } | null;
 };
 
 export type OverviewSummary = {
