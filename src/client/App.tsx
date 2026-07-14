@@ -29,6 +29,7 @@ import {
 import { type FormEvent, type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
 import { PreflopRangeView } from "./PreflopRangeView";
 import { SettingsWizard } from "./SettingsWizard";
+import { displayDatasetName } from "./datasetDisplay";
 import type {
   AlertSettings,
   AlertStatus,
@@ -1874,7 +1875,7 @@ function TaskPanel({ task }: { task: PipelineStatusSnapshot | null }) {
         </div>
         <div>
           <span className="settings-status-label">Dataset</span>
-          <strong>{task.datasetName ?? task.repoId ?? "—"}</strong>
+          <strong>{displayDatasetName(task.datasetName ?? task.repoId, "—")}</strong>
         </div>
         <div>
           <span className="settings-status-label">Batch</span>
@@ -2194,7 +2195,8 @@ function resolveServerDatasetName(server: ServerRow): string | null {
 }
 
 function formatServerDatasetName(server: ServerRow): string {
-  return resolveServerDatasetName(server) ?? server.name;
+  const datasetName = resolveServerDatasetName(server);
+  return datasetName ? displayDatasetName(datasetName) : server.name;
 }
 
 function formatTaskStatusLabel(status: PipelineDisplayStatus): string {

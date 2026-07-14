@@ -84,6 +84,7 @@ import type {
   PipelineStatusSnapshot,
   ServerRow
 } from "../shared/types";
+import { displayDatasetName } from "./datasetDisplay";
 
 type SelectedRangePath =
   | { type: "folder"; path: string; name: string }
@@ -2283,11 +2284,11 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
               <dl>
                 <div>
                   <dt>Dataset</dt>
-                  <dd>{datasetRepoDialog.datasetName}</dd>
+                  <dd>{displayDatasetName(datasetRepoDialog.datasetName)}</dd>
                 </div>
                 <div>
                   <dt>Repo</dt>
-                  <dd>{datasetRepoDialog.repoId}</dd>
+                  <dd>{displayDatasetName(datasetRepoDialog.repoId)}</dd>
                 </div>
                 <div>
                   <dt>Scenario</dt>
@@ -2295,7 +2296,11 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
                 </div>
                 <div>
                   <dt>URL</dt>
-                  <dd>{datasetRepoDialog.url}</dd>
+                  <dd>
+                    <a href={datasetRepoDialog.url} target="_blank" rel="noreferrer">
+                      {displayDatasetName(datasetRepoDialog.repoId)}
+                    </a>
+                  </dd>
                 </div>
               </dl>
               <label className="solver-dataset-confirm">
@@ -2469,7 +2474,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
             <div>
               <h3 id="parallel-queue-delete-confirm-title">Delete queued parallel run?</h3>
               <p>
-                This will remove <strong>{pendingParallelQueueDeleteAction.datasetName}</strong> from the parallel queue
+                This will remove <strong>{displayDatasetName(pendingParallelQueueDeleteAction.datasetName)}</strong> from the parallel queue
                 with <strong>{pendingParallelQueueDeleteAction.totalBoards}</strong> board
                 {pendingParallelQueueDeleteAction.totalBoards === 1 ? "" : "s"}. Active or locked runs cannot be deleted here.
               </p>
@@ -3072,7 +3077,7 @@ function SolverJobPanel({
               <dl>
                 <div>
                   <dt>Repo</dt>
-                  <dd>{preview.repoId}</dd>
+                  <dd>{displayDatasetName(preview.repoId)}</dd>
                 </div>
                 <div>
                   <dt>Scenario</dt>
@@ -3091,7 +3096,7 @@ function SolverJobPanel({
                 </div>
                 <div>
                   <dt>Dataset</dt>
-                  <dd>{preview.datasetName}</dd>
+                  <dd>{displayDatasetName(preview.datasetName)}</dd>
                 </div>
                 <div>
                   <dt>Repo Status</dt>
@@ -3446,7 +3451,7 @@ function ParallelSolverJobPanel({
   const activeFailurePoolRangePath = activeInspectionRun?.rangePath ?? selectedRangePath;
   const activeFailurePoolDatasetName = activeInspectionRun?.datasetName ?? preview?.datasetName ?? datasetName.trim();
   const inspectionContextLabel = activeInspectionRun
-    ? `${activeInspectionRun.datasetName} · ${formatParallelRunStatus(activeInspectionRun.status)}${historyRuns.some((run) => run.id === activeInspectionRun.id) ? " · history" : ""}`
+    ? `${displayDatasetName(activeInspectionRun.datasetName)} · ${formatParallelRunStatus(activeInspectionRun.status)}${historyRuns.some((run) => run.id === activeInspectionRun.id) ? " · history" : ""}`
     : selectedRangeName || "Current selection";
   const visibleFailurePool = failurePool.filter((entry) =>
     entry.rangePath === activeFailurePoolRangePath &&
@@ -3647,7 +3652,7 @@ function ParallelSolverJobPanel({
         {preview ? (
           <div className="parallel-preview-panel">
             <div className="parallel-preview-summary">
-              <div><span>Repo</span><strong>{preview.repoId}</strong></div>
+              <div><span>Repo</span><strong>{displayDatasetName(preview.repoId)}</strong></div>
               <div><span>Missing</span><strong>{preview.missingIndices.length}</strong></div>
               <div><span>Chunks</span><strong>{preview.allocations.filter((item) => item.indices.length > 0).length}</strong></div>
               <div><span>Repo Status</span><strong>{preview.repoExists ? "Exists" : "Missing"}</strong></div>
@@ -3707,7 +3712,7 @@ function ParallelSolverJobPanel({
             <div className="failure-pool-dataset-list">
               {failurePoolDatasets.map((item) => (
                 <span key={item.datasetName} className="failure-pool-dataset-chip">
-                  <strong>{item.datasetName}</strong>
+                  <strong>{displayDatasetName(item.datasetName)}</strong>
                   <em>{item.count}</em>
                 </span>
               ))}
@@ -3719,7 +3724,7 @@ function ParallelSolverJobPanel({
             <div className="failure-pool-list">
               {visibleFailurePool.slice(0, 24).map((entry) => (
                 <span key={entry.id} className={`failure-pool-chip ${entry.status} ${entry.failureReason}`}>
-                  <em>{entry.datasetName}</em>
+                  <em>{displayDatasetName(entry.datasetName)}</em>
                   {entry.boardIndex}. {entry.boardName}
                   <small>{failureReasonLabel(entry.failureReason)}</small>
                 </span>
@@ -3771,7 +3776,7 @@ function ParallelSolverJobPanel({
             >
               <div className="parallel-run-head">
                 <div>
-                  <strong>{run.datasetName}</strong>
+                  <strong>{displayDatasetName(run.datasetName)}</strong>
                   <span>
                     {run.sourceType === "failure_pool" ? "Failure pool retry" : "Parallel run"} · {formatShortDateTime(run.createdAt)} · {dispatch.summary}
                   </span>
@@ -3901,7 +3906,7 @@ function ParallelQueueBoard({
                 <div className="parallel-queue-marker" aria-hidden="true" />
                 <div className="parallel-queue-copy">
                   <div className="parallel-queue-heading">
-                    <strong title={run.datasetName}>{run.datasetName}</strong>
+                    <strong title={displayDatasetName(run.datasetName)}>{displayDatasetName(run.datasetName)}</strong>
                     <em className={`solver-job-status ${dispatch.className || run.status}`}>{dispatch.label}</em>
                   </div>
                   <p className="parallel-queue-meta">
@@ -3991,7 +3996,7 @@ function ParallelHistoryBoard({
                 <div className="parallel-queue-marker" aria-hidden="true" />
                 <div className="parallel-queue-copy">
                   <div className="parallel-queue-heading">
-                    <strong title={run.datasetName}>{run.datasetName}</strong>
+                    <strong title={displayDatasetName(run.datasetName)}>{displayDatasetName(run.datasetName)}</strong>
                     <em className={`solver-job-status ${run.status}`}>{formatParallelRunStatus(run.status)}</em>
                     <span className="parallel-history-metric">{formatRatio(run.report.successRate)}</span>
                   </div>
@@ -4133,7 +4138,7 @@ function ServerOperationsPanel({
                   <div className="server-ops-upload-check">
                     <strong>{candidate.serverId}</strong>
                     <span>
-                      <strong>{candidate.datasetName}</strong>
+                      <strong>{displayDatasetName(candidate.datasetName)}</strong>
                       <em>{candidate.jobId}</em>
                     </span>
                   </div>
@@ -4142,7 +4147,7 @@ function ServerOperationsPanel({
                     <span>{candidate.jsonCount} json</span>
                     <code>{candidate.resultsDir}</code>
                   </div>
-                  <code className="server-ops-repo-code">{candidate.repoId}</code>
+                  <code className="server-ops-repo-code">{displayDatasetName(candidate.repoId)}</code>
                   <span className="server-ops-format-pill">{candidate.fileFormat}</span>
                 </article>
               );
@@ -4275,7 +4280,7 @@ function SolverServerSnapshot({ server }: { server: ServerRow | null }) {
 
       <div className="solver-server-metrics">
         <SolverServerMetric label="Process" value={task ? formatProcessAlive(task.processAlive) : "-"} />
-        <SolverServerMetric label="Dataset" value={task?.datasetName ?? task?.repoId ?? server.lastDatasetName ?? "-"} />
+        <SolverServerMetric label="Dataset" value={displayDatasetName(task?.datasetName ?? task?.repoId ?? server.lastDatasetName)} />
         <SolverServerMetric label="Batch" value={task ? formatTaskBatch(task) : "-"} />
         <SolverServerMetric label="CPU" value={formatMetricPercent(server.latest?.cpuUsedPercent)} />
         <SolverServerMetric label="Memory" value={formatMetricPercent(server.latest?.memoryUsedPercent)} />
@@ -4366,7 +4371,7 @@ function SolverJobCard({
     <article className={`solver-job-card ${job.status}`}>
       <div className="solver-job-card-head">
         <div>
-          <strong>{job.datasetName}</strong>
+          <strong>{displayDatasetName(job.datasetName)}</strong>
           <span>{job.scenario} · {displayRangeName(job.rangeName)}</span>
         </div>
         <em className={`solver-job-status ${job.status}`}>{formatJobStatus(job.status)}</em>
@@ -4374,7 +4379,7 @@ function SolverJobCard({
       <dl>
         <div>
           <dt>{showRecentLabels ? "Dataset Repo" : "Repo"}</dt>
-          <dd>{job.repoId}</dd>
+          <dd>{displayDatasetName(job.repoId)}</dd>
         </div>
         <div>
           <dt>{showRecentLabels ? "Created Time" : "Created"}</dt>
