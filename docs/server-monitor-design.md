@@ -219,6 +219,7 @@ The current implementation also includes solver job orchestration for the shared
 - `Scan All Results` and `Scan + Upload All` are manually initiated. The latter performs a fresh scan server-side after confirmation before starting upload tmux sessions. Each server serially uploads every retained result folder assigned to that server through `python upload.py --results-dir <dir> --repo-id <repo> --file-format <format>`.
 - Upload uses `HF_TOKEN` only on the backend/remote command path. Frontend command previews redact it as `export HF_TOKEN=$HF_TOKEN`.
 - Operation records persist command, tmux session, log path, status, and structured result JSON. The UI summarizes sync latest/synced/failed counts and upload success/failed/no-file/file counts.
+- Reading the operation report is database-only and never blocks page rendering on SSH. Background/manual reconciliation probes both the remote status file and tmux session; stale active records are marked failed after a server restart, and overlapping reconciliation ticks share one in-flight run.
 
 ## API Shape
 

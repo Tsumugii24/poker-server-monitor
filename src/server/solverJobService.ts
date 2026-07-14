@@ -113,6 +113,7 @@ export class SolverJobService {
   private readonly networkSubscriptionUrl: string | null;
   private readonly getHfProxySettings: () => Pick<AlertSettings, "hfProxyEnabled" | "solverHfProxyEnabled">;
   private readonly getScenarioLibrary: () => SolverScenarioLibraryItem[];
+  private queueReconciliationTask: Promise<void> | null = null;
 
   constructor(private readonly options: SolverJobServiceOptions) {
     this.executor = options.executor ?? new Ssh2Executor();
@@ -548,7 +549,6 @@ export class SolverJobService {
   }
 
   async listServerOperations(): Promise<ServerOperationsResponse> {
-    await this.reconcileServerOperations();
     return {
       operations: this.options.db.getServerOperations(),
       events: this.options.db.getServerOperationEvents(),
@@ -776,6 +776,21 @@ export class SolverJobService {
   }
 
   async reconcileAndStartQueuedJobs(): Promise<void> {
+    if (this.queueReconciliationTask) {
+      return this.queueReconciliationTask;
+    }
+    const task = this.runQueueReconciliation();
+    this.queueReconciliationTask = task;
+    try {
+      await task;
+    } finally {
+      if (this.queueReconciliationTask === task) {
+        this.queueReconciliationTask = null;
+      }
+    }
+  }
+
+  private async runQueueReconciliation(): Promise<void> {
     this.reconcileCompletedJobs();
     this.reconcileParallelRuns();
     await this.reconcileServerOperations();
@@ -1532,19 +1547,20 @@ export class SolverJobService {
     const activeOperations = this.options.db.getServerOperations()
       .filter((operation) => ACTIVE_SERVER_OPERATION_STATUSES.has(operation.status));
     if (activeOperations.length === 0 || !this.options.credentials) return;
+    const credentials = this.options.credentials;
     const servers = new Map(this.options.db.getServerRows().map((server) => [server.id, server]));
-    for (const operation of activeOperations) {
+    await forEachWithConcurrency(activeOperations, 6, async (operation) => {
       const server = servers.get(operation.serverId);
-      if (!server || server.latest?.connectionStatus !== "online") continue;
+      if (!server || server.latest?.connectionStatus !== "online") return;
       try {
         const output = await this.executor.run(
           server,
-          this.options.credentials,
-          buildReadServerOperationStatusCommand(operation.statusFilePath)
+          credentials,
+          buildReadServerOperationStatusCommand(operation.statusFilePath, operation.tmuxSession)
         );
-        const status = parseRemoteOperationStatus(output);
-        if (!status || status.id !== operation.id || status.status === operation.status) continue;
-        if (status.status === "completed" || status.status === "failed") {
+        const probe = parseRemoteOperationProbe(output);
+        const status = probe.status?.id === operation.id ? probe.status : null;
+        if (status?.status === "completed" || status?.status === "failed") {
           this.options.db.updateServerOperation(operation.id, {
             status: status.status,
             startedAt: status.startedAt ?? operation.startedAt,
@@ -1559,7 +1575,25 @@ export class SolverJobService {
             status.status === "completed" ? "Remote operation completed." : "Remote operation failed.",
             output
           );
-        } else if (status.status === "running" && operation.status !== "running") {
+          return;
+        }
+        if (!probe.tmuxAlive) {
+          const operationAgeMs = Date.now() - Date.parse(operation.createdAt);
+          if (!probe.statusFileExists && Number.isFinite(operationAgeMs) && operationAgeMs < 60_000) {
+            return;
+          }
+          const message = probe.statusFileExists
+            ? `Remote tmux session ${operation.tmuxSession} is no longer running; the server may have restarted.`
+            : `Remote operation state and tmux session ${operation.tmuxSession} are missing; the server may have restarted.`;
+          this.options.db.updateServerOperation(operation.id, {
+            status: "failed",
+            finishedAt: new Date().toISOString(),
+            lastError: message
+          });
+          this.recordOperationEvent(operation.id, "orphaned", message, null);
+          return;
+        }
+        if (status?.status === "running" && operation.status !== "running") {
           this.options.db.updateServerOperation(operation.id, {
             status: "running",
             startedAt: status.startedAt ?? operation.startedAt,
@@ -1568,9 +1602,9 @@ export class SolverJobService {
           });
         }
       } catch {
-        // Status file may not exist yet while the tmux command is starting.
+        // A transient SSH failure must not erase an active operation.
       }
-    }
+    });
   }
 
   private ensureNoActiveJob(serverId: string, exceptJobId?: string): void {
@@ -2585,11 +2619,21 @@ find "$RESULTS_ROOT" -mindepth 2 -maxdepth 2 -type d -print | sort | while IFS= 
 done`;
 }
 
-export function buildReadServerOperationStatusCommand(statusFilePath: string): string {
-  return [
-    "set -e",
-    `cat ${shellQuoteRemotePath(statusFilePath)}`
-  ].join("\n");
+export function buildReadServerOperationStatusCommand(statusFilePath: string, tmuxSession = ""): string {
+  return String.raw`set +e
+STATUS_FILE=${shellQuoteRemotePath(statusFilePath)}
+SESSION=${shellQuote(tmuxSession)}
+if [ -f "$STATUS_FILE" ]; then
+  echo "OP_STATUS_FILE=1"
+else
+  echo "OP_STATUS_FILE=0"
+fi
+if [ -n "$SESSION" ] && tmux has-session -t "$SESSION" 2>/dev/null; then
+  echo "OP_TMUX_ALIVE=1"
+else
+  echo "OP_TMUX_ALIVE=0"
+fi
+if [ -f "$STATUS_FILE" ]; then cat "$STATUS_FILE"; fi`;
 }
 
 export function buildStopServerOperationCommand(tmuxSession: string): string {
@@ -2959,7 +3003,7 @@ function compareUploadCandidates(left: ServerUploadCandidate, right: ServerUploa
   return left.jobId.localeCompare(right.jobId, undefined, { numeric: true, sensitivity: "base" });
 }
 
-function parseRemoteOperationStatus(output: string): {
+type RemoteOperationStatus = {
   id: string;
   status: "running" | "completed" | "failed";
   startedAt: string | null;
@@ -2968,7 +3012,23 @@ function parseRemoteOperationStatus(output: string): {
   exitCode: number | null;
   error: string | null;
   result: ServerOperationResult | null;
-} | null {
+};
+
+function parseRemoteOperationProbe(output: string): {
+  statusFileExists: boolean;
+  tmuxAlive: boolean;
+  status: RemoteOperationStatus | null;
+} {
+  const lines = output.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const jsonLine = lines.find((line) => line.startsWith("{") && line.endsWith("}")) ?? "";
+  return {
+    statusFileExists: lines.includes("OP_STATUS_FILE=1"),
+    tmuxAlive: lines.includes("OP_TMUX_ALIVE=1"),
+    status: parseRemoteOperationStatus(jsonLine)
+  };
+}
+
+function parseRemoteOperationStatus(output: string): RemoteOperationStatus | null {
   try {
     const parsed = JSON.parse(output.trim()) as unknown;
     if (!isRecord(parsed) || typeof parsed.id !== "string") return null;
@@ -2986,6 +3046,22 @@ function parseRemoteOperationStatus(output: string): {
   } catch {
     return null;
   }
+}
+
+async function forEachWithConcurrency<T>(
+  items: T[],
+  concurrency: number,
+  task: (item: T) => Promise<void>
+): Promise<void> {
+  let nextIndex = 0;
+  const workerCount = Math.min(Math.max(1, concurrency), items.length);
+  await Promise.all(Array.from({ length: workerCount }, async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      await task(items[index]);
+    }
+  }));
 }
 
 function parseServerOperationResult(value: unknown): ServerOperationResult | null {

@@ -4,6 +4,7 @@ import path from "node:path";
 import request from "supertest";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_SOLVER_JOB_SETTINGS } from "../../src/shared/solverJobs";
+import type { ServerOperation } from "../../src/shared/serverOperations";
 import type { ConnectionStatus, MetricSnapshot, PipelineStatusSnapshot, ServerConfig } from "../../src/shared/types";
 import { createApp } from "../../src/server/api";
 import { MonitorDatabase } from "../../src/server/db";
@@ -12,6 +13,7 @@ import {
   buildForceKillPipelineCommand,
   buildGracefulStopPipelineCommand,
   buildRunPipelineCommand,
+  buildReadServerOperationStatusCommand,
   buildServerNetworkSyncCommand,
   buildServerSyncCommand,
   buildServerUploadCommand,
@@ -163,6 +165,15 @@ describe("solver job helpers", () => {
     expect(command).toContain("gzip -dc mihomo.gz > mihomo");
     expect(command).toContain("./mihomo -t -d .");
     expect(command).toContain('tmux new-session -d -s mihomo');
+  });
+
+  it("probes operation status files and tmux liveness together", () => {
+    const command = buildReadServerOperationStatusCommand("~/run/operation.json", "sync-server-1");
+
+    expect(command).toContain('STATUS_FILE="$HOME/run/operation.json"');
+    expect(command).toContain("tmux has-session");
+    expect(command).toContain("OP_STATUS_FILE=1");
+    expect(command).toContain("OP_TMUX_ALIVE=1");
   });
 
   it("builds server upload commands with results-dir and redacted HF token support", () => {
@@ -604,6 +615,55 @@ describe("solver job API", () => {
     expect(started.body.operations[0].command).not.toContain("secret-token");
     expect(commands.some((command) => command.includes("secret-token"))).toBe(true);
     expect(commands.some((command) => command.includes("tmux send-keys"))).toBe(true);
+  });
+
+  it("lists operation records without waiting for SSH reconciliation", async () => {
+    const operation = runningServerOperation();
+    db.insertServerOperation(operation);
+    const executor: SshExecutor = { run: vi.fn(async () => "") };
+    const solverJobService = new SolverJobService({
+      db,
+      preflopRangesPath,
+      credentials: { username: "root", password: "secret" },
+      executor
+    });
+    const app = createApp({ db, refreshService, preflopRangesPath, solverJobService });
+
+    const response = await request(app).get("/api/server-operations");
+
+    expect(response.status).toBe(200);
+    expect(response.body.operations[0]).toMatchObject({ id: operation.id, status: "running" });
+    expect(executor.run).not.toHaveBeenCalled();
+  });
+
+  it("marks an active operation failed when its tmux disappeared after restart", async () => {
+    const operation = runningServerOperation();
+    db.insertServerOperation(operation);
+    const executor: SshExecutor = {
+      run: vi.fn(async (_server, _credentials, command) => {
+        if (command.includes("OP_TMUX_ALIVE=")) {
+          return [
+            "OP_STATUS_FILE=1",
+            "OP_TMUX_ALIVE=0",
+            JSON.stringify({ id: operation.id, status: "running", started_at: operation.startedAt })
+          ].join("\n");
+        }
+        return "ok";
+      })
+    };
+    const solverJobService = new SolverJobService({
+      db,
+      preflopRangesPath,
+      credentials: { username: "root", password: "secret" },
+      executor
+    });
+
+    await solverJobService.reconcileAndStartQueuedJobs();
+
+    expect(db.getServerOperation(operation.id)).toMatchObject({
+      status: "failed",
+      lastError: expect.stringContaining("no longer running")
+    });
   });
 
   it("keeps open-size scenario out of the dataset repo name while passing the scenario explicitly", async () => {
@@ -2376,6 +2436,27 @@ async function approveRange(app: ReturnType<typeof createApp>, rangePath: string
     .post("/api/preflop-ranges/status")
     .send({ path: rangePath, status: "approved" });
   expect(response.status).toBe(200);
+}
+
+function runningServerOperation(): ServerOperation {
+  const now = new Date().toISOString();
+  return {
+    id: "operation-1",
+    type: "sync",
+    serverId: "solver-01",
+    status: "running",
+    tmuxSession: "sync-solver-01-operation",
+    command: "git pull --rebase",
+    items: [{ serverId: "solver-01", solverRoot: "/srv/solver" }],
+    statusFilePath: "~/run/server_operation_operation-1.json",
+    logFilePath: "~/run/server_operation_operation-1.log",
+    createdAt: now,
+    updatedAt: now,
+    startedAt: now,
+    finishedAt: null,
+    lastError: null,
+    result: null
+  };
 }
 
 function solverCardsText(count = 1755): string {
