@@ -99,6 +99,8 @@ const DEFAULT_REMOTE_PROXY_URL = "http://127.0.0.1:7890";
 const ACTIVE_SERVER_OPERATION_STATUSES = new Set(["queued", "deploying", "running"]);
 const ACTIVE_JOB_RECONCILE_GRACE_MS = 15_000;
 const HUGGING_FACE_ORIGIN = "https://huggingface.co";
+const HUGGING_FACE_TREE_PAGE_LIMIT = 1000;
+const HUGGING_FACE_TREE_MAX_PAGES = 100;
 
 export class SolverJobService {
   private readonly executor: SshExecutor;
@@ -2945,32 +2947,72 @@ async function fetchHuggingFaceDatasetBoardKeys(
   hfToken: string | null,
   hfProxyUrl: string | null
 ): Promise<Set<string>> {
-  const response = await huggingFaceFetch(`${HUGGING_FACE_ORIGIN}/api/datasets/${repoIdPath(repoId)}/tree/main?recursive=1`, {
-    headers: huggingFaceHeaders(hfToken),
-    proxyUrl: hfProxyUrl,
-    signal: AbortSignal.timeout(20_000)
-  });
-  if (!response.ok) {
-    throw new Error(`Hugging Face dataset file listing failed for ${repoId}: ${await huggingFaceErrorMessage(response)}`);
-  }
-  const data = await response.json() as unknown;
-  const items = Array.isArray(data)
-    ? data
-    : isRecord(data) && Array.isArray(data.items)
-      ? data.items
-      : [];
   const keys = new Set<string>();
-  for (const item of items) {
-    const rawPath = isRecord(item) && typeof item.path === "string"
-      ? item.path
-      : isRecord(item) && typeof item.rfilename === "string"
-        ? item.rfilename
-        : null;
-    if (!rawPath || !/\.(parquet|json)$/i.test(rawPath)) continue;
-    const stem = rawPath.split("/").pop()?.replace(/\.(parquet|json)$/i, "");
-    if (stem) keys.add(boardKeyFromName(stem));
+  const treePath = `/api/datasets/${repoIdPath(repoId)}/tree/main`;
+  let nextUrl: string | null = `${HUGGING_FACE_ORIGIN}${treePath}?recursive=1&limit=${HUGGING_FACE_TREE_PAGE_LIMIT}`;
+  const visitedUrls = new Set<string>();
+
+  for (let page = 1; nextUrl && page <= HUGGING_FACE_TREE_MAX_PAGES; page += 1) {
+    if (visitedUrls.has(nextUrl)) {
+      throw new Error(`Hugging Face dataset file listing returned a repeated pagination URL for ${repoId}.`);
+    }
+    visitedUrls.add(nextUrl);
+    const response = await huggingFaceFetch(nextUrl, {
+      headers: huggingFaceHeaders(hfToken),
+      proxyUrl: hfProxyUrl,
+      signal: AbortSignal.timeout(20_000)
+    });
+    if (!response.ok) {
+      throw new Error(
+        `Hugging Face dataset file listing failed for ${repoId} on page ${page}: ${await huggingFaceErrorMessage(response)}`
+      );
+    }
+    const data = await response.json() as unknown;
+    const items = Array.isArray(data)
+      ? data
+      : isRecord(data) && Array.isArray(data.items)
+        ? data.items
+        : [];
+    for (const item of items) {
+      const rawPath = isRecord(item) && typeof item.path === "string"
+        ? item.path
+        : isRecord(item) && typeof item.rfilename === "string"
+          ? item.rfilename
+          : null;
+      if (!rawPath || !/\.(parquet|json)$/i.test(rawPath)) continue;
+      const stem = rawPath.split("/").pop()?.replace(/\.(parquet|json)$/i, "");
+      if (stem) keys.add(boardKeyFromName(stem));
+    }
+    nextUrl = validatedHuggingFaceTreeNextUrl(response.headers.get("link"), treePath, repoId);
+  }
+
+  if (nextUrl) {
+    throw new Error(
+      `Hugging Face dataset file listing exceeded ${HUGGING_FACE_TREE_MAX_PAGES} pages for ${repoId}.`
+    );
   }
   return keys;
+}
+
+function validatedHuggingFaceTreeNextUrl(linkHeader: string | null, treePath: string, repoId: string): string | null {
+  const rawNextUrl = huggingFaceNextLink(linkHeader);
+  if (!rawNextUrl) return null;
+  const parsed = new URL(rawNextUrl, HUGGING_FACE_ORIGIN);
+  if (parsed.origin !== HUGGING_FACE_ORIGIN || parsed.pathname !== treePath) {
+    throw new Error(`Hugging Face dataset file listing returned an invalid pagination URL for ${repoId}.`);
+  }
+  return parsed.toString();
+}
+
+function huggingFaceNextLink(linkHeader: string | null): string | null {
+  if (!linkHeader) return null;
+  for (const part of linkHeader.split(/,\s*(?=<)/)) {
+    const url = part.match(/<([^>]+)>/)?.[1];
+    const relation = part.match(/;\s*rel=(?:"([^"]+)"|([^;\s,]+))/i);
+    const relations = (relation?.[1] ?? relation?.[2] ?? "").split(/\s+/);
+    if (url && relations.includes("next")) return url;
+  }
+  return null;
 }
 
 function boardKeyFromName(board: string): string {

@@ -922,6 +922,70 @@ describe("solver job API", () => {
     expect(cleared.body.runs).toHaveLength(1);
   });
 
+  it("reads every Hugging Face tree page when calculating remote board coverage", async () => {
+    const treeRequests: string[] = [];
+    const datasetName = "sia-30-sod-28";
+    const treeUrl = `https://huggingface.co/api/datasets/Tsumugii/${datasetName}/tree/main`;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/tree/main")) {
+        treeRequests.push(url);
+        if (url.includes("cursor=page-2")) {
+          return new Response(JSON.stringify(
+            Array.from({ length: 605 }, (_value, index) => ({ path: `board-${index + 1000}.parquet` }))
+          ), { status: 200 });
+        }
+        return new Response(JSON.stringify([
+          { path: ".gitattributes" },
+          ...Array.from({ length: 999 }, (_value, index) => ({ path: `board-${index + 1}.parquet` }))
+        ]), {
+          status: 200,
+          headers: {
+            Link: `<${treeUrl}?recursive=true&limit=1000&cursor=page-2>; rel="next"`
+          }
+        });
+      }
+      if (url.includes("/api/datasets/")) {
+        return new Response(JSON.stringify({ id: `Tsumugii/${datasetName}` }), { status: 200 });
+      }
+      return new Response("{}", { status: 200 });
+    }));
+    const executor: SshExecutor = {
+      run: vi.fn(async (_server, _credentials, command) =>
+        command.includes("cards/cards.txt") ? solverCardsText() : "ok"
+      )
+    };
+    const solverJobService = new SolverJobService({
+      db,
+      preflopRangesPath,
+      credentials: { username: "root", password: "secret" },
+      executor,
+      defaultPipelineStatusFilePath: "~/run/solver_running_status.json",
+      repoNamespace: "Tsumugii",
+      hfToken: "hf_test_token"
+    });
+    const app = createApp({ db, refreshService, preflopRangesPath, solverJobService });
+    const rangePath = "3OD-EP/3OD-4.3 vs 3IA-4.2.json";
+    await approveRange(app, rangePath);
+
+    const preview = await request(app)
+      .post("/api/parallel-jobs/preview")
+      .send({
+        rangePath,
+        datasetName,
+        serverIds: ["solver-01"],
+        settings: { uploadEnabled: false }
+      });
+
+    expect(preview.status).toBe(200);
+    expect(treeRequests).toHaveLength(2);
+    expect(treeRequests[1]).toContain("cursor=page-2");
+    expect(preview.body.coverage.remoteCoveredCount).toBe(1604);
+    expect(preview.body.coverage.missingCount).toBe(151);
+    expect(preview.body.missingIndices).toHaveLength(151);
+    expect(preview.body.missingIndices[0]).toBe(1605);
+  });
+
   it("sizes parallel chunks from the full enabled server count", async () => {
     db.syncServers([
       ...servers,
