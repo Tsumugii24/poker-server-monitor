@@ -163,6 +163,10 @@ describe("solver job helpers", () => {
 
     expect(command).toContain('REPO_URL="https://gitee.com/Tsumugii24/mihomo-release"');
     expect(command).toContain("SUBSCRIPTION_URL=$SUBSCRIPTION_URL");
+    expect(command).toContain("export GIT_TERMINAL_PROMPT=0");
+    expect(command).toContain('git remote set-url origin "$REPO_URL"');
+    expect(command).toContain("timeout 120 git -c credential.interactive=never pull --rebase");
+    expect(command).toContain("timeout 90 wget --timeout=30 --tries=2");
     expect(command).toContain("gzip -dc mihomo.gz > mihomo");
     expect(command).toContain("./mihomo -t -d .");
     expect(command).toContain('tmux new-session -d -s mihomo');
@@ -628,6 +632,44 @@ describe("solver job API", () => {
     expect(started.body.operations[0].command).not.toContain("secret-token");
     expect(commands.some((command) => command.includes("secret-token"))).toBe(true);
     expect(commands.some((command) => command.includes("tmux send-keys"))).toBe(true);
+  });
+
+  it("retries a failed network operation as a new non-interactive tmux operation", async () => {
+    const previous = {
+      ...runningServerOperation(),
+      type: "network_sync" as const,
+      status: "failed" as const,
+      finishedAt: new Date().toISOString(),
+      lastError: "Exit code 1"
+    };
+    db.insertServerOperation(previous);
+    const executor: SshExecutor = {
+      run: vi.fn(async (_server, _credentials, command) => {
+        commands.push(command);
+        return "ok";
+      })
+    };
+    const solverJobService = new SolverJobService({
+      db,
+      preflopRangesPath,
+      credentials: { username: "root", password: "secret" },
+      executor,
+      networkSubscriptionUrl: "https://subscription.example/secret-token"
+    });
+    const app = createApp({ db, refreshService, preflopRangesPath, solverJobService });
+
+    const response = await request(app)
+      .post(`/api/server-operations/${previous.id}/retry`)
+      .send({});
+
+    expect(response.status).toBe(201);
+    expect(response.body.operations).toHaveLength(2);
+    expect(response.body.operations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: previous.id, status: "failed" }),
+      expect.objectContaining({ type: "network_sync", serverId: "solver-01", status: "running" })
+    ]));
+    expect(commands.some((command) => command.includes("export GIT_TERMINAL_PROMPT=0"))).toBe(true);
+    expect(commands.some((command) => command.includes("secret-token"))).toBe(true);
   });
 
   it("lists operation records without waiting for SSH reconciliation", async () => {

@@ -855,6 +855,14 @@ export function createApp({
     }
   });
 
+  app.post("/api/server-operations/:id/retry", async (request, response) => {
+    try {
+      response.status(201).json(await solverJobService.retryServerOperation(request.params.id));
+    } catch (error) {
+      respondSolverJobError(response, error, "server_operation_retry_failed");
+    }
+  });
+
   app.delete("/api/server-operations/reports", (_request, response) => {
     try {
       response.json({ ...solverJobService.clearServerOperationReports() });

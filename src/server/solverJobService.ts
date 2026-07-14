@@ -749,6 +749,58 @@ export class SolverJobService {
     return this.listServerOperations();
   }
 
+  async retryServerOperation(id: string): Promise<ServerOperationsResponse> {
+    const previous = this.requireServerOperation(id);
+    if (previous.status !== "failed" && previous.status !== "canceled") {
+      throw new Error(`Only failed or canceled operations can be retried; ${previous.id} is ${previous.status}.`);
+    }
+    const server = this.requireServer(previous.serverId);
+    this.ensureServerOnline(server);
+    this.ensureCredentials();
+
+    if (previous.type === "upload" && !this.hfToken) {
+      throw new Error("HF_TOKEN is required for upload operations.");
+    }
+    if (previous.type === "network_sync" && !this.networkSubscriptionUrl) {
+      throw new Error("SUBSCRIPTION_URL is required for network sync operations.");
+    }
+
+    const uploadItems = previous.type === "upload"
+      ? normalizeUploadItems(previous.items.filter(isServerUploadOperationItem))
+      : [];
+    if (previous.type === "upload" && uploadItems.length === 0) {
+      return this.startUploadOperation({ serverId: server.id });
+    }
+
+    const operation = previous.type === "sync"
+      ? this.createSyncOperation(server)
+      : previous.type === "network_sync"
+        ? this.createNetworkSyncOperation(server)
+        : this.createUploadOperation(server, uploadItems);
+    const executionCommand = previous.type === "network_sync"
+      ? buildTrackedServerOperationCommand({
+          id: operation.id,
+          type: operation.type,
+          statusFilePath: operation.statusFilePath,
+          logFilePath: operation.logFilePath,
+          bodyCommand: buildServerNetworkSyncCommand({
+            subscriptionUrl: this.networkSubscriptionUrl,
+            redactSecrets: false
+          })
+        })
+      : operation.command;
+
+    this.options.db.insertServerOperation(operation);
+    this.recordOperationEvent(
+      operation.id,
+      "retried",
+      `Retry of ${previous.type} operation ${previous.id} for ${server.id}.`,
+      operation.command
+    );
+    await this.startServerOperation(operation, server, executionCommand);
+    return this.listServerOperations();
+  }
+
   clearServerOperationReports(): { cleared: number } {
     return { cleared: this.options.db.clearTerminalServerOperations() };
   }
@@ -2405,19 +2457,29 @@ cd "$HOME"
 NETWORK_STARTED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 REPO_DIR="$HOME/mihomo-release"
 REPO_URL="https://gitee.com/Tsumugii24/mihomo-release"
+export GIT_TERMINAL_PROMPT=0
+export GIT_ASKPASS=/bin/false
+export SSH_ASKPASS=/bin/false
 ${subscriptionAssignment}
 if [ -d "$REPO_DIR/.git" ]; then
   cd "$REPO_DIR"
   git stash >/dev/null 2>&1
-  GIT_OUTPUT=$(git pull --rebase 2>&1)
-  GIT_CODE=$?
+  REMOTE_OUTPUT=$(git remote set-url origin "$REPO_URL" 2>&1)
+  REMOTE_CODE=$?
+  if [ "$REMOTE_CODE" -eq 0 ]; then
+    GIT_OUTPUT=$(timeout 120 git -c credential.interactive=never pull --rebase 2>&1)
+    GIT_CODE=$?
+  else
+    GIT_OUTPUT="$REMOTE_OUTPUT"
+    GIT_CODE=$REMOTE_CODE
+  fi
   INSTALL_KIND=updated
 elif [ -e "$REPO_DIR" ]; then
   GIT_OUTPUT="mihomo-release exists but is not a git repository"
   GIT_CODE=1
   INSTALL_KIND=invalid
 else
-  GIT_OUTPUT=$(git clone "$REPO_URL" "$REPO_DIR" 2>&1)
+  GIT_OUTPUT=$(timeout 120 git -c credential.interactive=never clone "$REPO_URL" "$REPO_DIR" 2>&1)
   GIT_CODE=$?
   INSTALL_KIND=cloned
 fi
@@ -2430,13 +2492,13 @@ else
   EXTRACT_CODE=1
 fi
 if [ "$EXTRACT_CODE" -eq 0 ]; then
-  wget -q -O config.yaml "$SUBSCRIPTION_URL"
+  timeout 90 wget --timeout=30 --tries=2 -q -O config.yaml "$SUBSCRIPTION_URL"
   DOWNLOAD_CODE=$?
 else
   DOWNLOAD_CODE=1
 fi
 if [ "$DOWNLOAD_CODE" -eq 0 ]; then
-  VALIDATE_OUTPUT=$(./mihomo -t -d . 2>&1)
+  VALIDATE_OUTPUT=$(timeout 30 ./mihomo -t -d . 2>&1)
   VALIDATE_CODE=$?
 else
   VALIDATE_OUTPUT=""
@@ -3025,6 +3087,15 @@ function normalizeUploadItems(items: ServerUploadItem[] | undefined): ServerUplo
     });
   }
   return normalized;
+}
+
+function isServerUploadOperationItem(item: ServerOperation["items"][number]): item is ServerUploadItem {
+  return (
+    "datasetName" in item &&
+    "repoId" in item &&
+    "resultsDir" in item &&
+    "fileFormat" in item
+  );
 }
 
 function groupUploadItemsByServer(items: ServerUploadItem[], servers: ServerRow[]): Map<string, ServerUploadItem[]> {

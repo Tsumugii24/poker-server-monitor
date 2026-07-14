@@ -153,11 +153,13 @@ type PendingParallelQueueDeleteAction = {
 };
 
 type PendingServerOperationAction = {
-  action: "sync" | "network_sync" | "upload" | "clear";
+  action: "sync" | "network_sync" | "upload" | "retry" | "clear";
   serverCount: number;
   itemCount: number;
   serverIds?: string[];
   itemIds?: string[];
+  operationId?: string;
+  operationType?: ServerOperation["type"];
 };
 
 type RangeProgressRefreshSummary = {
@@ -1358,6 +1360,12 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
           })
         });
         applyServerOperationsResponse(response);
+      } else if (pending.action === "retry" && pending.operationId) {
+        const response = await fetchPreflopJson<ServerOperationsResponse>(
+          `/api/server-operations/${encodeURIComponent(pending.operationId)}/retry`,
+          { method: "POST" }
+        );
+        applyServerOperationsResponse(response);
       } else {
         await fetchPreflopJson<{ cleared: number }>("/api/server-operations/reports", { method: "DELETE" });
         const response = await fetchPreflopJson<ServerOperationsResponse>("/api/server-operations");
@@ -1392,6 +1400,22 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
     } finally {
       setJobBusy(null);
     }
+  };
+
+  const requestRetryServerOperation = (operation: ServerOperation) => {
+    const server = servers.find((candidate) => candidate.id === operation.serverId) ?? null;
+    if (!serverIsOnlineForJob(server)) {
+      showOfflineServerNotice(server, operation.serverId, `retry ${operation.type} operation`);
+      return;
+    }
+    setPendingServerOperationAction({
+      action: "retry",
+      serverCount: 1,
+      itemCount: operation.items.length,
+      serverIds: [operation.serverId],
+      operationId: operation.id,
+      operationType: operation.type
+    });
   };
 
   const checkDatasetRepoForAction = async (
@@ -2332,6 +2356,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
           onOperationNetworkSync={requestNetworkSyncOperations}
           onOperationUpload={requestUploadOperation}
           onOperationStop={(operation) => void stopServerOperation(operation)}
+          onOperationRetry={requestRetryServerOperation}
           onOperationClear={requestClearServerOperations}
           onParallelServerTabChange={setParallelServerTab}
           onParallelChunkCountChange={(chunkCount) => {
@@ -2672,7 +2697,9 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
             <div className="preflop-confirm-icon">
               {pendingServerOperationAction.action === "clear" ? <Trash2 size={18} /> : (
                 pendingServerOperationAction.action === "sync" ? <RefreshCw size={18} /> : (
-                  pendingServerOperationAction.action === "network_sync" ? <Wifi size={18} /> : <Upload size={18} />
+                  pendingServerOperationAction.action === "network_sync" ? <Wifi size={18} /> : (
+                    pendingServerOperationAction.action === "retry" ? <RotateCcw size={18} /> : <Upload size={18} />
+                  )
                 )
               )}
             </div>
@@ -2890,6 +2917,7 @@ function SolverJobPanel({
   onOperationNetworkSync,
   onOperationUpload,
   onOperationStop,
+  onOperationRetry,
   onOperationClear,
   onParallelServerTabChange,
   onParallelChunkCountChange,
@@ -2969,6 +2997,7 @@ function SolverJobPanel({
   onOperationNetworkSync: () => void;
   onOperationUpload: () => void;
   onOperationStop: (operation: ServerOperation) => void;
+  onOperationRetry: (operation: ServerOperation) => void;
   onOperationClear: () => void;
   onParallelServerTabChange: (tab: ParallelServerStatusTab) => void;
   onParallelChunkCountChange: (chunkCount: number) => void;
@@ -3384,6 +3413,7 @@ function SolverJobPanel({
           onNetworkSync={onOperationNetworkSync}
           onUpload={onOperationUpload}
           onStop={onOperationStop}
+          onRetry={onOperationRetry}
           onClear={onOperationClear}
           onBestServerChange={onParallelBestServerChange}
         />
@@ -4258,6 +4288,7 @@ function ServerOperationsPanel({
   onNetworkSync,
   onUpload,
   onStop,
+  onRetry,
   onClear,
   onBestServerChange
 }: {
@@ -4273,6 +4304,7 @@ function ServerOperationsPanel({
   onNetworkSync: () => void;
   onUpload: () => void;
   onStop: (operation: ServerOperation) => void;
+  onRetry: (operation: ServerOperation) => void;
   onClear: () => void;
   onBestServerChange: (serverId: string) => void;
 }) {
@@ -4475,6 +4507,7 @@ function ServerOperationsPanel({
                     operation={operation}
                     busy={busy}
                     onStop={onStop}
+                    onRetry={onRetry}
                   />
                 ))}
               </tbody>
@@ -4489,15 +4522,20 @@ function ServerOperationsPanel({
 function ServerOperationRow({
   operation,
   busy,
-  onStop
+  onStop,
+  onRetry
 }: {
   operation: ServerOperation;
   busy: string | null;
   onStop: (operation: ServerOperation) => void;
+  onRetry: (operation: ServerOperation) => void;
 }) {
   const active = !serverOperationIsTerminal(operation);
   const stopping = busy === `operation-stop:${operation.id}`;
+  const retryable = operation.status === "failed" || operation.status === "canceled";
+  const retrying = busy === "operation-retry";
   const result = serverOperationCompactResult(operation);
+  const failureDetail = serverOperationFailureDetail(operation);
   return (
     <tr className={`server-ops-history-row ${operation.status} ${operation.type}`}>
       <td>
@@ -4508,7 +4546,10 @@ function ServerOperationRow({
         <span className={`server-ops-status-pill ${operation.status}`}>{formatServerOperationStatus(operation.status)}</span>
       </td>
       <td>
-        <span className={`server-ops-result-pill ${result.tone}`}>{result.label}</span>
+        <div className="server-ops-result-cell">
+          <span className={`server-ops-result-pill ${result.tone}`}>{result.label}</span>
+          {failureDetail ? <small title={failureDetail}>{failureDetail}</small> : null}
+        </div>
       </td>
       <td>{formatShortDateTime(operation.createdAt)}</td>
       <td>
@@ -4516,6 +4557,11 @@ function ServerOperationRow({
           <button className="inventory-confirm-button danger" type="button" onClick={() => onStop(operation)} disabled={stopping}>
             <Square size={14} />
             {stopping ? "Stopping" : "Stop"}
+          </button>
+        ) : retryable ? (
+          <button className="inventory-confirm-button" type="button" onClick={() => onRetry(operation)} disabled={retrying}>
+            <RotateCcw size={14} />
+            {retrying ? "Retrying" : "Retry"}
           </button>
         ) : null}
       </td>
@@ -5074,6 +5120,36 @@ function serverOperationCompactResult(operation: ServerOperation): { label: stri
   return { label: formatServerOperationStatus(operation.status), tone: operation.status === "completed" ? "success" : "neutral" };
 }
 
+function serverOperationFailureDetail(operation: ServerOperation): string | null {
+  if (operation.status !== "failed") return null;
+  const detail = operation.result?.details[0];
+  if (detail && operation.type === "network_sync") {
+    const stages: Array<[string, unknown]> = [
+      ["Git update", detail.git_code],
+      ["Binary extract", detail.extract_code],
+      ["Config download", detail.download_code],
+      ["Config validation", detail.validate_code],
+      ["Mihomo start", detail.start_code],
+      ["Tmux verification", detail.session_code]
+    ];
+    const failedStage = stages.find(([, code]) => typeof code === "number" && code !== 0);
+    const outputValue = failedStage?.[0] === "Git update"
+      ? detail.git_output
+      : failedStage?.[0] === "Config validation"
+        ? detail.validate_output
+        : null;
+    const output = typeof outputValue === "string" ? outputValue : null;
+    const lastLine = output?.trim().split(/\r?\n/).filter(Boolean).at(-1);
+    if (failedStage) {
+      const code = typeof failedStage[1] === "number" ? failedStage[1] : null;
+      const reason = code === 124 ? "timed out" : code != null ? `exit ${code}` : "failed";
+      return lastLine ? `${failedStage[0]} ${reason}: ${lastLine}` : `${failedStage[0]} ${reason}`;
+    }
+  }
+  if (operation.lastError && !/^Exit code\b/i.test(operation.lastError)) return operation.lastError;
+  return operation.lastError ?? "Remote operation failed.";
+}
+
 function numericResult(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
@@ -5082,6 +5158,7 @@ function serverOperationConfirmTitle(action: PendingServerOperationAction["actio
   if (action === "sync") return "Start sync tmux?";
   if (action === "network_sync") return "Start network sync tmux?";
   if (action === "upload") return "Start upload tmux?";
+  if (action === "retry") return "Retry server operation?";
   return "Clear operation history?";
 }
 
@@ -5095,6 +5172,9 @@ function serverOperationConfirmCopy(action: PendingServerOperationAction): strin
   if (action.action === "upload") {
     const preview = action.itemCount > 0 ? ` Last scan found ${action.itemCount} retained folder${action.itemCount === 1 ? "" : "s"}.` : "";
     return `This will scan ${action.serverCount} online enabled server${action.serverCount === 1 ? "" : "s"} and start upload tmux sessions for retained results.${preview}`;
+  }
+  if (action.action === "retry") {
+    return `This will create a new ${serverOperationTypeLabel(action.operationType ?? "sync").toLowerCase()} operation on ${action.serverIds?.[0] ?? "the selected server"}. The previous record will remain in the report.`;
   }
   return `This will remove ${action.itemCount} completed, failed, or canceled server operation record${action.itemCount === 1 ? "" : "s"}. Active operations stay visible.`;
 }

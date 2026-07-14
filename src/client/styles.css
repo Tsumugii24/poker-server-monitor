@@ -6779,6 +6779,23 @@ td .port-value {
   text-align: right;
 }
 
+.server-ops-result-cell {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.server-ops-result-cell small {
+  display: block;
+  max-width: 280px;
+  overflow: hidden;
+  color: var(--text-tertiary);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .server-ops-status-pill,
 .server-ops-result-pill {
   min-height: 22px;
