@@ -176,9 +176,13 @@ describe("solver job helpers", () => {
   it("checks Hugging Face through the configured remote proxy", () => {
     const command = buildServerNetworkCheckCommand("http://127.0.0.1:7890");
 
+    expect(command).toContain("tmux has-session -t mihomo");
     expect(command).toContain("--proxy \"$PROXY_URL\" https://huggingface.co/");
     expect(command).toContain("--connect-timeout 10");
     expect(command).toContain('CHECK_KIND=connected');
+    expect(command).toContain('CHECK_REASON=tmux_missing');
+    expect(command).toContain('CHECK_REASON=proxy_refused');
+    expect(command).toContain('CHECK_REASON=timeout');
     expect(command).toContain('"connected": 1 if kind == "connected" else 0');
   });
 
@@ -762,6 +766,31 @@ describe("solver job API", () => {
     expect(response.status).toBe(200);
     expect(response.body.operations[0]).toMatchObject({ id: operation.id, status: "running" });
     expect(executor.run).not.toHaveBeenCalled();
+  });
+
+  it("returns only the latest operation state for each server and operation type", async () => {
+    const older = {
+      ...runningServerOperation(),
+      status: "completed" as const,
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      finishedAt: "2026-01-01T00:00:00.000Z"
+    };
+    const newer = {
+      ...older,
+      id: "operation-2",
+      status: "failed" as const,
+      updatedAt: "2026-01-02T00:00:00.000Z",
+      finishedAt: "2026-01-02T00:00:00.000Z",
+      lastError: "newer result"
+    };
+    db.insertServerOperation(older);
+    db.insertServerOperation(newer);
+    const solverJobService = new SolverJobService({ db, preflopRangesPath });
+
+    const response = await solverJobService.listServerOperations();
+
+    expect(response.operations).toHaveLength(1);
+    expect(response.operations[0]).toMatchObject({ id: newer.id, status: "failed", lastError: "newer result" });
   });
 
   it("marks an active operation failed when its tmux disappeared after restart", async () => {

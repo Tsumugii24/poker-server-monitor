@@ -2676,22 +2676,37 @@ export function buildServerNetworkCheckCommand(proxyUrl = DEFAULT_REMOTE_PROXY_U
   return String.raw`set +e
 CHECK_STARTED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 PROXY_URL=${shellQuote(proxyUrl)}
-CHECK_OUTPUT=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' --connect-timeout 10 --max-time 25 --proxy "$PROXY_URL" https://huggingface.co/ 2>&1)
+tmux has-session -t mihomo 2>/dev/null
+SESSION_CODE=$?
+CHECK_ERROR_FILE="/tmp/server-network-check-${"$"}${"$"}.err"
+HTTP_CODE=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' --connect-timeout 10 --max-time 25 --proxy "$PROXY_URL" https://huggingface.co/ 2>"$CHECK_ERROR_FILE")
 CURL_CODE=$?
-HTTP_CODE=$(printf '%s' "$CHECK_OUTPUT" | tail -n 1)
+CHECK_OUTPUT=$(cat "$CHECK_ERROR_FILE" 2>/dev/null)
+rm -f "$CHECK_ERROR_FILE"
 if [ "$CURL_CODE" -eq 0 ] && [ "$HTTP_CODE" != "000" ]; then
   CHECK_KIND=connected
+  CHECK_REASON=connected
+elif [ "$SESSION_CODE" -ne 0 ]; then
+  CHECK_KIND=unreachable
+  CHECK_REASON=tmux_missing
+elif [ "$CURL_CODE" -eq 7 ]; then
+  CHECK_KIND=unreachable
+  CHECK_REASON=proxy_refused
+elif [ "$CURL_CODE" -eq 28 ]; then
+  CHECK_KIND=unreachable
+  CHECK_REASON=timeout
 else
   CHECK_KIND=unreachable
+  CHECK_REASON=request_failed
 fi
 CHECK_FINISHED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 export CHECK_OUTPUT
-python - "$OP_RESULT_FILE" "$CHECK_KIND" "$CURL_CODE" "$HTTP_CODE" "$PROXY_URL" "$CHECK_STARTED_AT" "$CHECK_FINISHED_AT" <<'PY'
+python - "$OP_RESULT_FILE" "$CHECK_KIND" "$CHECK_REASON" "$SESSION_CODE" "$CURL_CODE" "$HTTP_CODE" "$PROXY_URL" "$CHECK_STARTED_AT" "$CHECK_FINISHED_AT" <<'PY'
 import json
 import os
 import sys
 
-path, kind, curl_code, http_code, proxy_url, started_at, finished_at = sys.argv[1:8]
+path, kind, reason, session_code, curl_code, http_code, proxy_url, started_at, finished_at = sys.argv[1:10]
 result = {
     "summary": {
         "connected": 1 if kind == "connected" else 0,
@@ -2699,6 +2714,8 @@ result = {
     },
     "details": [{
         "kind": kind,
+        "reason": reason,
+        "session_code": int(session_code),
         "curl_code": int(curl_code),
         "http_code": http_code,
         "proxy_url": proxy_url,

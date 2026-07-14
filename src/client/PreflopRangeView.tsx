@@ -162,6 +162,8 @@ type PendingServerOperationAction = {
   operationType?: ServerOperation["type"];
 };
 
+type ServerOperationInventoryTab = "sync" | "network" | "upload";
+
 type RangeProgressRefreshSummary = {
   checked: number;
   failed: number;
@@ -343,27 +345,41 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
 
   const loadJobContext = useCallback(async (options: { reconcileParallel?: boolean } = {}) => {
     setJobError(null);
-    try {
-      const parallelJobsPath = options.reconcileParallel ? "/api/parallel-jobs?reconcile=1" : "/api/parallel-jobs";
-      const overviewResponse = await fetchPreflopJson<OverviewResponse>("/api/overview");
-      applyOverviewResponse(overviewResponse);
-      const jobsAndParallel = Promise.all([
-        fetchPreflopJson<SolverJobsResponse>("/api/jobs"),
-        fetchPreflopJson<ParallelSolverJobsResponse>(parallelJobsPath)
-      ] as const);
-      const operationsResponse = await fetchPreflopJson<ServerOperationsResponse>("/api/server-operations");
+    const parallelJobsPath = options.reconcileParallel ? "/api/parallel-jobs?reconcile=1" : "/api/parallel-jobs";
+    const [overviewResult, jobsResult, parallelResult, operationsResult] = await Promise.allSettled([
+      fetchPreflopJson<OverviewResponse>("/api/overview"),
+      fetchPreflopJson<SolverJobsResponse>("/api/jobs"),
+      fetchPreflopJson<ParallelSolverJobsResponse>(parallelJobsPath),
+      fetchPreflopJson<ServerOperationsResponse>("/api/server-operations")
+    ] as const);
+
+    if (overviewResult.status === "fulfilled") applyOverviewResponse(overviewResult.value);
+    if (jobsResult.status === "fulfilled") {
+      setJobs(jobsResult.value.jobs);
+      setJobEvents(jobsResult.value.events);
+    }
+    if (parallelResult.status === "fulfilled") {
+      setParallelRuns(parallelResult.value.runs);
+      setFailurePool(parallelResult.value.failurePool);
+    }
+    if (operationsResult.status === "fulfilled") {
+      const operationsResponse = operationsResult.value;
       setServerOperations(operationsResponse.operations);
       setNetworkSyncConfigured(Boolean(operationsResponse.capabilities?.networkSyncConfigured));
-      const [jobsResponse, parallelResponse] = await jobsAndParallel;
-      setJobs(jobsResponse.jobs);
-      setJobEvents(jobsResponse.events);
-      setParallelRuns(parallelResponse.runs);
-      setFailurePool(parallelResponse.failurePool);
-      return parallelResponse;
-    } catch (caught) {
-      setJobError(caught instanceof Error ? caught.message : String(caught));
-      return null;
     }
+
+    const failures = [
+      ["Overview", overviewResult],
+      ["Jobs", jobsResult],
+      ["Parallel jobs", parallelResult],
+      ["Server operations", operationsResult]
+    ] as const;
+    const messages = failures.flatMap(([label, result]) => result.status === "rejected"
+      ? [`${label}: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`]
+      : []
+    );
+    if (messages.length > 0) setJobError(messages.join(" · "));
+    return parallelResult.status === "fulfilled" ? parallelResult.value : null;
   }, [applyOverviewResponse]);
 
   const refreshJobContext = useCallback(() => {
@@ -4354,6 +4370,7 @@ function ServerOperationsPanel({
     operationsByServer.set(operation.serverId, byType);
   }
   const operationBusy = busy?.startsWith("operation-") ?? false;
+  const [inventoryTab, setInventoryTab] = useState<ServerOperationInventoryTab>("network");
 
   return (
     <div className="server-ops-shell">
@@ -4412,16 +4429,10 @@ function ServerOperationsPanel({
                 {` · ${onlineServers.length} target${onlineServers.length === 1 ? "" : "s"}`}
               </span>
             </div>
-            <div className="server-ops-card-actions">
-              <button className="icon-button compact" type="button" onClick={onNetworkCheck} disabled={operationBusy || onlineServers.length === 0}>
-                <Search size={14} />
-                Check Network
-              </button>
-              <button className="icon-button compact primary" type="button" onClick={onNetworkSync} disabled={operationBusy || onlineServers.length === 0 || !networkSyncConfigured}>
-                <Wifi size={14} />
-                New Network Tmux
-              </button>
-            </div>
+            <button className="icon-button compact primary" type="button" onClick={onNetworkSync} disabled={operationBusy || onlineServers.length === 0 || !networkSyncConfigured}>
+              <Wifi size={14} />
+              New Network Tmux
+            </button>
           </div>
           <div className="server-ops-network-flow" aria-label="Network sync workflow">
             <span>Pull latest</span>
@@ -4481,11 +4492,35 @@ function ServerOperationsPanel({
       </div>
 
       <section className="server-ops-card server-ops-inventory-card">
-        <div className="parallel-section-title">
+        <div className="parallel-section-title server-ops-inventory-title">
           <div>
             <strong>Server Operation Inventory</strong>
-            <span>Latest state per enabled server · ordered by Server ID</span>
+            <span>{enabledServers.length} enabled servers · latest state ordered by Server ID</span>
           </div>
+          {inventoryTab === "network" ? (
+            <button className="icon-button compact primary" type="button" onClick={onNetworkCheck} disabled={operationBusy || onlineServers.length === 0}>
+              <Search size={14} />
+              Check Network
+            </button>
+          ) : null}
+        </div>
+        <div className="server-ops-inventory-tabs" role="tablist" aria-label="Server operation inventory view">
+          {([
+            ["sync", "Code Sync"],
+            ["network", "Network"],
+            ["upload", "Scan + Upload"]
+          ] as const).map(([value, label]) => (
+            <button
+              key={value}
+              type="button"
+              role="tab"
+              aria-selected={inventoryTab === value}
+              className={inventoryTab === value ? "active" : ""}
+              onClick={() => setInventoryTab(value)}
+            >
+              {label}
+            </button>
+          ))}
         </div>
         {enabledServers.length > 0 ? (
           <div className="server-ops-history-table-wrap">
@@ -4494,11 +4529,10 @@ function ServerOperationsPanel({
                 <tr>
                   <th>Server ID</th>
                   <th>SSH</th>
-                  <th>Code Sync</th>
-                  <th>Network</th>
-                  <th>Network Check</th>
-                  <th>Upload</th>
-                  <th>Last Check</th>
+                  {inventoryTab === "sync" ? <th>Code Sync</th> : null}
+                  {inventoryTab === "network" ? <><th>Network Sync</th><th>Network Check</th></> : null}
+                  {inventoryTab === "upload" ? <th>Upload</th> : null}
+                  <th>{inventoryTab === "network" ? "Last Check" : "Last Run"}</th>
                   <th aria-label="Actions" />
                 </tr>
               </thead>
@@ -4508,6 +4542,7 @@ function ServerOperationsPanel({
                     key={server.id}
                     server={server}
                     operations={operationsByServer.get(server.id) ?? new Map()}
+                    inventoryTab={inventoryTab}
                     busy={busy}
                     onStop={onStop}
                     onRetry={onRetry}
@@ -4525,21 +4560,35 @@ function ServerOperationsPanel({
 function ServerOperationRow({
   server,
   operations,
+  inventoryTab,
   busy,
   onStop,
   onRetry
 }: {
   server: ServerRow;
   operations: Map<ServerOperation["type"], ServerOperation>;
+  inventoryTab: ServerOperationInventoryTab;
   busy: string | null;
   onStop: (operation: ServerOperation) => void;
   onRetry: (operation: ServerOperation) => void;
 }) {
-  const operationList = Array.from(operations.values());
-  const actionable = operationList.filter((operation) => (
+  const visibleTypes: ServerOperation["type"][] = inventoryTab === "sync"
+    ? ["sync"]
+    : inventoryTab === "network"
+      ? ["network_sync", "network_check"]
+      : ["upload"];
+  const actionable = visibleTypes
+    .map((type) => operations.get(type))
+    .filter((operation): operation is ServerOperation => Boolean(operation))
+    .filter((operation) => (
     !serverOperationIsTerminal(operation) || operation.status === "failed" || operation.status === "canceled"
   ));
   const networkCheck = operations.get("network_check") ?? null;
+  const primaryOperation = inventoryTab === "sync"
+    ? operations.get("sync") ?? null
+    : inventoryTab === "network"
+      ? networkCheck
+      : operations.get("upload") ?? null;
   return (
     <tr className="server-ops-history-row server-ops-inventory-row">
       <td>
@@ -4548,11 +4597,10 @@ function ServerOperationRow({
       <td>
         <ConnectionBadge status={server.latest?.connectionStatus ?? "unknown"} />
       </td>
-      <td><ServerOperationState operation={operations.get("sync") ?? null} /></td>
-      <td><ServerOperationState operation={operations.get("network_sync") ?? null} /></td>
-      <td><ServerOperationState operation={networkCheck} /></td>
-      <td><ServerOperationState operation={operations.get("upload") ?? null} /></td>
-      <td>{networkCheck ? formatShortDateTime(networkCheck.finishedAt ?? networkCheck.updatedAt) : <span className="server-ops-never">Never</span>}</td>
+      {inventoryTab === "sync" ? <td><ServerOperationState operation={operations.get("sync") ?? null} /></td> : null}
+      {inventoryTab === "network" ? <><td><ServerOperationState operation={operations.get("network_sync") ?? null} /></td><td><ServerOperationState operation={networkCheck} /></td></> : null}
+      {inventoryTab === "upload" ? <td><ServerOperationState operation={operations.get("upload") ?? null} /></td> : null}
+      <td>{primaryOperation ? formatShortDateTime(primaryOperation.finishedAt ?? primaryOperation.updatedAt) : <span className="server-ops-never">Never</span>}</td>
       <td>
         <div className="server-ops-row-actions">
           {actionable.map((operation) => {
@@ -4585,7 +4633,7 @@ function ServerOperationState({ operation }: { operation: ServerOperation | null
   return (
     <div className="server-ops-result-cell" title={detail ?? undefined}>
       <span className={`server-ops-result-pill ${result.tone}`}>{result.label}</span>
-      <small>{formatServerOperationStatus(operation.status)}</small>
+      <small>{detail ?? formatServerOperationStatus(operation.status)}</small>
     </div>
   );
 }
@@ -5121,6 +5169,9 @@ function serverOperationResultDetail(operation: ServerOperation): string | null 
   if (detail && operation.type === "network_check") {
     const output = typeof detail.output === "string" ? detail.output.trim() : "";
     const httpCode = typeof detail.http_code === "string" ? detail.http_code : "000";
+    if (detail.reason === "tmux_missing") return "Mihomo tmux session is not running.";
+    if (detail.reason === "proxy_refused") return "Proxy port 7890 refused the connection.";
+    if (detail.reason === "timeout") return "Hugging Face connection timed out through the proxy.";
     return output || `Hugging Face was unreachable through the proxy (HTTP ${httpCode}).`;
   }
   if (operation.lastError && !/^Exit code\b/i.test(operation.lastError)) return operation.lastError;

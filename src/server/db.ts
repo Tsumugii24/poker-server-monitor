@@ -986,20 +986,21 @@ export class MonitorDatabase {
   }
 
   getServerOperationInventory(): ServerOperation[] {
-    return this.query<ServerOperation>(
-      `SELECT * FROM (
-         SELECT server_operations.*,
-                ROW_NUMBER() OVER (
-                  PARTITION BY server_id, operation_type
-                  ORDER BY updated_at DESC, created_at DESC
-                ) AS operation_rank
-         FROM server_operations
-       )
-       WHERE operation_rank = 1
-       ORDER BY server_id, operation_type`,
+    const operations = this.query<ServerOperation>(
+      `SELECT * FROM server_operations
+       ORDER BY updated_at DESC, created_at DESC`,
       [],
       mapServerOperation
     );
+    const latest = new Map<string, ServerOperation>();
+    for (const operation of operations) {
+      const key = `${operation.serverId}\u0000${operation.type}`;
+      if (!latest.has(key)) latest.set(key, operation);
+    }
+    return Array.from(latest.values()).sort((left, right) => {
+      const serverDelta = left.serverId.localeCompare(right.serverId, undefined, { numeric: true, sensitivity: "base" });
+      return serverDelta !== 0 ? serverDelta : left.type.localeCompare(right.type);
+    });
   }
 
   clearTerminalServerOperations(): number {
