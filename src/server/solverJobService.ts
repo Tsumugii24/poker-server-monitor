@@ -80,6 +80,8 @@ type SolverJobServiceOptions = {
   hfProxyUrl?: string | null;
   solverHfProxyUrl?: string | null;
   networkSubscriptionUrl?: string | null;
+  giteeUsername?: string | null;
+  giteeToken?: string | null;
   getHfProxySettings?: () => Pick<AlertSettings, "hfProxyEnabled" | "solverHfProxyEnabled">;
   getScenarioLibrary?: () => SolverScenarioLibraryItem[];
 };
@@ -112,6 +114,8 @@ export class SolverJobService {
   private readonly hfProxyUrl: string | null;
   private readonly solverHfProxyUrl: string | null;
   private readonly networkSubscriptionUrl: string | null;
+  private readonly giteeUsername: string;
+  private readonly giteeToken: string | null;
   private readonly getHfProxySettings: () => Pick<AlertSettings, "hfProxyEnabled" | "solverHfProxyEnabled">;
   private readonly getScenarioLibrary: () => SolverScenarioLibraryItem[];
   private queueReconciliationTask: Promise<void> | null = null;
@@ -124,6 +128,8 @@ export class SolverJobService {
     this.hfProxyUrl = options.hfProxyUrl?.trim() || null;
     this.solverHfProxyUrl = options.solverHfProxyUrl?.trim() || null;
     this.networkSubscriptionUrl = options.networkSubscriptionUrl?.trim() || null;
+    this.giteeUsername = options.giteeUsername?.trim() || "Tsumugii24";
+    this.giteeToken = options.giteeToken?.trim() || null;
     this.getHfProxySettings = options.getHfProxySettings ?? (() => ({
       hfProxyEnabled: false,
       solverHfProxyEnabled: false
@@ -654,6 +660,8 @@ export class SolverJobService {
         logFilePath: operation.logFilePath,
         bodyCommand: buildServerNetworkSyncCommand({
           subscriptionUrl: this.networkSubscriptionUrl,
+          giteeUsername: this.giteeUsername,
+          giteeToken: this.giteeToken,
           redactSecrets: false
         })
       });
@@ -812,6 +820,8 @@ export class SolverJobService {
           logFilePath: operation.logFilePath,
           bodyCommand: buildServerNetworkSyncCommand({
             subscriptionUrl: this.networkSubscriptionUrl,
+            giteeUsername: this.giteeUsername,
+            giteeToken: this.giteeToken,
             redactSecrets: false
           })
         })
@@ -1553,7 +1563,11 @@ export class SolverJobService {
   private createNetworkSyncOperation(server: ServerRow, id: string = randomUUID()): ServerOperation {
     const solverRoot = effectiveSolverRoot(server);
     const paths = serverOperationPaths(id);
-    const body = buildServerNetworkSyncCommand({ redactSecrets: true });
+    const body = buildServerNetworkSyncCommand({
+      giteeUsername: this.giteeUsername,
+      giteeToken: this.giteeToken,
+      redactSecrets: true
+    });
     const command = buildTrackedServerOperationCommand({
       id,
       type: "network_sync",
@@ -2510,36 +2524,65 @@ if [ "$STASH_CODE" -ne 0 ] || [ "$PULL_CODE" -ne 0 ]; then exit 1; fi`;
 
 export function buildServerNetworkSyncCommand({
   subscriptionUrl = null,
+  giteeUsername = "Tsumugii24",
+  giteeToken = null,
   redactSecrets = false
 }: {
   subscriptionUrl?: string | null;
+  giteeUsername?: string | null;
+  giteeToken?: string | null;
   redactSecrets?: boolean;
 } = {}): string {
   const normalizedUrl = subscriptionUrl?.trim() || null;
+  const normalizedGiteeUsername = giteeUsername?.trim() || "Tsumugii24";
+  const normalizedGiteeToken = giteeToken?.trim() || null;
   if (!redactSecrets && !normalizedUrl) {
     throw new Error("SUBSCRIPTION_URL is required for network sync operations.");
   }
   const subscriptionAssignment = redactSecrets
     ? "SUBSCRIPTION_URL=$SUBSCRIPTION_URL"
     : `SUBSCRIPTION_URL=${shellQuote(normalizedUrl!)}`;
+  const giteeUsernameAssignment = redactSecrets
+    ? "GITEE_USERNAME=$GITEE_USERNAME"
+    : `GITEE_USERNAME=${shellQuote(normalizedGiteeUsername)}`;
+  const giteeTokenAssignment = redactSecrets
+    ? "GITEE_TOKEN=$GITEE_TOKEN"
+    : `GITEE_TOKEN=${shellQuote(normalizedGiteeToken ?? "")}`;
   return String.raw`set +e
 REPO_DIR="$HOME/mihomo-release"
 REPO_URL="https://gitee.com/Tsumugii24/mihomo-release"
 cd "$HOME"
 NETWORK_STARTED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 export GIT_TERMINAL_PROMPT=0
-export GIT_ASKPASS=/bin/false
 export SSH_ASKPASS=/bin/false
 export GIT_CONFIG_NOSYSTEM=1
 export GIT_CONFIG_GLOBAL=/dev/null
 ${subscriptionAssignment}
+${giteeUsernameAssignment}
+${giteeTokenAssignment}
+GIT_ASKPASS_FILE=""
+if [ -n "$GITEE_TOKEN" ]; then
+  GIT_ASKPASS_FILE=$(mktemp)
+  cat > "$GIT_ASKPASS_FILE" <<'SH'
+#!/bin/sh
+case "$1" in
+  *Username*) printf '%s\n' "$GITEE_USERNAME" ;;
+  *Password*) printf '%s\n' "$GITEE_TOKEN" ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod 700 "$GIT_ASKPASS_FILE"
+  export GITEE_USERNAME GITEE_TOKEN GIT_ASKPASS="$GIT_ASKPASS_FILE"
+else
+  export GIT_ASKPASS=/bin/false
+fi
 if [ -d "$REPO_DIR/.git" ]; then
   cd "$REPO_DIR"
   git stash >/dev/null 2>&1
   REMOTE_OUTPUT=$(git remote set-url origin "$REPO_URL" 2>&1)
   REMOTE_CODE=$?
   if [ "$REMOTE_CODE" -eq 0 ]; then
-    GIT_OUTPUT=$(timeout 120 git -c credential.helper= -c core.askPass=/bin/false -c credential.interactive=never pull --rebase "$REPO_URL" master 2>&1)
+    GIT_OUTPUT=$(timeout 120 git -c credential.helper= pull --rebase "$REPO_URL" master 2>&1)
     GIT_CODE=$?
   else
     GIT_OUTPUT="$REMOTE_OUTPUT"
@@ -2551,9 +2594,18 @@ elif [ -e "$REPO_DIR" ]; then
   GIT_CODE=1
   INSTALL_KIND=invalid
 else
-  GIT_OUTPUT=$(timeout 120 git -c credential.helper= -c core.askPass=/bin/false -c credential.interactive=never clone --branch master --single-branch "$REPO_URL" "$REPO_DIR" 2>&1)
+  GIT_OUTPUT=$(timeout 120 git -c credential.helper= clone --branch master --single-branch "$REPO_URL" "$REPO_DIR" 2>&1)
   GIT_CODE=$?
   INSTALL_KIND=cloned
+fi
+if [ -n "$GIT_ASKPASS_FILE" ]; then
+  rm -f "$GIT_ASKPASS_FILE"
+fi
+unset GITEE_TOKEN GITEE_USERNAME GIT_ASKPASS
+GIT_ATTEMPT_CODE=$GIT_CODE
+if [ "$GIT_CODE" -ne 0 ] && { [ -x "$REPO_DIR/mihomo" ] || [ -f "$REPO_DIR/mihomo.gz" ]; }; then
+  GIT_CODE=0
+  INSTALL_KIND=cached
 fi
 if [ "$GIT_CODE" -eq 0 ]; then
   cd "$REPO_DIR"
@@ -2633,13 +2685,13 @@ else
   NETWORK_KIND=failed
 fi
 export GIT_OUTPUT VALIDATE_OUTPUT
-python - "$OP_RESULT_FILE" "$NETWORK_KIND" "$INSTALL_KIND" "$GIT_CODE" "$BINARY_CODE" "$BACKUP_CODE" "$DOWNLOAD_CODE" "$VALIDATE_CODE" "$START_CODE" "$SESSION_CODE" "$NETWORK_STARTED_AT" "$NETWORK_FINISHED_AT" <<'PY'
+python - "$OP_RESULT_FILE" "$NETWORK_KIND" "$INSTALL_KIND" "$GIT_CODE" "$GIT_ATTEMPT_CODE" "$BINARY_CODE" "$BACKUP_CODE" "$DOWNLOAD_CODE" "$VALIDATE_CODE" "$START_CODE" "$SESSION_CODE" "$NETWORK_STARTED_AT" "$NETWORK_FINISHED_AT" <<'PY'
 import json
 import os
 import sys
 
-(path, kind, install_kind, git_code, binary_code, backup_code, download_code,
- validate_code, start_code, session_code, started_at, finished_at) = sys.argv[1:13]
+(path, kind, install_kind, git_code, git_attempt_code, binary_code, backup_code,
+ download_code, validate_code, start_code, session_code, started_at, finished_at) = sys.argv[1:14]
 result = {
     "summary": {
         "network_ready": 1 if kind == "ready" else 0,
@@ -2647,11 +2699,13 @@ result = {
         "config_refreshed": 1 if kind == "ready" else 0,
         "cloned": 1 if install_kind == "cloned" and kind == "ready" else 0,
         "updated": 1 if install_kind == "updated" and kind == "ready" else 0,
+        "cached": 1 if install_kind == "cached" and kind == "ready" else 0,
     },
     "details": [{
         "kind": kind,
         "install_kind": install_kind,
         "git_code": int(git_code),
+        "git_attempt_code": int(git_attempt_code),
         "binary_code": int(binary_code),
         "backup_code": int(backup_code),
         "download_code": int(download_code),

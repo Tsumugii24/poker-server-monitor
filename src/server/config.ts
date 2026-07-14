@@ -24,6 +24,8 @@ export type RuntimeConfig = {
   hfProxyUrl: string | null;
   solverHfProxyUrl: string | null;
   subscriptionUrl: string | null;
+  giteeUsername: string;
+  giteeToken: string | null;
   ssh: {
     username: string;
     password: string;
@@ -75,6 +77,8 @@ export function loadRuntimeConfig(env: EnvSource = process.env): RuntimeConfig {
     hfProxyUrl: optionalProxyUrl(env.SERVER_MONITOR_HF_PROXY_URL, "SERVER_MONITOR_HF_PROXY_URL"),
     solverHfProxyUrl: optionalProxyUrl(env.SOLVER_HF_PROXY_URL, "SOLVER_HF_PROXY_URL"),
     subscriptionUrl: env.SUBSCRIPTION_URL?.trim() || null,
+    giteeUsername: env.GITEE_USERNAME?.trim() || "Tsumugii24",
+    giteeToken: env.GITEE_TOKEN?.trim() || null,
     ssh: {
       username,
       password

@@ -160,13 +160,28 @@ describe("solver job helpers", () => {
   });
 
   it("builds a redacted Mihomo repository and config sync command", () => {
-    const command = buildServerNetworkSyncCommand({ redactSecrets: true });
+    const command = buildServerNetworkSyncCommand({
+      giteeUsername: "gitee-login",
+      giteeToken: "gitee-secret-token",
+      redactSecrets: true
+    });
 
     expect(command).toContain("SUBSCRIPTION_URL=$SUBSCRIPTION_URL");
+    expect(command).toContain("GITEE_USERNAME=$GITEE_USERNAME");
+    expect(command).toContain("GITEE_TOKEN=$GITEE_TOKEN");
+    expect(command).not.toContain("gitee-secret-token");
     expect(command).toContain('REPO_URL="https://gitee.com/Tsumugii24/mihomo-release"');
     expect(command).toContain("export GIT_TERMINAL_PROMPT=0");
+    expect(command).toContain('GIT_ASKPASS_FILE=$(mktemp)');
+    expect(command).toContain('*Username*) printf');
+    expect(command).toContain('*Password*) printf');
+    expect(command).toContain('rm -f "$GIT_ASKPASS_FILE"');
+    expect(command).toContain("git -c credential.helper= pull");
+    expect(command).not.toContain("credential.interactive=never");
     expect(command).toContain('pull --rebase "$REPO_URL" master');
     expect(command).toContain('clone --branch master --single-branch "$REPO_URL"');
+    expect(command).toContain('INSTALL_KIND=cached');
+    expect(command).toContain('GIT_ATTEMPT_CODE=$GIT_CODE');
     expect(command).toContain("timeout 90 wget --timeout=30 --tries=2");
     expect(command).toContain("config.yaml.previous");
     expect(command).toContain("./mihomo -t -d .");
@@ -628,7 +643,9 @@ describe("solver job API", () => {
       preflopRangesPath,
       credentials: { username: "root", password: "secret" },
       executor,
-      networkSubscriptionUrl: "https://subscription.example/secret-token"
+      networkSubscriptionUrl: "https://subscription.example/secret-token",
+      giteeUsername: "gitee-login",
+      giteeToken: "gitee-secret-token"
     });
     const app = createApp({ db, refreshService, preflopRangesPath, solverJobService });
 
@@ -643,8 +660,11 @@ describe("solver job API", () => {
       status: "running"
     });
     expect(started.body.operations[0].command).toContain("SUBSCRIPTION_URL=$SUBSCRIPTION_URL");
+    expect(started.body.operations[0].command).toContain("GITEE_TOKEN=$GITEE_TOKEN");
     expect(started.body.operations[0].command).not.toContain("secret-token");
     expect(commands.some((command) => command.includes("secret-token"))).toBe(true);
+    expect(commands.some((command) => command.includes("gitee-secret-token"))).toBe(true);
+    expect(commands.some((command) => command.includes("GIT_ASKPASS_FILE=$(mktemp)"))).toBe(true);
     expect(commands.some((command) => command.includes("tmux send-keys"))).toBe(true);
   });
 

@@ -1762,7 +1762,8 @@ function normalizeServerOperationStatus(value: SqlValue): ServerOperationStatus 
 function redactSensitiveCommand(value: string): string {
   return value
     .replace(/export HF_TOKEN=(?:'[^']*'|"[^"]*"|[^&\s]+)/g, "export HF_TOKEN=$HF_TOKEN")
-    .replace(/SUBSCRIPTION_URL=(?:'[^']*'|"[^"]*"|[^&\s]+)/g, "SUBSCRIPTION_URL=$SUBSCRIPTION_URL");
+    .replace(/SUBSCRIPTION_URL=(?:'[^']*'|"[^"]*"|[^&\s]+)/g, "SUBSCRIPTION_URL=$SUBSCRIPTION_URL")
+    .replace(/GITEE_TOKEN=(?:'[^']*'|"[^"]*"|[^&\s]+)/g, "GITEE_TOKEN=$GITEE_TOKEN");
 }
 
 function mapSnapshot(row: Record<string, SqlValue>): MetricSnapshot {

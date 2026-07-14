@@ -4440,7 +4440,7 @@ function ServerOperationsPanel({
             <span>Validate</span>
             <span>Restart mihomo</span>
           </div>
-          <pre className="server-ops-command-preview">{`cd "$HOME/mihomo-release" && git stash && git pull --rebase https://gitee.com/Tsumugii24/mihomo-release master && wget -O config.yaml.next "$SUBSCRIPTION_URL" && mv config.yaml.next config.yaml && ./mihomo -t -d . && tmux kill-session -t mihomo && tmux new-session -d -s mihomo -c "$HOME/mihomo-release" "exec ./mihomo -d ."`}</pre>
+          <pre className="server-ops-command-preview">{`cd "$HOME/mihomo-release" && export GITEE_USERNAME=$GITEE_USERNAME && export GITEE_TOKEN=$GITEE_TOKEN && git stash && git pull --rebase https://gitee.com/Tsumugii24/mihomo-release master && wget -O config.yaml.next "$SUBSCRIPTION_URL" && mv config.yaml.next config.yaml && ./mihomo -t -d . && tmux kill-session -t mihomo && tmux new-session -d -s mihomo -c "$HOME/mihomo-release" "exec ./mihomo -d ."`}</pre>
         </section>
 
         <section className="server-ops-card">
@@ -5113,6 +5113,7 @@ function serverOperationCompactResult(operation: ServerOperation): { label: stri
 
   if (operation.type === "network_sync") {
     if (operation.status === "failed" || numericResult(summary.network_failed) > 0) return { label: "failed", tone: "danger" };
+    if (numericResult(summary.cached) > 0) return { label: "ready · cached", tone: "warning" };
     if (numericResult(summary.network_ready) > 0) return { label: "proxy ready", tone: "success" };
     if (operation.status === "canceled") return { label: "canceled", tone: "warning" };
     if (!serverOperationIsTerminal(operation)) return { label: "in progress", tone: "active" };
@@ -5140,6 +5141,11 @@ function serverOperationCompactResult(operation: ServerOperation): { label: stri
 }
 
 function serverOperationResultDetail(operation: ServerOperation): string | null {
+  if (operation.type === "network_sync" && numericResult(operation.result?.summary.cached) > 0) {
+    const detail = operation.result?.details[0];
+    const output = typeof detail?.git_output === "string" ? detail.git_output.trim().split(/\r?\n/).filter(Boolean).at(-1) : "";
+    return output ? `Git pull failed; existing Mihomo used: ${output}` : "Git pull failed; the existing Mihomo binary was used.";
+  }
   if (operation.status !== "failed") return null;
   const detail = operation.result?.details[0];
   if (detail && operation.type === "network_sync") {

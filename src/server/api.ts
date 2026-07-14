@@ -92,6 +92,8 @@ export type AppDependencies = {
   hfProxyUrl?: string | null;
   solverHfProxyUrl?: string | null;
   networkSubscriptionUrl?: string | null;
+  giteeUsername?: string | null;
+  giteeToken?: string | null;
   sshUsername?: string | null;
   defaultRefreshIntervalMs?: number;
   sendTestAlert?: (message: string, roomId: string) => Promise<void> | void;
@@ -131,6 +133,8 @@ export function createApp({
   hfProxyUrl = null,
   solverHfProxyUrl = null,
   networkSubscriptionUrl = null,
+  giteeUsername = null,
+  giteeToken = null,
   sshUsername = null,
   defaultRefreshIntervalMs = 3_600_000,
   sendTestAlert,
@@ -158,6 +162,8 @@ export function createApp({
     hfProxyUrl,
     solverHfProxyUrl,
     networkSubscriptionUrl,
+    giteeUsername,
+    giteeToken,
     getHfProxySettings: () => loadAlertSettings(alertSettingsPath),
     getScenarioLibrary: () => loadSolverScenarioLibrary(solverScenarioLibraryPath).scenarios
   });

@@ -31,6 +31,8 @@ separately:
 SERVER_MONITOR_HF_PROXY_URL=http://127.0.0.1:7890
 SOLVER_HF_PROXY_URL=http://127.0.0.1:7890
 SUBSCRIPTION_URL=https://your-mihomo-subscription-url
+GITEE_USERNAME=Tsumugii24
+GITEE_TOKEN=your-gitee-personal-access-token
 ```
 
 `SERVER_MONITOR_HF_PROXY_URL` is used by this app when checking dataset progress or creating
@@ -41,6 +43,12 @@ If either the `.env` value is empty or the dashboard switch is off, that path co
 `SUBSCRIPTION_URL` is used only by the manual **Server Operations > Sync Network** action.
 It is sent directly to selected SSH servers; the UI, operation database, and command previews
 retain only the `$SUBSCRIPTION_URL` placeholder.
+
+`GITEE_USERNAME` must be the Gitee login/personal-space name associated with the token.
+`GITEE_TOKEN` is used as the HTTPS Git password when Sync Network clones or pulls
+`mihomo-release`. The token is passed through a temporary remote `GIT_ASKPASS` script and is
+redacted from the UI, operation database, and command previews. If the token belongs to
+`Tsumugii24`, the default username can be kept.
 
 Parallel solver allocation uses the solver board list from `cards/cards.txt`. By default the
 backend looks under the configured server `solverRoot` values, such as `~/solver/cards/cards.txt`.
