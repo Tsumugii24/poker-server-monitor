@@ -11,7 +11,7 @@ import {
 import {
   shouldSendWeChatContextRefreshReminder
 } from "./wechatContextReminder";
-import { readStoredWeChatSession } from "./wechatStorage";
+import { quarantineInvalidWeChatStorage, readStoredWeChatSession } from "./wechatStorage";
 
 type WeChatBotInstance = {
   stop?: () => void;
@@ -297,6 +297,13 @@ export class WeChatNotifier {
     const Bot = mod.WeChatBot ?? mod.default;
     if (!Bot) {
       throw new Error("@wechatbot/wechatbot did not export WeChatBot");
+    }
+
+    const repairs = quarantineInvalidWeChatStorage(this.options.storageDir);
+    for (const repair of repairs) {
+      console.warn(
+        `Recovered invalid WeChat storage ${repair.filePath}; backup saved as ${repair.backupPath}.`
+      );
     }
 
     this.started = true;

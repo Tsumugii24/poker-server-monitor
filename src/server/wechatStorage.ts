@@ -10,6 +10,18 @@ type StoredCredentials = {
   savedAt?: string;
 };
 
+const WECHAT_SDK_STORAGE_FILES = [
+  "credentials.json",
+  "cursor.json",
+  "context_tokens.json",
+  "typing_tickets.json"
+] as const;
+
+export type WeChatStorageRepair = {
+  filePath: string;
+  backupPath: string;
+};
+
 export function defaultWeChatStoredSession(): WeChatStoredSession {
   return defaultStoredSession();
 }
@@ -36,10 +48,40 @@ export function readStoredWeChatSession(
   };
 }
 
+export function quarantineInvalidWeChatStorage(
+  storageDir = path.join(os.homedir(), ".wechatbot"),
+  now = Date.now()
+): WeChatStorageRepair[] {
+  const repairs: WeChatStorageRepair[] = [];
+  for (const filename of WECHAT_SDK_STORAGE_FILES) {
+    const filePath = path.join(storageDir, filename);
+    if (!fs.existsSync(filePath)) continue;
+    try {
+      JSON.parse(fs.readFileSync(filePath, "utf8"));
+    } catch {
+      const backupPath = availableBackupPath(filePath, now);
+      fs.renameSync(filePath, backupPath);
+      repairs.push({ filePath, backupPath });
+    }
+  }
+  return repairs;
+}
+
 function readJsonFile<T>(filePath: string): T | null {
   try {
     return JSON.parse(fs.readFileSync(filePath, "utf8")) as T;
   } catch {
     return null;
   }
+}
+
+function availableBackupPath(filePath: string, now: number): string {
+  const base = `${filePath}.corrupt-${now}`;
+  let candidate = base;
+  let suffix = 1;
+  while (fs.existsSync(candidate)) {
+    candidate = `${base}-${suffix}`;
+    suffix += 1;
+  }
+  return candidate;
 }

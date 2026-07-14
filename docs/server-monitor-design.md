@@ -195,6 +195,7 @@ WeChat delivery relies on a per-user `context_token`. The token is issued by the
 Context refresh reminder behavior:
 
 - Target activity is persisted per WeChat account in `target_activity.json` under `data/wechat-accounts/<accountId>/`.
+- Before restoring an account, the monitor validates the SDK JSON files. Empty or truncated credentials, cursor, context-token, or typing-ticket files are moved to `.corrupt-<timestamp>` backups so one damaged file cannot block connector startup.
 - `lastInboundAt` is reset whenever the target user sends ClawBot a message.
 - The backend checks 30 seconds after startup and then every 15 minutes.
 - A reminder is sent only when `23h <= now - lastInboundAt < 24h`.

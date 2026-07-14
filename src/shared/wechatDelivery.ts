@@ -107,6 +107,13 @@ export function classifyWeChatSendError(error: unknown): ClassifiedWeChatSendErr
 }
 
 export function classifyWeChatStartupError(error: unknown): ClassifiedWeChatStartupError {
+  if (error instanceof SyntaxError && /JSON|Unexpected end/i.test(error.message)) {
+    return {
+      message: "WeChat iLink returned an invalid JSON response. Check network or proxy access, then retry login.",
+      logMessage: "WeChat connector login failed: invalid JSON response from iLink; check network or proxy access"
+    };
+  }
+
   if (isTimeoutError(error)) {
     return {
       message: "WeChat login timed out while contacting iLink. Check network access and retry login.",

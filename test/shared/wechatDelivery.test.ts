@@ -87,6 +87,13 @@ describe("wechatDelivery", () => {
     expect(classified.logMessage).toContain("ENOTFOUND");
   });
 
+  it("classifies malformed iLink JSON responses", () => {
+    const classified = classifyWeChatStartupError(new SyntaxError("Unexpected end of JSON input"));
+
+    expect(classified.message).toContain("invalid JSON response");
+    expect(classified.logMessage).toContain("iLink");
+  });
+
   it("marks login_failed when bot startup errored before login", () => {
     const delivery = buildWeChatDelivery({
       alertsConfigured: true,
