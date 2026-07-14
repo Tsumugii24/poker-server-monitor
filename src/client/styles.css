@@ -333,6 +333,18 @@ h1, h2, h3, p {
   background: var(--red-bg);
 }
 
+.notice.success {
+  border-color: color-mix(in srgb, var(--green-text) 30%, transparent);
+  color: var(--green-text);
+  background: var(--green-bg);
+}
+
+.notice.warning {
+  border-color: color-mix(in srgb, var(--yellow-text) 30%, transparent);
+  color: var(--yellow-text);
+  background: var(--yellow-bg);
+}
+
 /* ── Section headings ──────────────────────────────────────── */
 .section-heading {
   display: flex;

@@ -153,13 +153,18 @@ describe("preflop range API", () => {
       solverJobRepoNamespace: "Tsumugii",
       hfToken: "hf_test_token"
     });
-    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
-      size: {
-        dataset: {
-          num_rows: 1755
-        }
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      if (String(input).startsWith("https://huggingface.co/api/datasets/")) {
+        return new Response(JSON.stringify({ id: "Tsumugii/3ia-4.2-3od-4.3" }), { status: 200 });
       }
-    }), { status: 200 })));
+      return new Response(JSON.stringify({
+        size: {
+          dataset: {
+            num_rows: 1755
+          }
+        }
+      }), { status: 200 });
+    }));
 
     await request(app)
       .post("/api/preflop-ranges/status")
@@ -187,8 +192,69 @@ describe("preflop range API", () => {
       ratio: 1
     });
     expect(vi.mocked(fetch).mock.calls[0]?.[0]).toBe(
+      "https://huggingface.co/api/datasets/Tsumugii/3ia-4.2-3od-4.3"
+    );
+    expect(vi.mocked(fetch).mock.calls[1]?.[0]).toBe(
       "https://datasets-server.huggingface.co/size?dataset=Tsumugii%2F3ia-4.2-3od-4.3"
     );
+  });
+
+  it("treats a redirected Hugging Face dataset name as an exact-match miss", async () => {
+    const app = createApp({
+      db,
+      refreshService: service,
+      preflopRangesPath,
+      solverJobRepoNamespace: "Tsumugii",
+      hfToken: "hf_test_token"
+    });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(null, {
+      status: 307,
+      headers: { location: "https://huggingface.co/api/datasets/Tsumugii/3ia-4.2-3od-4.3-backup" }
+    })));
+
+    await request(app)
+      .post("/api/preflop-ranges/status")
+      .send({ path: "3OD-EP/3OD-4.3 vs 3IA-4.2.json", status: "approved" });
+
+    const response = await request(app).post("/api/preflop-ranges/refresh-progress");
+
+    expect(response.status).toBe(200);
+    expect(response.body.checked).toBe(1);
+    expect(response.body.failed).toBe(0);
+    expect(response.body.tree[0].children[0]).toMatchObject({
+      runStatus: "idle",
+      datasetName: "3ia-4.2-3od-4.3",
+      progress: {
+        rows: 0,
+        totalRows: 1755,
+        ratio: 0
+      }
+    });
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects a Hugging Face response whose dataset id does not match exactly", async () => {
+    const app = createApp({
+      db,
+      refreshService: service,
+      preflopRangesPath,
+      solverJobRepoNamespace: "Tsumugii",
+      hfToken: "hf_test_token"
+    });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      id: "Tsumugii/3ia-4.2-3od-4.3-backup"
+    }), { status: 200 })));
+
+    await request(app)
+      .post("/api/preflop-ranges/status")
+      .send({ path: "3OD-EP/3OD-4.3 vs 3IA-4.2.json", status: "approved" });
+
+    const response = await request(app).post("/api/preflop-ranges/refresh-progress");
+
+    expect(response.status).toBe(200);
+    expect(response.body.failed).toBe(0);
+    expect(response.body.tree[0].children[0].progress).toMatchObject({ rows: 0, ratio: 0 });
+    expect(fetch).toHaveBeenCalledTimes(1);
   });
 
   it("uploads legacy .range files as .json", async () => {

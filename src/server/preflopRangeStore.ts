@@ -879,10 +879,12 @@ async function fetchHuggingFaceDatasetRows(
   hfToken: string | null,
   hfProxyUrl: string | null
 ): Promise<number> {
-  const url = `https://datasets-server.huggingface.co/size?dataset=${encodeURIComponent(repoId)}`;
   const headers: Record<string, string> = {};
   const token = hfToken?.trim();
   if (token) headers.Authorization = `Bearer ${token}`;
+  if (!await huggingFaceDatasetMatches(repoId, headers, hfProxyUrl)) return 0;
+
+  const url = `https://datasets-server.huggingface.co/size?dataset=${encodeURIComponent(repoId)}`;
   const response = await huggingFaceFetch(url, {
     headers,
     proxyUrl: hfProxyUrl,
@@ -894,6 +896,35 @@ async function fetchHuggingFaceDatasetRows(
   }
   const data = await response.json() as unknown;
   return normalizedRows(extractHuggingFaceRows(data) ?? 0);
+}
+
+async function huggingFaceDatasetMatches(
+  repoId: string,
+  headers: Record<string, string>,
+  hfProxyUrl: string | null
+): Promise<boolean> {
+  const encodedRepoId = repoId.split("/").map(encodeURIComponent).join("/");
+  const response = await huggingFaceFetch(`https://huggingface.co/api/datasets/${encodedRepoId}`, {
+    headers,
+    proxyUrl: hfProxyUrl,
+    redirect: "manual",
+    signal: AbortSignal.timeout(10_000)
+  });
+  if (response.status === 404 || isRedirectStatus(response.status)) return false;
+  if (!response.ok) {
+    throw new Error(`Hugging Face repo check failed for ${repoId}: ${response.status} ${response.statusText}`);
+  }
+
+  const data = await response.json() as unknown;
+  const actualRepoId = isRecord(data) && typeof data.id === "string" ? data.id : null;
+  if (!actualRepoId) {
+    throw new Error(`Hugging Face repo check returned no dataset id for ${repoId}.`);
+  }
+  return actualRepoId === repoId;
+}
+
+function isRedirectStatus(status: number): boolean {
+  return status === 301 || status === 302 || status === 303 || status === 307 || status === 308;
 }
 
 function extractHuggingFaceRows(data: unknown): number | null {

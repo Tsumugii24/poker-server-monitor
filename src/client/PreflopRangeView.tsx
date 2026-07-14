@@ -156,6 +156,11 @@ type PendingServerOperationAction = {
   itemIds?: string[];
 };
 
+type RangeProgressRefreshSummary = {
+  checked: number;
+  failed: number;
+};
+
 const EXPANDED_FOLDERS_KEY = "preflop-range-expanded-folders";
 const PARALLEL_BEST_SERVER_ID_KEY = "preflop-range-parallel-best-server-id";
 const DEFAULT_SELECTED_HAND = "AA";
@@ -202,6 +207,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [rangeProgressRefreshSummary, setRangeProgressRefreshSummary] = useState<RangeProgressRefreshSummary | null>(null);
   const [servers, setServers] = useState<ServerRow[]>([]);
   const [jobs, setJobs] = useState<SolverJob[]>([]);
   const [jobEvents, setJobEvents] = useState<SolverJobEvent[]>([]);
@@ -268,6 +274,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
   const refreshRangeProgress = useCallback(async () => {
     setLoading(true);
     setError(null);
+    setRangeProgressRefreshSummary(null);
     try {
       const response = await fetchPreflopJson<PreflopRangeTreeResponse & { ok: boolean; checked: number; failed: number }>(
         "/api/preflop-ranges/refresh-progress",
@@ -275,6 +282,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
       );
       const normalizedTree = normalizeRangeTreeItems(response.tree);
       setTree(normalizedTree);
+      setRangeProgressRefreshSummary({ checked: response.checked, failed: response.failed });
       if (currentFolderPath && !findFolder(normalizedTree, currentFolderPath)) {
         setCurrentFolderPath("");
       }
@@ -1588,6 +1596,15 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
       </section>
 
       {error ? <div className="notice error">{error}</div> : null}
+      {rangeStatusView === "already" && rangeProgressRefreshSummary ? (
+        <div
+          className={`notice compact-notice ${rangeProgressRefreshSummary.failed > 0 ? "warning" : "success"}`}
+          role="status"
+        >
+          Progress refresh complete: {rangeProgressRefreshSummary.checked} checked, {rangeProgressRefreshSummary.checked - rangeProgressRefreshSummary.failed} updated, {rangeProgressRefreshSummary.failed} failed.
+          {rangeProgressRefreshSummary.failed > 0 ? " Failed checks retained their last successful progress." : ""}
+        </div>
+      ) : null}
 
       <section className="preflop-flow">
         <section className="panel preflop-library">
@@ -1632,7 +1649,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
                 aria-pressed={rangeStatusView === "already"}
                 onClick={() => activateRangeStatusView("already")}
               >
-                Already
+                All Checked
                 <span>{countApprovedFiles(tree)}</span>
               </button>
             </div>
