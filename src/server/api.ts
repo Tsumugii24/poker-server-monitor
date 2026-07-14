@@ -67,6 +67,7 @@ import {
   type SolverScenarioLibraryItem
 } from "../shared/solverJobs";
 import type {
+  ServerNetworkSyncRequest,
   ServerSyncRequest,
   ServerUploadRequest
 } from "../shared/serverOperations";
@@ -89,6 +90,7 @@ export type AppDependencies = {
   hfToken?: string | null;
   hfProxyUrl?: string | null;
   solverHfProxyUrl?: string | null;
+  networkSubscriptionUrl?: string | null;
   sshUsername?: string | null;
   defaultRefreshIntervalMs?: number;
   sendTestAlert?: (message: string, roomId: string) => Promise<void> | void;
@@ -127,6 +129,7 @@ export function createApp({
   hfToken = null,
   hfProxyUrl = null,
   solverHfProxyUrl = null,
+  networkSubscriptionUrl = null,
   sshUsername = null,
   defaultRefreshIntervalMs = 3_600_000,
   sendTestAlert,
@@ -153,6 +156,7 @@ export function createApp({
     hfToken,
     hfProxyUrl,
     solverHfProxyUrl,
+    networkSubscriptionUrl,
     getHfProxySettings: () => loadAlertSettings(alertSettingsPath),
     getScenarioLibrary: () => loadSolverScenarioLibrary(solverScenarioLibraryPath).scenarios
   });
@@ -802,6 +806,19 @@ export function createApp({
       response.status(201).json(await solverJobService.startSyncOperations(request.body));
     } catch (error) {
       respondSolverJobError(response, error, "server_sync_operation_failed");
+    }
+  });
+
+  app.post("/api/server-operations/network-sync", async (request, response) => {
+    if (!isServerNetworkSyncRequest(request.body)) {
+      response.status(400).json({ error: "invalid_server_network_sync_operation" });
+      return;
+    }
+
+    try {
+      response.status(201).json(await solverJobService.startNetworkSyncOperations(request.body));
+    } catch (error) {
+      respondSolverJobError(response, error, "server_network_sync_operation_failed");
     }
   });
 
@@ -1598,6 +1615,10 @@ function isServerSyncRequest(value: unknown): value is ServerSyncRequest {
     Array.isArray(value.serverIds) &&
     value.serverIds.every((id) => typeof id === "string" && id.trim() !== "")
   );
+}
+
+function isServerNetworkSyncRequest(value: unknown): value is ServerNetworkSyncRequest {
+  return isServerSyncRequest(value);
 }
 
 function isServerUploadRequest(value: unknown): value is ServerUploadRequest {

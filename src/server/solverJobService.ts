@@ -53,6 +53,7 @@ import type {
   ServerOperationEvent,
   ServerOperationResult,
   ServerOperationsResponse,
+  ServerNetworkSyncRequest,
   ServerSyncRequest,
   ServerUploadCandidate,
   ServerUploadCandidatesResponse,
@@ -77,16 +78,12 @@ type SolverJobServiceOptions = {
   hfToken?: string | null;
   hfProxyUrl?: string | null;
   solverHfProxyUrl?: string | null;
+  networkSubscriptionUrl?: string | null;
   getHfProxySettings?: () => Pick<AlertSettings, "hfProxyEnabled" | "solverHfProxyEnabled">;
   getScenarioLibrary?: () => SolverScenarioLibraryItem[];
 };
 
 type DispatchPreflightResult = {
-  ready: boolean;
-  reason: string | null;
-};
-
-type ServerCodeReadyResult = {
   ready: boolean;
   reason: string | null;
 };
@@ -113,6 +110,7 @@ export class SolverJobService {
   private readonly hfToken: string | null;
   private readonly hfProxyUrl: string | null;
   private readonly solverHfProxyUrl: string | null;
+  private readonly networkSubscriptionUrl: string | null;
   private readonly getHfProxySettings: () => Pick<AlertSettings, "hfProxyEnabled" | "solverHfProxyEnabled">;
   private readonly getScenarioLibrary: () => SolverScenarioLibraryItem[];
 
@@ -123,6 +121,7 @@ export class SolverJobService {
     this.hfToken = options.hfToken?.trim() || null;
     this.hfProxyUrl = options.hfProxyUrl?.trim() || null;
     this.solverHfProxyUrl = options.solverHfProxyUrl?.trim() || null;
+    this.networkSubscriptionUrl = options.networkSubscriptionUrl?.trim() || null;
     this.getHfProxySettings = options.getHfProxySettings ?? (() => ({
       hfProxyEnabled: false,
       solverHfProxyEnabled: false
@@ -443,18 +442,12 @@ export class SolverJobService {
     return this.requireJob(job.id);
   }
 
-  async start(id: string, options: { deferOnDispatchFailure?: boolean; skipCodeReadyGate?: boolean } = {}): Promise<SolverJob> {
+  async start(id: string, options: { deferOnDispatchFailure?: boolean } = {}): Promise<SolverJob> {
     const job = this.requireJob(id);
     const server = this.requireServer(job.serverId);
     this.ensureServerOnline(server);
     this.ensureNoActiveJob(server.id, job.id);
     this.ensureCredentials();
-    if (!options.skipCodeReadyGate) {
-      const codeReady = await this.ensureSolverCodeReadyForDispatch(server);
-      if (!codeReady.ready) {
-        return this.markJobDispatchPending(job, codeReady.reason ?? `Dispatch pending: solver code is not ready on ${server.id}.`);
-      }
-    }
     const executionCommand = this.buildExecutionCommand(job, server);
 
     this.options.db.updateSolverJob(job.id, { status: "deploying", lastError: null });
@@ -558,7 +551,10 @@ export class SolverJobService {
     await this.reconcileServerOperations();
     return {
       operations: this.options.db.getServerOperations(),
-      events: this.options.db.getServerOperationEvents()
+      events: this.options.db.getServerOperationEvents(),
+      capabilities: {
+        networkSyncConfigured: Boolean(this.networkSubscriptionUrl)
+      }
     };
   }
 
@@ -615,6 +611,34 @@ export class SolverJobService {
       this.options.db.insertServerOperation(operation);
       this.recordOperationEvent(operation.id, "created", `Created sync operation for ${server.id}.`, operation.command);
       await this.startServerOperation(operation, server);
+    }
+    return this.listServerOperations();
+  }
+
+  async startNetworkSyncOperations(input: ServerNetworkSyncRequest = {}): Promise<ServerOperationsResponse> {
+    this.ensureCredentials();
+    if (!this.networkSubscriptionUrl) {
+      throw new Error("SUBSCRIPTION_URL is required for network sync operations.");
+    }
+    const servers = this.operationTargetServers(input.serverIds);
+    if (servers.length === 0) {
+      throw new Error("No online servers are available for network sync.");
+    }
+    for (const server of servers) {
+      const operation = this.createNetworkSyncOperation(server);
+      const executionCommand = buildTrackedServerOperationCommand({
+        id: operation.id,
+        type: operation.type,
+        statusFilePath: operation.statusFilePath,
+        logFilePath: operation.logFilePath,
+        bodyCommand: buildServerNetworkSyncCommand({
+          subscriptionUrl: this.networkSubscriptionUrl,
+          redactSecrets: false
+        })
+      });
+      this.options.db.insertServerOperation(operation);
+      this.recordOperationEvent(operation.id, "created", `Created network sync operation for ${server.id}.`, operation.command);
+      await this.startServerOperation(operation, server, executionCommand);
     }
     return this.listServerOperations();
   }
@@ -1405,6 +1429,38 @@ export class SolverJobService {
     };
   }
 
+  private createNetworkSyncOperation(server: ServerRow): ServerOperation {
+    const id = randomUUID();
+    const solverRoot = effectiveSolverRoot(server);
+    const paths = serverOperationPaths(id);
+    const body = buildServerNetworkSyncCommand({ redactSecrets: true });
+    const command = buildTrackedServerOperationCommand({
+      id,
+      type: "network_sync",
+      statusFilePath: paths.statusFilePath,
+      logFilePath: paths.logFilePath,
+      bodyCommand: body
+    });
+    const now = new Date().toISOString();
+    return {
+      id,
+      type: "network_sync",
+      serverId: server.id,
+      status: "queued",
+      tmuxSession: `network-sync-${safeTmuxName(server.id)}-${id.slice(0, 8)}`,
+      command,
+      items: [{ serverId: server.id, solverRoot }],
+      statusFilePath: paths.statusFilePath,
+      logFilePath: paths.logFilePath,
+      createdAt: now,
+      updatedAt: now,
+      startedAt: null,
+      finishedAt: null,
+      lastError: null,
+      result: null
+    };
+  }
+
   private createUploadOperation(server: ServerRow, items: ServerUploadItem[], initialResult: ServerOperationResult | null = null): ServerOperation {
     const id = randomUUID();
     const solverRoot = effectiveSolverRoot(server);
@@ -1443,14 +1499,14 @@ export class SolverJobService {
     };
   }
 
-  private async startServerOperation(operation: ServerOperation, server: ServerRow): Promise<void> {
+  private async startServerOperation(operation: ServerOperation, server: ServerRow, executionCommand = operation.command): Promise<void> {
     this.options.db.updateServerOperation(operation.id, { status: "deploying", lastError: null });
     this.recordOperationEvent(operation.id, "deploying", `Starting ${operation.type} tmux session ${operation.tmuxSession}.`, null);
     try {
       await this.executor.run(
         server,
         this.options.credentials!,
-        buildServerOperationTmuxStartCommand(operation, effectiveSolverRoot(server), operation.command)
+        buildServerOperationTmuxStartCommand(operation, effectiveSolverRoot(server), executionCommand)
       );
       const now = new Date().toISOString();
       this.options.db.updateServerOperation(operation.id, {
@@ -1616,65 +1672,6 @@ export class SolverJobService {
       finishedAt: null,
       lastError: message
     });
-  }
-
-  private async ensureSolverCodeReadyForDispatch(server: ServerRow): Promise<ServerCodeReadyResult> {
-    await this.reconcileServerOperations();
-    const activeSync = this.activeServerSyncOperation(server.id);
-    if (activeSync) {
-      return {
-        ready: false,
-        reason: `Dispatch pending: solver code sync is already running on ${server.id} (${activeSync.tmuxSession}).`
-      };
-    }
-
-    try {
-      const output = await this.executor.run(
-        server,
-        this.options.credentials!,
-        buildServerCodeReadyCommand({
-          solverRoot: effectiveSolverRoot(server),
-          proxyUrl: this.effectiveRemoteOperationProxyUrl()
-        })
-      );
-      const status = parseServerCodeReadyOutput(output);
-      if (status.ready) return status;
-
-      const operation = this.createSyncOperation(server);
-      this.options.db.insertServerOperation(operation);
-      this.recordOperationEvent(
-        operation.id,
-        "created",
-        `Created solver code sync before dispatch for ${server.id}: ${status.reason ?? "not ready"}.`,
-        operation.command
-      );
-      await this.startServerOperation(operation, server);
-      const updated = this.options.db.getServerOperation(operation.id) ?? operation;
-      if (updated.status === "failed") {
-        return {
-          ready: false,
-          reason: `Dispatch pending: solver code sync failed on ${server.id}: ${updated.lastError ?? "unknown error"}.`
-        };
-      }
-      return {
-        ready: false,
-        reason: `Dispatch pending: solver code sync started on ${server.id} (${updated.tmuxSession}).`
-      };
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      return {
-        ready: false,
-        reason: `Dispatch pending: solver code readiness check failed on ${server.id}: ${message}`
-      };
-    }
-  }
-
-  private activeServerSyncOperation(serverId: string): ServerOperation | null {
-    return this.options.db.getServerOperations().find((operation) =>
-      operation.serverId === serverId &&
-      operation.type === "sync" &&
-      ACTIVE_SERVER_OPERATION_STATUSES.has(operation.status)
-    ) ?? null;
   }
 
   private async assignAndStartNextParallelSliceIfReady(server: ServerRow): Promise<boolean> {
@@ -2328,68 +2325,115 @@ printf '%s\n' "$PULL_OUTPUT"
 if [ "$STASH_CODE" -ne 0 ] || [ "$PULL_CODE" -ne 0 ]; then exit 1; fi`;
 }
 
-export function buildServerCodeReadyCommand({
-  solverRoot,
-  proxyUrl = DEFAULT_REMOTE_PROXY_URL
+export function buildServerNetworkSyncCommand({
+  subscriptionUrl = null,
+  redactSecrets = false
 }: {
-  solverRoot: string;
-  proxyUrl?: string;
-}): string {
+  subscriptionUrl?: string | null;
+  redactSecrets?: boolean;
+} = {}): string {
+  const normalizedUrl = subscriptionUrl?.trim() || null;
+  if (!redactSecrets && !normalizedUrl) {
+    throw new Error("SUBSCRIPTION_URL is required for network sync operations.");
+  }
+  const subscriptionAssignment = redactSecrets
+    ? "SUBSCRIPTION_URL=$SUBSCRIPTION_URL"
+    : `SUBSCRIPTION_URL=${shellQuote(normalizedUrl!)}`;
   return String.raw`set +e
-cd ${shellQuoteRemotePath(solverRoot)} 2>/dev/null
-CD_CODE=$?
-if [ "$CD_CODE" -ne 0 ]; then
-  echo "CODE_READY=0"
-  echo "CODE_REASON=solver root missing"
-  exit 0
-fi
-export http_proxy=${shellQuote(proxyUrl)}
-export https_proxy=${shellQuote(proxyUrl)}
-git rev-parse --is-inside-work-tree >/dev/null 2>&1
-GIT_CODE=$?
-if [ "$GIT_CODE" -ne 0 ]; then
-  echo "CODE_READY=0"
-  echo "CODE_REASON=solver root is not a git repo"
-  exit 0
-fi
-UPSTREAM=$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null)
-if [ -z "$UPSTREAM" ]; then
-  echo "CODE_READY=0"
-  echo "CODE_REASON=no git upstream configured"
-  exit 0
-fi
-git fetch --quiet
-FETCH_CODE=$?
-if [ "$FETCH_CODE" -ne 0 ]; then
-  echo "CODE_READY=0"
-  echo "CODE_REASON=git fetch failed"
-  exit 0
-fi
-LOCAL=$(git rev-parse HEAD 2>/dev/null)
-REMOTE=$(git rev-parse '@{u}' 2>/dev/null)
-BASE=$(git merge-base HEAD '@{u}' 2>/dev/null)
-if ! git diff --quiet --ignore-submodules -- . || ! git diff --cached --quiet --ignore-submodules -- .; then
-  echo "CODE_READY=0"
-  echo "CODE_REASON=tracked working tree changes"
-  echo "CODE_LOCAL=$LOCAL"
-  echo "CODE_REMOTE=$REMOTE"
-  exit 0
-fi
-if [ "$LOCAL" = "$REMOTE" ]; then
-  echo "CODE_READY=1"
-  echo "CODE_REASON=up to date"
-elif [ "$LOCAL" = "$BASE" ]; then
-  echo "CODE_READY=0"
-  echo "CODE_REASON=behind upstream"
-elif [ "$REMOTE" = "$BASE" ]; then
-  echo "CODE_READY=1"
-  echo "CODE_REASON=local contains upstream"
+cd "$HOME"
+NETWORK_STARTED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+REPO_DIR="$HOME/mihomo-release"
+REPO_URL="https://gitee.com/Tsumugii24/mihomo-release"
+${subscriptionAssignment}
+if [ -d "$REPO_DIR/.git" ]; then
+  cd "$REPO_DIR"
+  git stash >/dev/null 2>&1
+  GIT_OUTPUT=$(git pull --rebase 2>&1)
+  GIT_CODE=$?
+  INSTALL_KIND=updated
+elif [ -e "$REPO_DIR" ]; then
+  GIT_OUTPUT="mihomo-release exists but is not a git repository"
+  GIT_CODE=1
+  INSTALL_KIND=invalid
 else
-  echo "CODE_READY=0"
-  echo "CODE_REASON=diverged from upstream"
+  GIT_OUTPUT=$(git clone "$REPO_URL" "$REPO_DIR" 2>&1)
+  GIT_CODE=$?
+  INSTALL_KIND=cloned
 fi
-echo "CODE_LOCAL=$LOCAL"
-echo "CODE_REMOTE=$REMOTE"`;
+if [ "$GIT_CODE" -eq 0 ]; then
+  cd "$REPO_DIR"
+  gzip -dc mihomo.gz > mihomo
+  EXTRACT_CODE=$?
+  chmod +x mihomo 2>/dev/null
+else
+  EXTRACT_CODE=1
+fi
+if [ "$EXTRACT_CODE" -eq 0 ]; then
+  wget -q -O config.yaml "$SUBSCRIPTION_URL"
+  DOWNLOAD_CODE=$?
+else
+  DOWNLOAD_CODE=1
+fi
+if [ "$DOWNLOAD_CODE" -eq 0 ]; then
+  VALIDATE_OUTPUT=$(./mihomo -t -d . 2>&1)
+  VALIDATE_CODE=$?
+else
+  VALIDATE_OUTPUT=""
+  VALIDATE_CODE=1
+fi
+if [ "$VALIDATE_CODE" -eq 0 ]; then
+  tmux kill-session -t mihomo 2>/dev/null || true
+  tmux new-session -d -s mihomo -c "$REPO_DIR" "exec ./mihomo -d ."
+  START_CODE=$?
+  sleep 1
+  tmux has-session -t mihomo 2>/dev/null
+  SESSION_CODE=$?
+else
+  START_CODE=1
+  SESSION_CODE=1
+fi
+NETWORK_FINISHED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+if [ "$GIT_CODE" -eq 0 ] && [ "$EXTRACT_CODE" -eq 0 ] && [ "$DOWNLOAD_CODE" -eq 0 ] && [ "$VALIDATE_CODE" -eq 0 ] && [ "$START_CODE" -eq 0 ] && [ "$SESSION_CODE" -eq 0 ]; then
+  NETWORK_KIND=ready
+else
+  NETWORK_KIND=failed
+fi
+export GIT_OUTPUT VALIDATE_OUTPUT
+python - "$OP_RESULT_FILE" "$NETWORK_KIND" "$INSTALL_KIND" "$GIT_CODE" "$EXTRACT_CODE" "$DOWNLOAD_CODE" "$VALIDATE_CODE" "$START_CODE" "$SESSION_CODE" "$NETWORK_STARTED_AT" "$NETWORK_FINISHED_AT" <<'PY'
+import json
+import os
+import sys
+
+(path, kind, install_kind, git_code, extract_code, download_code, validate_code,
+ start_code, session_code, started_at, finished_at) = sys.argv[1:12]
+result = {
+    "summary": {
+        "network_ready": 1 if kind == "ready" else 0,
+        "network_failed": 1 if kind == "failed" else 0,
+        "cloned": 1 if install_kind == "cloned" and kind == "ready" else 0,
+        "updated": 1 if install_kind == "updated" and kind == "ready" else 0,
+    },
+    "details": [{
+        "kind": kind,
+        "install_kind": install_kind,
+        "git_code": int(git_code),
+        "extract_code": int(extract_code),
+        "download_code": int(download_code),
+        "validate_code": int(validate_code),
+        "start_code": int(start_code),
+        "session_code": int(session_code),
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "git_output": os.environ.get("GIT_OUTPUT", "")[-800:],
+        "validate_output": os.environ.get("VALIDATE_OUTPUT", "")[-800:],
+    }],
+}
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(result, handle, ensure_ascii=True)
+PY
+printf '%s\n' "$GIT_OUTPUT"
+printf '%s\n' "$VALIDATE_OUTPUT"
+if [ "$NETWORK_KIND" != "ready" ]; then exit 1; fi`;
 }
 
 export function buildServerUploadCommand({
@@ -2497,7 +2541,7 @@ export function buildTrackedServerOperationCommand({
   bodyCommand
 }: {
   id: string;
-  type: "sync" | "upload";
+  type: ServerOperation["type"];
   statusFilePath: string;
   logFilePath: string;
   bodyCommand: string;
@@ -2704,16 +2748,6 @@ function parseDispatchPreflightOutput(output: string): DispatchPreflightResult {
   return {
     ready: readyLine === "DISPATCH_READY=1",
     reason: reasonLine ? reasonLine.slice("DISPATCH_REASON=".length).trim() || null : null
-  };
-}
-
-function parseServerCodeReadyOutput(output: string): ServerCodeReadyResult {
-  const lines = output.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  const readyLine = lines.find((line) => line.startsWith("CODE_READY="));
-  const reasonLine = lines.find((line) => line.startsWith("CODE_REASON="));
-  return {
-    ready: readyLine === "CODE_READY=1",
-    reason: reasonLine ? reasonLine.slice("CODE_REASON=".length).trim() || null : null
   };
 }
 

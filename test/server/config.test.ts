@@ -216,12 +216,14 @@ describe("runtime config loading", () => {
       SSH_PASSWORD: "secret",
       HF_TOKEN: "hf_test_token",
       SERVER_MONITOR_HF_PROXY_URL: "http://127.0.0.1:7890",
-      SOLVER_HF_PROXY_URL: "http://10.0.0.8:7890"
+      SOLVER_HF_PROXY_URL: "http://10.0.0.8:7890",
+      SUBSCRIPTION_URL: "https://subscription.example/token"
     });
 
     expect(config.hfToken).toBe("hf_test_token");
     expect(config.hfProxyUrl).toBe("http://127.0.0.1:7890");
     expect(config.solverHfProxyUrl).toBe("http://10.0.0.8:7890");
+    expect(config.subscriptionUrl).toBe("https://subscription.example/token");
   });
 
   it("rejects invalid Hugging Face proxy URLs", () => {

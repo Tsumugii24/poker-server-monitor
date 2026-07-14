@@ -85,6 +85,7 @@ async function main(): Promise<void> {
     hfToken: config.hfToken,
     hfProxyUrl: config.hfProxyUrl,
     solverHfProxyUrl: config.solverHfProxyUrl,
+    networkSubscriptionUrl: config.subscriptionUrl,
     getHfProxySettings: () => loadAlertSettings(config.alertSettingsPath),
     getScenarioLibrary: () => loadSolverScenarioLibrary(config.solverScenarioLibraryPath).scenarios
   });

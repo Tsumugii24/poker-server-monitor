@@ -20,6 +20,7 @@ import {
   Square,
   Trash2,
   Upload,
+  Wifi,
   X
 } from "lucide-react";
 import { type DragEvent, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -151,7 +152,7 @@ type PendingParallelQueueDeleteAction = {
 };
 
 type PendingServerOperationAction = {
-  action: "sync" | "upload" | "clear";
+  action: "sync" | "network_sync" | "upload" | "clear";
   serverCount: number;
   itemCount: number;
   serverIds?: string[];
@@ -226,6 +227,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
   const [activeSolverJobTab, setActiveSolverJobTab] = useState<"single" | "parallel" | "operations">("single");
   const [selectedServerId, setSelectedServerId] = useState("");
   const [serverOperations, setServerOperations] = useState<ServerOperation[]>([]);
+  const [networkSyncConfigured, setNetworkSyncConfigured] = useState(false);
   const [uploadCandidates, setUploadCandidates] = useState<ServerUploadCandidate[]>([]);
   const [jobSettings, setJobSettings] = useState<SolverJobSettings>(DEFAULT_SOLVER_JOB_SETTINGS);
   const [jobPreview, setJobPreview] = useState<SolverJobPreview | null>(null);
@@ -316,6 +318,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
       setParallelRuns(parallelResponse.runs);
       setFailurePool(parallelResponse.failurePool);
       setServerOperations(operationsResponse.operations);
+      setNetworkSyncConfigured(Boolean(operationsResponse.capabilities?.networkSyncConfigured));
       const enabledParallelServerCount = overviewResponse.servers.filter((server) => server.enabled).length;
       if (!parallelChunkCountTouched) {
         setParallelChunkCount(Math.max(1, enabledParallelServerCount));
@@ -1204,6 +1207,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
 
   const applyServerOperationsResponse = (response: ServerOperationsResponse) => {
     setServerOperations(response.operations);
+    setNetworkSyncConfigured(Boolean(response.capabilities?.networkSyncConfigured));
   };
 
   const scanUploadCandidates = async () => {
@@ -1232,6 +1236,23 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
     }
     setPendingServerOperationAction({
       action: "sync",
+      serverCount: targetServers.length,
+      itemCount: targetServers.length,
+      serverIds: targetServers.map((server) => server.id)
+    });
+  };
+
+  const requestNetworkSyncOperations = () => {
+    const targetServers = servers
+      .slice()
+      .sort(compareServersByNaturalId)
+      .filter((server) => server.enabled && serverIsOnlineForJob(server));
+    if (targetServers.length === 0) {
+      setJobError("No online enabled servers are available for network sync.");
+      return;
+    }
+    setPendingServerOperationAction({
+      action: "network_sync",
       serverCount: targetServers.length,
       itemCount: targetServers.length,
       serverIds: targetServers.map((server) => server.id)
@@ -1273,6 +1294,13 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
     try {
       if (pending.action === "sync") {
         const response = await fetchPreflopJson<ServerOperationsResponse>("/api/server-operations/sync", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ serverIds: pending.serverIds ?? [] })
+        });
+        applyServerOperationsResponse(response);
+      } else if (pending.action === "network_sync") {
+        const response = await fetchPreflopJson<ServerOperationsResponse>("/api/server-operations/network-sync", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ serverIds: pending.serverIds ?? [] })
@@ -2230,6 +2258,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
           settings={jobSettings}
           preview={jobPreview}
           serverOperations={serverOperations}
+          networkSyncConfigured={networkSyncConfigured}
           uploadCandidates={uploadCandidates}
           datasetName={jobDatasetName}
           datasetRepoStatus={datasetRepoStatus}
@@ -2251,6 +2280,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
           }}
           onOperationScanUploads={() => void scanUploadCandidates()}
           onOperationSync={requestSyncOperations}
+          onOperationNetworkSync={requestNetworkSyncOperations}
           onOperationUpload={requestUploadOperation}
           onOperationStop={(operation) => void stopServerOperation(operation)}
           onOperationClear={requestClearServerOperations}
@@ -2592,7 +2622,9 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
           >
             <div className="preflop-confirm-icon">
               {pendingServerOperationAction.action === "clear" ? <Trash2 size={18} /> : (
-                pendingServerOperationAction.action === "sync" ? <RefreshCw size={18} /> : <Upload size={18} />
+                pendingServerOperationAction.action === "sync" ? <RefreshCw size={18} /> : (
+                  pendingServerOperationAction.action === "network_sync" ? <Wifi size={18} /> : <Upload size={18} />
+                )
               )}
             </div>
             <div>
@@ -2785,6 +2817,7 @@ function SolverJobPanel({
   settings,
   preview,
   serverOperations,
+  networkSyncConfigured,
   uploadCandidates,
   datasetName,
   datasetRepoStatus,
@@ -2802,6 +2835,7 @@ function SolverJobPanel({
   onServerChange,
   onOperationScanUploads,
   onOperationSync,
+  onOperationNetworkSync,
   onOperationUpload,
   onOperationStop,
   onOperationClear,
@@ -2859,6 +2893,7 @@ function SolverJobPanel({
   settings: SolverJobSettings;
   preview: SolverJobPreview | null;
   serverOperations: ServerOperation[];
+  networkSyncConfigured: boolean;
   uploadCandidates: ServerUploadCandidate[];
   datasetName: string;
   datasetRepoStatus: SolverDatasetRepoStatus | null;
@@ -2876,6 +2911,7 @@ function SolverJobPanel({
   onServerChange: (serverId: string) => void;
   onOperationScanUploads: () => void;
   onOperationSync: () => void;
+  onOperationNetworkSync: () => void;
   onOperationUpload: () => void;
   onOperationStop: (operation: ServerOperation) => void;
   onOperationClear: () => void;
@@ -3284,10 +3320,12 @@ function SolverJobPanel({
           servers={servers}
           bestServerId={parallelBestServerId}
           operations={serverOperations}
+          networkSyncConfigured={networkSyncConfigured}
           uploadCandidates={uploadCandidates}
           busy={busy}
           onScanUploads={onOperationScanUploads}
           onSync={onOperationSync}
+          onNetworkSync={onOperationNetworkSync}
           onUpload={onOperationUpload}
           onStop={onOperationStop}
           onClear={onOperationClear}
@@ -4155,10 +4193,12 @@ function ServerOperationsPanel({
   servers,
   bestServerId,
   operations,
+  networkSyncConfigured,
   uploadCandidates,
   busy,
   onScanUploads,
   onSync,
+  onNetworkSync,
   onUpload,
   onStop,
   onClear,
@@ -4167,10 +4207,12 @@ function ServerOperationsPanel({
   servers: ServerRow[];
   bestServerId: string;
   operations: ServerOperation[];
+  networkSyncConfigured: boolean;
   uploadCandidates: ServerUploadCandidate[];
   busy: string | null;
   onScanUploads: () => void;
   onSync: () => void;
+  onNetworkSync: () => void;
   onUpload: () => void;
   onStop: (operation: ServerOperation) => void;
   onClear: () => void;
@@ -4182,11 +4224,14 @@ function ServerOperationsPanel({
   const bestServer = orderedServers.find((server) => server.id === bestServerId) ?? null;
   const terminalCount = operations.filter((operation) => serverOperationIsTerminal(operation)).length;
   const operationSummary = summarizeServerOperations(operations);
+  const [reportFilter, setReportFilter] = useState<"all" | ServerOperation["type"]>("all");
   const candidateSummary = summarizeUploadCandidates(uploadCandidates);
   const activeOperations = operations
     .filter((operation) => !serverOperationIsTerminal(operation))
     .sort(compareServerOperations);
-  const operationRows = operations.slice().sort(compareServerOperations);
+  const operationRows = operations
+    .filter((operation) => reportFilter === "all" || operation.type === reportFilter)
+    .sort(compareServerOperations);
   const operationBusy = busy?.startsWith("operation-") ?? false;
 
   return (
@@ -4213,10 +4258,10 @@ function ServerOperationsPanel({
       ) : null}
 
       <div className="server-ops-overview-grid">
-        <ServerOperationMetric label="Sync Commands" value={operationSummary.syncTotal} detail={`${operationSummary.syncLatest} latest · ${operationSummary.syncSynced} synced`} />
-        <ServerOperationMetric label="Sync Failed" value={operationSummary.syncFailed} detail="terminal sync failures" />
-        <ServerOperationMetric label="Upload Commands" value={operationSummary.uploadTotal} detail={`${operationSummary.uploadSuccess} completed`} />
-        <ServerOperationMetric label="Upload Failed" value={operationSummary.uploadFailed} detail={`${operationSummary.noFiles} no-file server(s)`} />
+        <ServerOperationMetric label="Active" value={activeOperations.length} detail="operations in progress" />
+        <ServerOperationMetric label="Code Sync" value={operationSummary.syncSynced + operationSummary.syncLatest} detail={`${operationSummary.syncLatest} latest · ${operationSummary.syncFailed} failed`} />
+        <ServerOperationMetric label="Network Ready" value={operationSummary.networkReady} detail={`${operationSummary.networkFailed} failed`} />
+        <ServerOperationMetric label="Uploaded" value={operationSummary.uploadSuccess} detail={`${operationSummary.uploadFailed} failed · ${operationSummary.filesRequested} files`} />
       </div>
 
       <div className="server-ops-grid">
@@ -4224,7 +4269,7 @@ function ServerOperationsPanel({
           <div className="parallel-section-title">
             <div>
               <strong>Sync Code</strong>
-              <span>{onlineServers.length} online enabled target{onlineServers.length === 1 ? "" : "s"}</span>
+              <span>Manual Git update · {onlineServers.length} target{onlineServers.length === 1 ? "" : "s"}</span>
             </div>
             <button className="icon-button compact primary" type="button" onClick={onSync} disabled={operationBusy || onlineServers.length === 0}>
               <RefreshCw size={14} />
@@ -4247,12 +4292,35 @@ function ServerOperationsPanel({
         <section className="server-ops-card">
           <div className="parallel-section-title">
             <div>
-              <strong>Scan + Upload All</strong>
+              <strong>Sync Network</strong>
+              <span>
+                {networkSyncConfigured ? "Subscription configured" : "Missing SUBSCRIPTION_URL"}
+                {` · ${onlineServers.length} target${onlineServers.length === 1 ? "" : "s"}`}
+              </span>
+            </div>
+            <button className="icon-button compact primary" type="button" onClick={onNetworkSync} disabled={operationBusy || onlineServers.length === 0 || !networkSyncConfigured}>
+              <Wifi size={14} />
+              New Network Tmux
+            </button>
+          </div>
+          <div className="server-ops-network-flow" aria-label="Network sync workflow">
+            <span>Clone / update</span>
+            <span>Download config</span>
+            <span>Validate</span>
+            <span>Restart mihomo</span>
+          </div>
+          <pre className="server-ops-command-preview">{`cd "$HOME" && git clone https://gitee.com/Tsumugii24/mihomo-release && cd "$HOME/mihomo-release" && gzip -dc mihomo.gz > mihomo && chmod +x mihomo && wget -O config.yaml "$SUBSCRIPTION_URL" && ./mihomo -t -d . && tmux new-session -d -s mihomo -c "$HOME/mihomo-release" "exec ./mihomo -d ."`}</pre>
+        </section>
+
+        <section className="server-ops-card">
+          <div className="parallel-section-title">
+            <div>
+              <strong>Scan + Upload</strong>
               <span>{candidateSummary.folders} folders · {candidateSummary.files} files found in last scan</span>
             </div>
             <button className="icon-button compact primary" type="button" onClick={onUpload} disabled={operationBusy || onlineServers.length === 0}>
               <Upload size={14} />
-              Upload All
+              Scan + Upload All
             </button>
           </div>
 
@@ -4261,7 +4329,7 @@ function ServerOperationsPanel({
               <Search size={14} />
               Scan All Results
             </button>
-            <span className="server-ops-muted">Upload All performs a fresh scan before starting tmux sessions.</span>
+            <span className="server-ops-muted">Both actions are manual. Scan + Upload performs a fresh scan after confirmation.</span>
           </div>
 
           <div className="server-ops-upload-list">
@@ -4296,7 +4364,7 @@ function ServerOperationsPanel({
         <div className="parallel-section-title parallel-section-title-with-actions">
           <div>
             <strong>Operation Report</strong>
-            <span>{activeOperations.length} active · {operationRows.length} total · {terminalCount} clearable</span>
+            <span>{activeOperations.length} active · {operations.length} recorded · {terminalCount} clearable</span>
           </div>
           <button className="icon-button compact danger" type="button" onClick={onClear} disabled={operationBusy || terminalCount === 0}>
             <Trash2 size={14} />
@@ -4304,12 +4372,31 @@ function ServerOperationsPanel({
           </button>
         </div>
         <div className="server-ops-report-grid">
-          <ServerOperationMetric label="Already Latest" value={operationSummary.syncLatest} detail="git already up to date" />
-          <ServerOperationMetric label="Synced" value={operationSummary.syncSynced} detail="pulled successfully" />
-          <ServerOperationMetric label="Sync Failed" value={operationSummary.syncFailed} detail="needs manual check" />
-          <ServerOperationMetric label="Files Requested" value={operationSummary.filesRequested} detail="upload operation input" />
+          <ServerOperationMetric label="Code" value={`${operationSummary.syncSynced} synced`} detail={`${operationSummary.syncLatest} latest · ${operationSummary.syncFailed} failed`} />
+          <ServerOperationMetric label="Network" value={`${operationSummary.networkReady} ready`} detail={`${operationSummary.networkCloned} installed · ${operationSummary.networkUpdated} updated`} />
+          <ServerOperationMetric label="Upload" value={`${operationSummary.uploadSuccess} complete`} detail={`${operationSummary.uploadFailed} failed · ${operationSummary.noFiles} empty`} />
+          <ServerOperationMetric label="Workload" value={operationSummary.filesRequested} detail="files requested for upload" />
         </div>
-        {operationRows.length === 0 ? <p className="solver-job-empty">No server operation has been recorded.</p> : null}
+        <div className="server-ops-report-filters" role="tablist" aria-label="Operation report filter">
+          {([
+            ["all", "All"],
+            ["sync", "Code"],
+            ["network_sync", "Network"],
+            ["upload", "Upload"]
+          ] as const).map(([value, label]) => (
+            <button
+              key={value}
+              type="button"
+              className={reportFilter === value ? "active" : ""}
+              onClick={() => setReportFilter(value)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        {operationRows.length === 0 ? (
+          <p className="solver-job-empty">{operations.length === 0 ? "No server operation has been recorded." : "No operation matches this filter."}</p>
+        ) : null}
         {operationRows.length > 0 ? (
           <div className="server-ops-history-table-wrap">
             <table className="server-ops-history-table">
@@ -4819,7 +4906,9 @@ function formatServerOperationStatus(status: ServerOperation["status"]): string 
 }
 
 function serverOperationTypeLabel(type: ServerOperation["type"]): string {
-  return type === "sync" ? "Sync" : "Upload";
+  if (type === "sync") return "Code Sync";
+  if (type === "network_sync") return "Network Sync";
+  return "Upload";
 }
 
 function serverOperationIsTerminal(operation: ServerOperation): boolean {
@@ -4845,6 +4934,11 @@ function summarizeServerOperations(operations: ServerOperation[]): {
   syncSynced: number;
   syncLatest: number;
   syncFailed: number;
+  networkTotal: number;
+  networkReady: number;
+  networkFailed: number;
+  networkCloned: number;
+  networkUpdated: number;
   uploadTotal: number;
   uploadSuccess: number;
   uploadFailed: number;
@@ -4856,6 +4950,11 @@ function summarizeServerOperations(operations: ServerOperation[]): {
     syncSynced: 0,
     syncLatest: 0,
     syncFailed: 0,
+    networkTotal: 0,
+    networkReady: 0,
+    networkFailed: 0,
+    networkCloned: 0,
+    networkUpdated: 0,
     uploadTotal: 0,
     uploadSuccess: 0,
     uploadFailed: 0,
@@ -4869,6 +4968,12 @@ function summarizeServerOperations(operations: ServerOperation[]): {
       summary.syncLatest += numericResult(result.latest);
       summary.syncSynced += numericResult(result.synced);
       summary.syncFailed += operation.status === "failed" ? 1 : numericResult(result.failed);
+    } else if (operation.type === "network_sync") {
+      summary.networkTotal += 1;
+      summary.networkReady += numericResult(result.network_ready);
+      summary.networkFailed += operation.status === "failed" ? Math.max(1, numericResult(result.network_failed)) : numericResult(result.network_failed);
+      summary.networkCloned += numericResult(result.cloned);
+      summary.networkUpdated += numericResult(result.updated);
     } else {
       summary.uploadTotal += 1;
       summary.uploadSuccess += numericResult(result.upload_success);
@@ -4886,6 +4991,14 @@ function serverOperationCompactResult(operation: ServerOperation): { label: stri
     if (operation.status === "failed" || numericResult(summary.failed) > 0) return { label: "failed", tone: "danger" };
     if (numericResult(summary.synced) > 0) return { label: "synced", tone: "success" };
     if (numericResult(summary.latest) > 0) return { label: "latest", tone: "neutral" };
+    if (operation.status === "canceled") return { label: "canceled", tone: "warning" };
+    if (!serverOperationIsTerminal(operation)) return { label: "in progress", tone: "active" };
+    return { label: formatServerOperationStatus(operation.status), tone: operation.status === "completed" ? "success" : "neutral" };
+  }
+
+  if (operation.type === "network_sync") {
+    if (operation.status === "failed" || numericResult(summary.network_failed) > 0) return { label: "failed", tone: "danger" };
+    if (numericResult(summary.network_ready) > 0) return { label: "proxy ready", tone: "success" };
     if (operation.status === "canceled") return { label: "canceled", tone: "warning" };
     if (!serverOperationIsTerminal(operation)) return { label: "in progress", tone: "active" };
     return { label: formatServerOperationStatus(operation.status), tone: operation.status === "completed" ? "success" : "neutral" };
@@ -4909,6 +5022,7 @@ function numericResult(value: unknown): number {
 
 function serverOperationConfirmTitle(action: PendingServerOperationAction["action"]): string {
   if (action === "sync") return "Start sync tmux?";
+  if (action === "network_sync") return "Start network sync tmux?";
   if (action === "upload") return "Start upload tmux?";
   return "Clear operation history?";
 }
@@ -4916,6 +5030,9 @@ function serverOperationConfirmTitle(action: PendingServerOperationAction["actio
 function serverOperationConfirmCopy(action: PendingServerOperationAction): string {
   if (action.action === "sync") {
     return `This will start sync tmux sessions on ${action.serverCount} online enabled server${action.serverCount === 1 ? "" : "s"}.`;
+  }
+  if (action.action === "network_sync") {
+    return `This will update Mihomo, refresh the subscription config, validate it, and restart the mihomo tmux session on ${action.serverCount} online enabled server${action.serverCount === 1 ? "" : "s"}.`;
   }
   if (action.action === "upload") {
     const preview = action.itemCount > 0 ? ` Last scan found ${action.itemCount} retained folder${action.itemCount === 1 ? "" : "s"}.` : "";

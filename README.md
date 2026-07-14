@@ -30,12 +30,17 @@ separately:
 ```env
 SERVER_MONITOR_HF_PROXY_URL=http://127.0.0.1:7890
 SOLVER_HF_PROXY_URL=http://127.0.0.1:7890
+SUBSCRIPTION_URL=https://your-mihomo-subscription-url
 ```
 
 `SERVER_MONITOR_HF_PROXY_URL` is used by this app when checking dataset progress or creating
 repositories. `SOLVER_HF_PROXY_URL` is exported into remote solver tmux commands when Upload is
 enabled. After setting these values, enable the matching switches in Settings → Connection Check.
 If either the `.env` value is empty or the dashboard switch is off, that path connects directly.
+
+`SUBSCRIPTION_URL` is used only by the manual **Server Operations > Sync Network** action.
+It is sent directly to selected SSH servers; the UI, operation database, and command previews
+retain only the `$SUBSCRIPTION_URL` placeholder.
 
 Parallel solver allocation uses the solver board list from `cards/cards.txt`. By default the
 backend looks under the configured server `solverRoot` values, such as `~/solver/cards/cards.txt`.

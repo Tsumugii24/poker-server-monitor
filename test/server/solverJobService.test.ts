@@ -12,7 +12,7 @@ import {
   buildForceKillPipelineCommand,
   buildGracefulStopPipelineCommand,
   buildRunPipelineCommand,
-  buildServerCodeReadyCommand,
+  buildServerNetworkSyncCommand,
   buildServerSyncCommand,
   buildServerUploadCommand,
   datasetNameFromRangePath,
@@ -155,17 +155,14 @@ describe("solver job helpers", () => {
     expect(command).toContain("git pull --rebase");
   });
 
-  it("builds solver code readiness commands for dispatch gating", () => {
-    const command = buildServerCodeReadyCommand({
-      solverRoot: "~/solver",
-      proxyUrl: "http://127.0.0.1:7890"
-    });
+  it("builds a redacted Mihomo network sync command", () => {
+    const command = buildServerNetworkSyncCommand({ redactSecrets: true });
 
-    expect(command).toContain('cd "$HOME/solver"');
-    expect(command).toContain("export http_proxy='http://127.0.0.1:7890'");
-    expect(command).toContain("git fetch --quiet");
-    expect(command).toContain("CODE_READY=1");
-    expect(command).toContain("CODE_REASON=behind upstream");
+    expect(command).toContain('REPO_URL="https://gitee.com/Tsumugii24/mihomo-release"');
+    expect(command).toContain("SUBSCRIPTION_URL=$SUBSCRIPTION_URL");
+    expect(command).toContain("gzip -dc mihomo.gz > mihomo");
+    expect(command).toContain("./mihomo -t -d .");
+    expect(command).toContain('tmux new-session -d -s mihomo');
   });
 
   it("builds server upload commands with results-dir and redacted HF token support", () => {
@@ -495,10 +492,9 @@ describe("solver job API", () => {
     expect(list.body.events).toHaveLength(0);
   });
 
-  it("starts solver code sync instead of dispatching when code is not ready", async () => {
+  it("dispatches solver jobs without checking or syncing remote Git state", async () => {
     const executor: SshExecutor = {
       run: vi.fn(async (_server, _credentials, command) => {
-        if (isCodeReadyCommand(command)) return "CODE_READY=0\nCODE_REASON=behind upstream\n";
         commands.push(command);
         return "ok";
       })
@@ -524,18 +520,14 @@ describe("solver job API", () => {
     expect(started.status).toBe(200);
     expect(started.body.job).toMatchObject({
       id: created.body.job.id,
-      status: "queued"
-    });
-    expect(started.body.job.lastError).toContain("solver code sync started");
-    expect(commands.some((command) => command.includes("git pull --rebase"))).toBe(true);
-    expect(commands.some((command) => command.includes("run_pipeline.py"))).toBe(false);
-
-    const operations = await request(app).get("/api/server-operations");
-    expect(operations.body.operations[0]).toMatchObject({
-      type: "sync",
-      serverId: "solver-01",
       status: "running"
     });
+    expect(commands.some((command) => command.includes("CODE_READY="))).toBe(false);
+    expect(commands.some((command) => command.includes("git pull --rebase"))).toBe(false);
+    expect(commands.some((command) => command.includes("run_pipeline.py"))).toBe(true);
+
+    const operations = await request(app).get("/api/server-operations");
+    expect(operations.body.operations).toHaveLength(0);
   });
 
   it("auto-scans online servers before starting retained result uploads", async () => {
@@ -579,6 +571,38 @@ describe("solver job API", () => {
     expect(started.body.operations[0].command).toContain("export HF_TOKEN=$HF_TOKEN");
     expect(started.body.operations[0].command).not.toContain("hf_test_token");
     expect(commands.some((command) => command.includes("find \"$RESULTS_ROOT\""))).toBe(true);
+    expect(commands.some((command) => command.includes("tmux send-keys"))).toBe(true);
+  });
+
+  it("starts manual network sync operations without exposing the subscription URL", async () => {
+    const executor: SshExecutor = {
+      run: vi.fn(async (_server, _credentials, command) => {
+        commands.push(command);
+        return "ok";
+      })
+    };
+    const solverJobService = new SolverJobService({
+      db,
+      preflopRangesPath,
+      credentials: { username: "root", password: "secret" },
+      executor,
+      networkSubscriptionUrl: "https://subscription.example/secret-token"
+    });
+    const app = createApp({ db, refreshService, preflopRangesPath, solverJobService });
+
+    const started = await request(app)
+      .post("/api/server-operations/network-sync")
+      .send({ serverIds: ["solver-01"] });
+
+    expect(started.status).toBe(201);
+    expect(started.body.operations[0]).toMatchObject({
+      type: "network_sync",
+      serverId: "solver-01",
+      status: "running"
+    });
+    expect(started.body.operations[0].command).toContain("SUBSCRIPTION_URL=$SUBSCRIPTION_URL");
+    expect(started.body.operations[0].command).not.toContain("secret-token");
+    expect(commands.some((command) => command.includes("secret-token"))).toBe(true);
     expect(commands.some((command) => command.includes("tmux send-keys"))).toBe(true);
   });
 

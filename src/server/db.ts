@@ -1667,6 +1667,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function normalizeServerOperationType(value: SqlValue): ServerOperationType {
+  if (value === "network_sync") return "network_sync";
   return value === "upload" ? "upload" : "sync";
 }
 
@@ -1685,7 +1686,9 @@ function normalizeServerOperationStatus(value: SqlValue): ServerOperationStatus 
 }
 
 function redactSensitiveCommand(value: string): string {
-  return value.replace(/export HF_TOKEN=(?:'[^']*'|"[^"]*"|[^&\s]+)/g, "export HF_TOKEN=$HF_TOKEN");
+  return value
+    .replace(/export HF_TOKEN=(?:'[^']*'|"[^"]*"|[^&\s]+)/g, "export HF_TOKEN=$HF_TOKEN")
+    .replace(/SUBSCRIPTION_URL=(?:'[^']*'|"[^"]*"|[^&\s]+)/g, "SUBSCRIPTION_URL=$SUBSCRIPTION_URL");
 }
 
 function mapSnapshot(row: Record<string, SqlValue>): MetricSnapshot {

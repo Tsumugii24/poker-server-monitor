@@ -1,7 +1,7 @@
 import type { ServerRow } from "./types";
 import type { SolverUploadFormat } from "./solverJobs";
 
-export const SERVER_OPERATION_TYPES = ["sync", "upload"] as const;
+export const SERVER_OPERATION_TYPES = ["sync", "network_sync", "upload"] as const;
 export type ServerOperationType = (typeof SERVER_OPERATION_TYPES)[number];
 
 export const SERVER_OPERATION_STATUSES = [
@@ -78,6 +78,9 @@ export type ServerOperationEvent = {
 export type ServerOperationsResponse = {
   operations: ServerOperation[];
   events: ServerOperationEvent[];
+  capabilities?: {
+    networkSyncConfigured: boolean;
+  };
 };
 
 export type ServerUploadCandidatesResponse = {
@@ -88,6 +91,10 @@ export type ServerUploadCandidatesResponse = {
 };
 
 export type ServerSyncRequest = {
+  serverIds?: string[];
+};
+
+export type ServerNetworkSyncRequest = {
   serverIds?: string[];
 };
 
