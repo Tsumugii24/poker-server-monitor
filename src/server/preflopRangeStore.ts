@@ -19,7 +19,7 @@ import {
 } from "../shared/preflopRange";
 import { datasetNameFromRangePath, scenarioFromRangePath } from "../shared/preflopDataset";
 import { SOLVER_TOTAL_BOARD_COUNT, type SolverJob, type SolverJobStatus } from "../shared/solverJobs";
-import { huggingFaceFetch } from "./huggingFaceHttp";
+import { huggingFaceFetch, type HuggingFaceFetchOptions } from "./huggingFaceHttp";
 
 const ORDER_FILE = ".range_order.json";
 const STATUS_FILE = ".range_status.json";
@@ -60,6 +60,11 @@ export type PreflopRangeProgressRefreshResult = {
   root: string;
   checked: number;
   failed: number;
+  failures: Array<{
+    rangePath: string;
+    datasetName: string;
+    message: string;
+  }>;
   progress: RangeProgressMetadata;
 };
 
@@ -139,6 +144,7 @@ export async function refreshPreflopRangeProgress(
   });
 
   let failed = 0;
+  const failures: PreflopRangeProgressRefreshResult["failures"] = [];
   await runWithConcurrency(approvedFiles, 4, async ({ rangePath, datasetName }) => {
     const checkedAt = new Date().toISOString();
     const previous = metadata.ranges[rangePath];
@@ -151,10 +157,12 @@ export async function refreshPreflopRangeProgress(
       nextRanges[rangePath] = progressEntry(datasetName, rows, totalRows, checkedAt);
     } catch (error) {
       failed += 1;
+      const message = error instanceof Error ? error.message : String(error);
+      failures.push({ rangePath, datasetName, message });
       const fallbackRows = previous?.datasetName === datasetName ? previous.rows : 0;
       nextRanges[rangePath] = {
         ...progressEntry(datasetName, fallbackRows, totalRows, checkedAt),
-        error: error instanceof Error ? error.message : String(error)
+        error: message
       };
     }
   });
@@ -164,6 +172,7 @@ export async function refreshPreflopRangeProgress(
     root,
     checked: approvedFiles.length,
     failed,
+    failures,
     progress: { version: 1, ranges: nextRanges }
   };
 }
@@ -884,10 +893,9 @@ async function fetchHuggingFaceDatasetRows(
   if (!await huggingFaceDatasetMatches(repoId, headers, hfProxyUrl)) return 0;
 
   const url = `https://datasets-server.huggingface.co/size?dataset=${encodeURIComponent(repoId)}`;
-  const response = await huggingFaceFetch(url, {
+  const response = await retryingHuggingFaceFetch(url, {
     headers,
-    proxyUrl: hfProxyUrl,
-    signal: AbortSignal.timeout(10_000)
+    proxyUrl: hfProxyUrl
   });
   if (response.status === 404) return 0;
   if (!response.ok) {
@@ -903,11 +911,10 @@ async function huggingFaceDatasetMatches(
   hfProxyUrl: string | null
 ): Promise<boolean> {
   const encodedRepoId = repoId.split("/").map(encodeURIComponent).join("/");
-  const response = await huggingFaceFetch(`https://huggingface.co/api/datasets/${encodedRepoId}`, {
+  const response = await retryingHuggingFaceFetch(`https://huggingface.co/api/datasets/${encodedRepoId}`, {
     headers,
     proxyUrl: hfProxyUrl,
-    redirect: "manual",
-    signal: AbortSignal.timeout(10_000)
+    redirect: "manual"
   });
   if (response.status === 404 || isRedirectStatus(response.status)) return false;
   if (!response.ok) {
@@ -920,6 +927,39 @@ async function huggingFaceDatasetMatches(
     throw new Error(`Hugging Face repo check returned no dataset id for ${repoId}.`);
   }
   return actualRepoId === repoId;
+}
+
+async function retryingHuggingFaceFetch(
+  url: string,
+  options: Omit<HuggingFaceFetchOptions, "signal">
+): Promise<Response> {
+  const delays = [500, 1_500];
+  let lastError: unknown = null;
+  for (let attempt = 0; attempt <= delays.length; attempt += 1) {
+    try {
+      const response = await huggingFaceFetch(url, {
+        ...options,
+        signal: AbortSignal.timeout(10_000)
+      });
+      if (!isTransientHuggingFaceStatus(response.status) || attempt === delays.length) {
+        return response;
+      }
+      lastError = new Error(`Hugging Face temporarily returned HTTP ${response.status}.`);
+    } catch (error) {
+      lastError = error;
+      if (attempt === delays.length) throw error;
+    }
+    await wait(delays[attempt]!);
+  }
+  throw lastError instanceof Error ? lastError : new Error("Hugging Face request failed.");
+}
+
+function isTransientHuggingFaceStatus(status: number): boolean {
+  return status === 408 || status === 429 || status === 502 || status === 503 || status === 504;
+}
+
+function wait(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 function isRedirectStatus(status: number): boolean {

@@ -672,7 +672,7 @@ export function createApp({
   app.get("/api/parallel-jobs", async (request, response) => {
     try {
       const shouldReconcile = request.query.reconcile === "1" || request.query.reconcile === "true";
-      response.json(shouldReconcile ? await solverJobService.refreshParallelJobs() : solverJobService.listParallelJobs());
+      response.json(shouldReconcile ? solverJobService.refreshParallelJobs() : solverJobService.listParallelJobs());
     } catch (error) {
       respondSolverJobError(response, error, "parallel_solver_jobs_list_failed");
     }
@@ -1365,8 +1365,20 @@ export function createApp({
   });
 
   app.post("/api/refresh", async (_request, response) => {
-    const result = await refreshService.refreshAll("manual");
-    response.status(result.accepted ? 202 : 409).json(result);
+    const current = refreshService.getState();
+    if (current.active) {
+      response.status(409).json({
+        accepted: false,
+        code: "refresh_in_progress",
+        message: "A refresh is already running.",
+        state: current
+      });
+      return;
+    }
+    void refreshService.refreshAll("manual").catch((error: unknown) => {
+      console.error("Manual refresh failed", error);
+    });
+    response.status(202).json({ accepted: true, state: refreshService.getState() });
   });
 
   app.get("/api/refresh/current", (_request, response) => {

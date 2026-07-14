@@ -83,6 +83,7 @@ import type {
   OverviewResponse,
   PipelineDisplayStatus,
   PipelineStatusSnapshot,
+  RefreshState,
   ServerRow
 } from "../shared/types";
 import { displayDatasetName } from "./datasetDisplay";
@@ -162,6 +163,11 @@ type PendingServerOperationAction = {
 type RangeProgressRefreshSummary = {
   checked: number;
   failed: number;
+  failures: Array<{
+    rangePath: string;
+    datasetName: string;
+    message: string;
+  }>;
 };
 
 const EXPANDED_FOLDERS_KEY = "preflop-range-expanded-folders";
@@ -281,13 +287,17 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
     setError(null);
     setRangeProgressRefreshSummary(null);
     try {
-      const response = await fetchPreflopJson<PreflopRangeTreeResponse & { ok: boolean; checked: number; failed: number }>(
+      const response = await fetchPreflopJson<PreflopRangeTreeResponse & RangeProgressRefreshSummary & { ok: boolean }>(
         "/api/preflop-ranges/refresh-progress",
         { method: "POST" }
       );
       const normalizedTree = normalizeRangeTreeItems(response.tree);
       setTree(normalizedTree);
-      setRangeProgressRefreshSummary({ checked: response.checked, failed: response.failed });
+      setRangeProgressRefreshSummary({
+        checked: response.checked,
+        failed: response.failed,
+        failures: response.failures
+      });
       if (currentFolderPath && !findFolder(normalizedTree, currentFolderPath)) {
         setCurrentFolderPath("");
       }
@@ -337,8 +347,10 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
           ? current
           : defaultSolverServerId(overviewResponse.servers)
       );
+      return parallelResponse;
     } catch (caught) {
       setJobError(caught instanceof Error ? caught.message : String(caught));
+      return null;
     }
   }, [parallelChunkCountTouched]);
 
@@ -346,8 +358,14 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
     setJobBusy("refresh");
     setJobError(null);
     try {
-      await fetchPreflopJson<unknown>("/api/refresh", { method: "POST" });
-      await loadJobContext({ reconcileParallel: true });
+      await requestMonitorRefresh();
+      await waitForMonitorRefresh();
+      let parallelResponse = await loadJobContext({ reconcileParallel: true });
+      const deadline = Date.now() + 90_000;
+      while (parallelResponse?.reconciling && Date.now() < deadline) {
+        await waitFor(1_500);
+        parallelResponse = await loadJobContext();
+      }
     } catch (caught) {
       setJobError(caught instanceof Error ? caught.message : String(caught));
       await loadJobContext({ reconcileParallel: true });
@@ -1712,6 +1730,9 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
         >
           Progress refresh complete: {rangeProgressRefreshSummary.checked} checked, {rangeProgressRefreshSummary.checked - rangeProgressRefreshSummary.failed} updated, {rangeProgressRefreshSummary.failed} failed.
           {rangeProgressRefreshSummary.failed > 0 ? " Failed checks retained their last successful progress." : ""}
+          {rangeProgressRefreshSummary.failures[0] ? (
+            <> Latest error: {rangeProgressRefreshSummary.failures[0].datasetName}: {rangeProgressRefreshSummary.failures[0].message}</>
+          ) : null}
         </div>
       ) : null}
 
@@ -5333,6 +5354,30 @@ async function fetchPreflopJson<T>(url: string, init?: RequestInit): Promise<T> 
     throw new Error(message);
   }
   return await response.json() as T;
+}
+
+function waitFor(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+}
+
+async function requestMonitorRefresh(): Promise<void> {
+  const response = await fetch("/api/refresh", { method: "POST" });
+  if (response.ok) return;
+  if (response.status === 409) {
+    const payload = await response.json().catch(() => null) as { code?: string } | null;
+    if (payload?.code === "refresh_in_progress") return;
+  }
+  throw new Error(`Request failed: ${response.status}`);
+}
+
+async function waitForMonitorRefresh(timeoutMs = 90_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const state = await fetchPreflopJson<RefreshState>("/api/refresh/current");
+    if (!state.active) return;
+    await waitFor(750);
+  }
+  throw new Error("Server status refresh is still running. Try again after the current SSH checks finish.");
 }
 
 function normalizeRangeTreeItems(items: PreflopRangeTreeItem[]): PreflopRangeTreeItem[] {

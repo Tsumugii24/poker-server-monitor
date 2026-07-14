@@ -11,6 +11,7 @@ import { MonitorDatabase } from "../../src/server/db";
 import { RefreshService } from "../../src/server/refreshService";
 import {
   buildForceKillPipelineCommand,
+  buildDispatchPreflightCommand,
   buildGracefulStopPipelineCommand,
   buildRunPipelineCommand,
   buildReadServerOperationStatusCommand,
@@ -176,6 +177,17 @@ describe("solver job helpers", () => {
     expect(command).toContain("OP_TMUX_ALIVE=1");
   });
 
+  it("requires the manual Mihomo session and Hugging Face proxy before dispatch", () => {
+    const command = buildDispatchPreflightCommand(
+      "~/run/solver_running_status.json",
+      "http://127.0.0.1:7890"
+    );
+
+    expect(command).toContain("tmux has-session -t mihomo");
+    expect(command).toContain("--proxy \"$PROXY_URL\" https://huggingface.co/");
+    expect(command).toContain("run Sync Network first");
+  });
+
   it("builds server upload commands with results-dir and redacted HF token support", () => {
     const command = buildServerUploadCommand({
       solverRoot: "~/solver",
@@ -328,6 +340,7 @@ describe("solver job API", () => {
   it("previews, confirms, creates, and starts a solver job", async () => {
     const executor: SshExecutor = {
       run: vi.fn(async (_server, _credentials, command) => {
+        if (command.includes("DISPATCH_READY")) return "DISPATCH_READY=1\n";
         if (isCodeReadyCommand(command)) return codeReadyOutput();
         commands.push(command);
         return "ok";
@@ -1434,11 +1447,14 @@ describe("solver job API", () => {
 
     staleCards = true;
     const refreshed = await request(app).get("/api/parallel-jobs?reconcile=1");
+    expect(refreshed.body.reconciling).toBe(true);
+    await solverJobService.reconcileAndStartQueuedJobs();
+    const settled = await request(app).get("/api/parallel-jobs");
 
-    expect(refreshed.status).toBe(200);
-    expect(refreshed.body.runs[0].status).toBe("queued");
-    expect(refreshed.body.runs[0].slices[0].status).toBe("queued");
-    expect(refreshed.body.runs[0].slices[0].lastError).toContain("must contain 1755 boards");
+    expect(settled.status).toBe(200);
+    expect(settled.body.runs[0].status).toBe("queued");
+    expect(settled.body.runs[0].slices[0].status).toBe("queued");
+    expect(settled.body.runs[0].slices[0].lastError).toContain("must contain 1755 boards");
     expect(commands.some((command) => command.includes("run_pipeline.py"))).toBe(false);
   });
 
@@ -1775,7 +1791,10 @@ describe("solver job API", () => {
 
     const afterRetry = await request(app).get("/api/parallel-jobs?reconcile=1");
     expect(afterRetry.status).toBe(200);
-    const run = afterRetry.body.runs.find((candidate: { id: string }) => candidate.id === created.body.run.id);
+    expect(afterRetry.body.reconciling).toBe(true);
+    await solverJobService.reconcileAndStartQueuedJobs();
+    const settled = await request(app).get("/api/parallel-jobs");
+    const run = settled.body.runs.find((candidate: { id: string }) => candidate.id === created.body.run.id);
     expect(run.slices.map((slice: { serverId: string; status: string }) => [slice.serverId, slice.status])).toEqual([
       ["solver-01", "running"],
       ["solver-02", "running"]

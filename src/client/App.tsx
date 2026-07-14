@@ -40,6 +40,7 @@ import type {
   OverviewResponse,
   PipelineDisplayStatus,
   PipelineStatusSnapshot,
+  RefreshState,
   ServerDetailResponse,
   ServerConfig,
   ServerRow,
@@ -645,7 +646,8 @@ export default function App() {
     setRefreshing(true);
     setError(null);
     try {
-      await fetchJson("/api/refresh", { method: "POST" });
+      await requestMonitorRefresh();
+      await waitForMonitorRefresh();
       const data = await fetchJson<OverviewResponse>("/api/overview");
       setOverview(data);
       if (route.name === "detail") {
@@ -2115,6 +2117,26 @@ async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, init);
   if (!response.ok) throw new Error(`Request failed: ${response.status}`);
   return (await response.json()) as T;
+}
+
+async function requestMonitorRefresh(): Promise<void> {
+  const response = await fetch("/api/refresh", { method: "POST" });
+  if (response.ok) return;
+  if (response.status === 409) {
+    const payload = await response.json().catch(() => null) as { code?: string } | null;
+    if (payload?.code === "refresh_in_progress") return;
+  }
+  throw new Error(`Request failed: ${response.status}`);
+}
+
+async function waitForMonitorRefresh(timeoutMs = 90_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const state = await fetchJson<RefreshState>("/api/refresh/current");
+    if (!state.active) return;
+    await new Promise((resolve) => window.setTimeout(resolve, 750));
+  }
+  throw new Error("Server status refresh is still running. Try again after the current SSH checks finish.");
 }
 
 function formatSshCommand(server: ServerRow, username: string): string {

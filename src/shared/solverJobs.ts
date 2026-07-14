@@ -396,6 +396,7 @@ export type ParallelFailurePoolEntry = {
 export type ParallelSolverJobsResponse = {
   runs: ParallelSolverRun[];
   failurePool: ParallelFailurePoolEntry[];
+  reconciling: boolean;
 };
 
 export type ParallelSolverReportsClearResponse = ParallelSolverJobsResponse & {

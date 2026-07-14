@@ -152,12 +152,17 @@ export class SolverJobService {
     this.reconcileParallelRuns();
     return {
       runs: this.options.db.getParallelSolverRuns().filter((run) => !run.reportCleared),
-      failurePool: this.options.db.getParallelFailurePoolEntries()
+      failurePool: this.options.db.getParallelFailurePoolEntries(),
+      reconciling: this.queueReconciliationTask !== null
     };
   }
 
-  async refreshParallelJobs() {
-    await this.reconcileAndStartQueuedJobs();
+  refreshParallelJobs() {
+    this.reconcileCompletedJobs();
+    this.reconcileParallelRuns();
+    void this.reconcileAndStartQueuedJobs().catch((error: unknown) => {
+      console.error("Solver job queue reconciliation failed", error);
+    });
     return this.listParallelJobs();
   }
 
@@ -443,12 +448,25 @@ export class SolverJobService {
     return this.requireJob(job.id);
   }
 
-  async start(id: string, options: { deferOnDispatchFailure?: boolean } = {}): Promise<SolverJob> {
+  async start(
+    id: string,
+    options: { deferOnDispatchFailure?: boolean; preflightChecked?: boolean } = {}
+  ): Promise<SolverJob> {
     const job = this.requireJob(id);
     const server = this.requireServer(job.serverId);
     this.ensureServerOnline(server);
     this.ensureNoActiveJob(server.id, job.id);
     this.ensureCredentials();
+    if (!options.preflightChecked && this.dispatchProxyUrl(job)) {
+      const preflight = await this.runDispatchPreflight(job, server);
+      if (!preflight.ready) {
+        const message = `Server ${server.id} is not ready for dispatch${preflight.reason ? ` (${preflight.reason})` : ""}.`;
+        if (options.deferOnDispatchFailure) {
+          return this.markJobDispatchPending(job, `Dispatch pending: ${message}`);
+        }
+        throw new Error(message);
+      }
+    }
     const executionCommand = this.buildExecutionCommand(job, server);
 
     this.options.db.updateSolverJob(job.id, { status: "deploying", lastError: null });
@@ -1666,16 +1684,11 @@ export class SolverJobService {
 
     this.ensureCredentials();
     try {
-      const output = await this.executor.run(
-        server,
-        this.options.credentials!,
-        buildDispatchPreflightCommand(statusFileFromJob(job))
-      );
-      const preflight = parseDispatchPreflightOutput(output);
+      const preflight = await this.runDispatchPreflight(job, server);
       if (!preflight.ready) {
         this.markJobDispatchPending(
           job,
-          `Dispatch pending: server ${server.id} is not idle${preflight.reason ? ` (${preflight.reason})` : ""}.`
+          `Dispatch pending: server ${server.id} is not ready${preflight.reason ? ` (${preflight.reason})` : ""}.`
         );
         return false;
       }
@@ -1686,13 +1699,27 @@ export class SolverJobService {
     }
 
     try {
-      const started = await this.start(job.id, { deferOnDispatchFailure: true });
+      const started = await this.start(job.id, { deferOnDispatchFailure: true, preflightChecked: true });
       return started.status === "running";
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.markJobDispatchPending(job, `Dispatch pending: ${message}`);
       return false;
     }
+  }
+
+  private async runDispatchPreflight(job: SolverJob, server: ServerRow): Promise<DispatchPreflightResult> {
+    const proxyUrl = this.dispatchProxyUrl(job);
+    const output = await this.executor.run(
+      server,
+      this.options.credentials!,
+      buildDispatchPreflightCommand(statusFileFromJob(job), proxyUrl)
+    );
+    return parseDispatchPreflightOutput(output);
+  }
+
+  private dispatchProxyUrl(job: SolverJob): string | null {
+    return job.settings.uploadEnabled ? this.effectiveSolverHfProxyUrl() : null;
   }
 
   private markJobDispatchPending(job: SolverJob, message: string): SolverJob {
@@ -2644,7 +2671,26 @@ export function buildStopServerOperationCommand(tmuxSession: string): string {
   ].join("\n");
 }
 
-export function buildDispatchPreflightCommand(statusFilePath: string): string {
+export function buildDispatchPreflightCommand(statusFilePath: string, proxyUrl: string | null = null): string {
+  const networkCheck = proxyUrl
+    ? String.raw`PROXY_URL=${shellQuote(proxyUrl)}
+if ! tmux has-session -t mihomo 2>/dev/null; then
+  echo "DISPATCH_READY=0"
+  echo "DISPATCH_REASON=mihomo tmux session is not running; run Sync Network first"
+  exit 0
+fi
+if ! command -v curl >/dev/null 2>&1; then
+  echo "DISPATCH_READY=0"
+  echo "DISPATCH_REASON=curl is required for proxy verification"
+  exit 0
+fi
+if ! curl --silent --show-error --fail --output /dev/null --max-time 8 --proxy "$PROXY_URL" https://huggingface.co/; then
+  echo "DISPATCH_READY=0"
+  echo "DISPATCH_REASON=Hugging Face is unreachable through $PROXY_URL; run Sync Network first"
+  exit 0
+fi
+`
+    : "";
   return String.raw`set -e
 STATUS_FILE=${shellQuoteRemotePath(statusFilePath)}
 PID=""
@@ -2655,7 +2701,7 @@ if [ -n "$PID" ] && ps -p "$PID" > /dev/null 2>&1; then
   echo "DISPATCH_READY=0"
   echo "DISPATCH_REASON=active pid $PID"
 else
-  echo "DISPATCH_READY=1"
+  ${networkCheck}  echo "DISPATCH_READY=1"
 fi`;
 }
 
