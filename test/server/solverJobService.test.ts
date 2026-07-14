@@ -361,7 +361,14 @@ describe("solver job API", () => {
         throw new Error("not used");
       }
     });
-    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ id: "dataset" }), { status: 200 })));
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      const repoMatch = url.match(/\/api\/datasets\/([^/?]+)\/([^/?]+)/);
+      const repoId = repoMatch
+        ? `${decodeURIComponent(repoMatch[1]!)}/${decodeURIComponent(repoMatch[2]!)}`
+        : "dataset";
+      return new Response(JSON.stringify({ id: repoId }), { status: 200 });
+    }));
     commands = [];
   });
 
@@ -972,7 +979,7 @@ describe("solver job API", () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url.includes("/api/datasets/")) {
-        return new Response(JSON.stringify({ id: "dataset" }), { status: repoExists ? 200 : 404 });
+        return new Response(JSON.stringify({ id: "Tsumugii/manual-dataset" }), { status: repoExists ? 200 : 404 });
       }
       if (url.includes("/api/repos/create")) {
         repoExists = true;
@@ -1046,6 +1053,151 @@ describe("solver job API", () => {
       datasetName: "manual-dataset",
       repoId: "Tsumugii/manual-dataset"
     });
+  });
+
+  it("treats a renamed backup redirect as missing and creates the exact dataset", async () => {
+    const datasetName = "3ia-9-3od-5.8";
+    let exactRepoCreated = false;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/tree/main")) {
+        return new Response(JSON.stringify([]), { status: 200 });
+      }
+      if (url.includes(`/api/datasets/Tsumugii/${datasetName}`)) {
+        if (exactRepoCreated) {
+          return new Response(JSON.stringify({ id: `Tsumugii/${datasetName}` }), { status: 200 });
+        }
+        return new Response(null, {
+          status: 307,
+          headers: {
+            location: `https://huggingface.co/api/datasets/Tsumugii/${datasetName}-backup`
+          }
+        });
+      }
+      if (url.includes("/api/repos/create")) {
+        exactRepoCreated = true;
+        return new Response(JSON.stringify({
+          url: `https://huggingface.co/datasets/Tsumugii/${datasetName}`
+        }), { status: 200 });
+      }
+      return new Response("{}", { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const executor: SshExecutor = {
+      run: vi.fn(async (_server, _credentials, command) =>
+        command.includes("cards/cards.txt") ? solverCardsText() : "ok"
+      )
+    };
+    const solverJobService = new SolverJobService({
+      db,
+      preflopRangesPath,
+      credentials: { username: "root", password: "secret" },
+      executor,
+      defaultPipelineStatusFilePath: "~/run/solver_running_status.json",
+      repoNamespace: "Tsumugii",
+      hfToken: "hf_test_token"
+    });
+    const app = createApp({ db, refreshService, preflopRangesPath, solverJobService });
+    const rangePath = "3OD-EP/3OD-4.3 vs 3IA-4.2.json";
+    await approveRange(app, rangePath);
+
+    const check = await request(app)
+      .post("/api/jobs/dataset-repo/check")
+      .send({ serverId: "solver-01", rangePath, datasetName });
+
+    expect(check.status).toBe(200);
+    expect(check.body).toMatchObject({
+      repoId: `Tsumugii/${datasetName}`,
+      exists: false,
+      requiresConfirmation: true
+    });
+
+    const ensured = await request(app)
+      .post("/api/jobs/dataset-repo/ensure")
+      .send({
+        serverId: "solver-01",
+        rangePath,
+        datasetName,
+        confirmDatasetName: true
+      });
+
+    expect(ensured.status).toBe(200);
+    expect(ensured.body).toMatchObject({
+      repoId: `Tsumugii/${datasetName}`,
+      exists: true,
+      created: true
+    });
+
+    const preview = await request(app)
+      .post("/api/parallel-jobs/preview")
+      .send({
+        rangePath,
+        datasetName,
+        serverIds: ["solver-01"],
+        settings: { uploadEnabled: false }
+      });
+
+    expect(preview.status).toBe(200);
+    expect(preview.body).toMatchObject({
+      repoId: `Tsumugii/${datasetName}`,
+      repoExists: true,
+      missingIndices: expect.any(Array)
+    });
+    expect(preview.body.missingIndices).toHaveLength(1755);
+    const repoChecks = fetchMock.mock.calls.filter(([url]) => String(url).includes(`/api/datasets/Tsumugii/${datasetName}`));
+    expect(repoChecks.every((call) => call[1]?.redirect === "manual")).toBe(true);
+    const createCall = fetchMock.mock.calls.find(([url]) => String(url).includes("/api/repos/create"));
+    expect(createCall?.[1]?.body).toContain(`\"name\":\"${datasetName}\"`);
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes(`${datasetName}-backup/tree`))).toBe(false);
+  });
+
+  it("does not treat a reserved backup redirect as a successful dataset creation", async () => {
+    const datasetName = "3ia-9-3od-5.8";
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes(`/api/datasets/Tsumugii/${datasetName}`)) {
+        return new Response(null, {
+          status: 307,
+          headers: {
+            location: `https://huggingface.co/api/datasets/Tsumugii/${datasetName}-backup`
+          }
+        });
+      }
+      if (url.includes("/api/repos/create")) {
+        return new Response(JSON.stringify({ error: "Repository name is reserved" }), { status: 409 });
+      }
+      return new Response("{}", { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const solverJobService = new SolverJobService({
+      db,
+      preflopRangesPath,
+      credentials: { username: "root", password: "secret" },
+      defaultPipelineStatusFilePath: "~/run/solver_running_status.json",
+      repoNamespace: "Tsumugii",
+      hfToken: "hf_test_token"
+    });
+    const app = createApp({ db, refreshService, preflopRangesPath, solverJobService });
+    const rangePath = "3OD-EP/3OD-4.3 vs 3IA-4.2.json";
+    await approveRange(app, rangePath);
+
+    const response = await request(app)
+      .post("/api/jobs/dataset-repo/ensure")
+      .send({
+        serverId: "solver-01",
+        rangePath,
+        datasetName,
+        confirmDatasetName: true
+      });
+
+    expect(response.status).toBe(500);
+    expect(response.body.message).toContain(`dataset repo creation failed for Tsumugii/${datasetName}`);
+    expect(response.body.message).toContain("Repository name is reserved");
+    const exactRepoChecks = fetchMock.mock.calls.filter(([url]) =>
+      String(url).includes(`/api/datasets/Tsumugii/${datasetName}`)
+    );
+    expect(exactRepoChecks).toHaveLength(2);
+    expect(exactRepoChecks.every((call) => call[1]?.redirect === "manual")).toBe(true);
   });
 
   it("reconciles an active job when server inventory reports the task is idle", async () => {

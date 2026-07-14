@@ -2278,10 +2278,14 @@ async function huggingFaceDatasetRepoExists(
   const response = await huggingFaceFetch(`${HUGGING_FACE_ORIGIN}/api/datasets/${repoIdPath(repoId)}`, {
     headers: huggingFaceHeaders(hfToken),
     proxyUrl: hfProxyUrl,
+    redirect: "manual",
     signal: AbortSignal.timeout(10_000)
   });
-  if (response.status === 404) return false;
-  if (response.ok) return true;
+  if (response.status === 404 || isRedirectStatus(response.status)) return false;
+  if (response.ok) {
+    const data = await response.json() as unknown;
+    return isRecord(data) && data.id === repoId;
+  }
   throw new Error(`Hugging Face dataset repo check failed for ${repoId}: ${await huggingFaceErrorMessage(response)}`);
 }
 
@@ -2306,13 +2310,20 @@ async function createHuggingFaceDatasetRepo(
     proxyUrl: hfProxyUrl,
     signal: AbortSignal.timeout(15_000)
   });
-  if (response.ok || response.status === 409) return;
-  if (response.status === 400 && await huggingFaceDatasetRepoExists(repoId, hfToken, hfProxyUrl)) return;
+  if (response.ok) return;
+  if (
+    (response.status === 400 || response.status === 409) &&
+    await huggingFaceDatasetRepoExists(repoId, hfToken, hfProxyUrl)
+  ) return;
   throw new Error(`Hugging Face dataset repo creation failed for ${repoId}: ${await huggingFaceErrorMessage(response)}`);
 }
 
 function huggingFaceDatasetUrl(repoId: string): string {
   return `${HUGGING_FACE_ORIGIN}/datasets/${repoId}`;
+}
+
+function isRedirectStatus(status: number): boolean {
+  return status === 301 || status === 302 || status === 303 || status === 307 || status === 308;
 }
 
 function splitRepoId(repoId: string): { namespace: string; name: string } {
@@ -3492,8 +3503,15 @@ async function fetchHuggingFaceDatasetBoardKeys(
     const response = await huggingFaceFetch(nextUrl, {
       headers: huggingFaceHeaders(hfToken),
       proxyUrl: hfProxyUrl,
+      redirect: "manual",
       signal: AbortSignal.timeout(20_000)
     });
+    if (isRedirectStatus(response.status)) {
+      throw new Error(
+        `Hugging Face dataset ${repoId} redirects to a different repo. ` +
+        "Create or select the exact dataset name before previewing distribution."
+      );
+    }
     if (!response.ok) {
       throw new Error(
         `Hugging Face dataset file listing failed for ${repoId} on page ${page}: ${await huggingFaceErrorMessage(response)}`
