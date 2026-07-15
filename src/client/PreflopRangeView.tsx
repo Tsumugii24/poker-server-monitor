@@ -167,6 +167,7 @@ type ServerOperationInventoryTab = "sync" | "network" | "upload";
 type RangeProgressRefreshSummary = {
   checked: number;
   failed: number;
+  fileListingFallbacks: number;
   failures: Array<{
     rangePath: string;
     datasetName: string;
@@ -304,6 +305,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
       setRangeProgressRefreshSummary({
         checked: response.checked,
         failed: response.failed,
+        fileListingFallbacks: response.fileListingFallbacks,
         failures: response.failures
       });
       if (currentFolderPath && !findFolder(normalizedTree, currentFolderPath)) {
@@ -1818,6 +1820,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
           role="status"
         >
           Progress refresh complete: {rangeProgressRefreshSummary.checked} checked, {rangeProgressRefreshSummary.checked - rangeProgressRefreshSummary.failed} updated, {rangeProgressRefreshSummary.failed} failed.
+          {rangeProgressRefreshSummary.fileListingFallbacks > 0 ? ` ${rangeProgressRefreshSummary.fileListingFallbacks} recovered from repository file listings.` : ""}
           {rangeProgressRefreshSummary.failed > 0 ? " Failed checks retained their last successful progress." : ""}
           {rangeProgressRefreshSummary.failures[0] ? (
             <> Latest error: {rangeProgressRefreshSummary.failures[0].datasetName}: {rangeProgressRefreshSummary.failures[0].message}</>

@@ -199,6 +199,73 @@ describe("preflop range API", () => {
     );
   });
 
+  it("falls back to paginated solver artifacts when the Hugging Face size service is unavailable", async () => {
+    const app = createApp({
+      db,
+      refreshService: service,
+      preflopRangesPath,
+      solverJobRepoNamespace: "Tsumugii",
+      hfToken: "hf_test_token"
+    });
+    const treeUrl = "https://huggingface.co/api/datasets/Tsumugii/3ia-4.2-3od-4.3/tree/main";
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.includes("/tree/main")) {
+        if (url.includes("cursor=page-2")) {
+          return new Response(JSON.stringify([
+            { path: "nested/Qh,Jd,Ts.json" },
+            { path: "reports/upload.json" }
+          ]), { status: 200 });
+        }
+        return new Response(JSON.stringify([
+          { path: ".gitattributes" },
+          { path: "AcAd3c.parquet" },
+          { path: "2h3d4s.parquet" }
+        ]), {
+          status: 200,
+          headers: {
+            Link: `<${treeUrl}?recursive=1&limit=1000&cursor=page-2>; rel="next"`
+          }
+        });
+      }
+      if (url.startsWith("https://huggingface.co/api/datasets/")) {
+        return new Response(JSON.stringify({ id: "Tsumugii/3ia-4.2-3od-4.3" }), { status: 200 });
+      }
+      if (url.startsWith("https://datasets-server.huggingface.co/size")) {
+        return new Response("temporarily unavailable", {
+          status: 503,
+          statusText: "Service Temporarily Unavailable"
+        });
+      }
+      return new Response("not found", { status: 404 });
+    }));
+
+    await request(app)
+      .post("/api/preflop-ranges/status")
+      .send({ path: "3OD-EP/3OD-4.3 vs 3IA-4.2.json", status: "approved" });
+
+    const response = await request(app).post("/api/preflop-ranges/refresh-progress");
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({
+      checked: 1,
+      failed: 0,
+      fileListingFallbacks: 1
+    });
+    expect(response.body.tree[0].children[0]).toMatchObject({
+      datasetName: "3ia-4.2-3od-4.3",
+      progress: {
+        rows: 3,
+        totalRows: 1755,
+        ratio: 3 / 1755
+      }
+    });
+    expect(fetch).toHaveBeenCalledTimes(4);
+    expect(vi.mocked(fetch).mock.calls.filter(([input]) =>
+      String(input).startsWith("https://datasets-server.huggingface.co/size")
+    )).toHaveLength(1);
+  });
+
   it("treats a redirected Hugging Face dataset name as an exact-match miss", async () => {
     const app = createApp({
       db,

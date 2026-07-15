@@ -25,6 +25,9 @@ const ORDER_FILE = ".range_order.json";
 const STATUS_FILE = ".range_status.json";
 const PROGRESS_FILE = ".range_progress.json";
 const RUNNING_JOB_STATUSES = new Set<SolverJobStatus>(["deploying", "running", "stopping"]);
+const HUGGING_FACE_ORIGIN = "https://huggingface.co";
+const HUGGING_FACE_TREE_PAGE_LIMIT = 1000;
+const HUGGING_FACE_TREE_MAX_PAGES = 100;
 
 type RangeStatusEntry = {
   reviewStatus: PreflopReviewStatus;
@@ -60,6 +63,7 @@ export type PreflopRangeProgressRefreshResult = {
   root: string;
   checked: number;
   failed: number;
+  fileListingFallbacks: number;
   failures: Array<{
     rangePath: string;
     datasetName: string;
@@ -144,17 +148,21 @@ export async function refreshPreflopRangeProgress(
   });
 
   let failed = 0;
+  let fileListingFallbacks = 0;
   const failures: PreflopRangeProgressRefreshResult["failures"] = [];
+  const fetchContext = { preferFileListing: false };
   await runWithConcurrency(approvedFiles, 4, async ({ rangePath, datasetName }) => {
     const checkedAt = new Date().toISOString();
     const previous = metadata.ranges[rangePath];
     try {
-      const rows = await fetchHuggingFaceDatasetRows(
+      const result = await fetchHuggingFaceDatasetRows(
         `${repoNamespace}/${datasetName}`,
         options.hfToken ?? null,
-        options.hfProxyUrl ?? null
+        options.hfProxyUrl ?? null,
+        fetchContext
       );
-      nextRanges[rangePath] = progressEntry(datasetName, rows, totalRows, checkedAt);
+      if (result.usedFileListing) fileListingFallbacks += 1;
+      nextRanges[rangePath] = progressEntry(datasetName, result.rows, totalRows, checkedAt);
     } catch (error) {
       failed += 1;
       const message = error instanceof Error ? error.message : String(error);
@@ -172,6 +180,7 @@ export async function refreshPreflopRangeProgress(
     root,
     checked: approvedFiles.length,
     failed,
+    fileListingFallbacks,
     failures,
     progress: { version: 1, ranges: nextRanges }
   };
@@ -885,24 +894,55 @@ function progressEntry(datasetName: string, rows: number, totalRows: number, che
 async function fetchHuggingFaceDatasetRows(
   repoId: string,
   hfToken: string | null,
-  hfProxyUrl: string | null
-): Promise<number> {
+  hfProxyUrl: string | null,
+  context: { preferFileListing: boolean }
+): Promise<{ rows: number; usedFileListing: boolean }> {
   const headers: Record<string, string> = {};
   const token = hfToken?.trim();
   if (token) headers.Authorization = `Bearer ${token}`;
-  if (!await huggingFaceDatasetMatches(repoId, headers, hfProxyUrl)) return 0;
+  if (!await huggingFaceDatasetMatches(repoId, headers, hfProxyUrl)) {
+    return { rows: 0, usedFileListing: false };
+  }
+
+  if (context.preferFileListing) {
+    return {
+      rows: await fetchHuggingFaceBoardArtifactCount(repoId, headers, hfProxyUrl),
+      usedFileListing: true
+    };
+  }
 
   const url = `https://datasets-server.huggingface.co/size?dataset=${encodeURIComponent(repoId)}`;
-  const response = await retryingHuggingFaceFetch(url, {
-    headers,
-    proxyUrl: hfProxyUrl
-  });
-  if (response.status === 404) return 0;
-  if (!response.ok) {
-    throw new Error(`Hugging Face size check failed for ${repoId}: ${response.status} ${response.statusText}`);
+  let sizeError: Error;
+  try {
+    const response = await huggingFaceFetch(url, {
+      headers,
+      proxyUrl: hfProxyUrl,
+      signal: AbortSignal.timeout(10_000)
+    });
+    if (response.ok) {
+      const data = await response.json() as unknown;
+      const rows = extractHuggingFaceRows(data);
+      if (rows != null) return { rows: normalizedRows(rows), usedFileListing: false };
+      sizeError = new Error(`Hugging Face size check returned no row count for ${repoId}.`);
+    } else {
+      sizeError = new Error(`Hugging Face size check failed for ${repoId}: ${response.status} ${response.statusText}`);
+    }
+  } catch (error) {
+    sizeError = error instanceof Error
+      ? new Error(`Hugging Face size check failed for ${repoId}: ${error.message}`)
+      : new Error(`Hugging Face size check failed for ${repoId}.`);
   }
-  const data = await response.json() as unknown;
-  return normalizedRows(extractHuggingFaceRows(data) ?? 0);
+
+  context.preferFileListing = true;
+  try {
+    return {
+      rows: await fetchHuggingFaceBoardArtifactCount(repoId, headers, hfProxyUrl),
+      usedFileListing: true
+    };
+  } catch (error) {
+    const fallbackMessage = error instanceof Error ? error.message : String(error);
+    throw new Error(`${sizeError.message} Repository file listing fallback failed: ${fallbackMessage}`);
+  }
 }
 
 async function huggingFaceDatasetMatches(
@@ -927,6 +967,96 @@ async function huggingFaceDatasetMatches(
     throw new Error(`Hugging Face repo check returned no dataset id for ${repoId}.`);
   }
   return actualRepoId === repoId;
+}
+
+async function fetchHuggingFaceBoardArtifactCount(
+  repoId: string,
+  headers: Record<string, string>,
+  hfProxyUrl: string | null
+): Promise<number> {
+  const encodedRepoId = repoId.split("/").map(encodeURIComponent).join("/");
+  const treePath = `/api/datasets/${encodedRepoId}/tree/main`;
+  let nextUrl: string | null = `${HUGGING_FACE_ORIGIN}${treePath}?recursive=1&limit=${HUGGING_FACE_TREE_PAGE_LIMIT}`;
+  const visitedUrls = new Set<string>();
+  const boardKeys = new Set<string>();
+
+  for (let page = 1; nextUrl && page <= HUGGING_FACE_TREE_MAX_PAGES; page += 1) {
+    if (visitedUrls.has(nextUrl)) {
+      throw new Error(`Hugging Face dataset file listing returned a repeated pagination URL for ${repoId}.`);
+    }
+    visitedUrls.add(nextUrl);
+    const response = await retryingHuggingFaceFetch(nextUrl, {
+      headers,
+      proxyUrl: hfProxyUrl,
+      redirect: "manual"
+    });
+    if (response.status === 404 || isRedirectStatus(response.status)) return 0;
+    if (!response.ok) {
+      throw new Error(
+        `Hugging Face dataset file listing failed for ${repoId} on page ${page}: ` +
+        `${response.status} ${response.statusText}`
+      );
+    }
+
+    const data = await response.json() as unknown;
+    const items = Array.isArray(data)
+      ? data
+      : isRecord(data) && Array.isArray(data.items)
+        ? data.items
+        : [];
+    for (const item of items) {
+      const rawPath = isRecord(item) && typeof item.path === "string"
+        ? item.path
+        : isRecord(item) && typeof item.rfilename === "string"
+          ? item.rfilename
+          : null;
+      const boardKey = rawPath ? boardArtifactKey(rawPath) : null;
+      if (boardKey) boardKeys.add(boardKey);
+    }
+    nextUrl = validatedHuggingFaceTreeNextUrl(response.headers.get("link"), treePath, repoId);
+  }
+
+  if (nextUrl) {
+    throw new Error(
+      `Hugging Face dataset file listing exceeded ${HUGGING_FACE_TREE_MAX_PAGES} pages for ${repoId}.`
+    );
+  }
+  return boardKeys.size;
+}
+
+function boardArtifactKey(rawPath: string): string | null {
+  const filename = rawPath.split("/").pop() ?? "";
+  const stem = filename.replace(/\.(parquet|json)$/i, "");
+  if (stem === filename) return null;
+  const key = stem.replace(/,/g, "").trim().toLowerCase();
+  if (!/^(?:[2-9tjqka][cdhs]){3}$/.test(key)) return null;
+  const cards = key.match(/[2-9tjqka][cdhs]/g) ?? [];
+  return new Set(cards).size === 3 ? key : null;
+}
+
+function validatedHuggingFaceTreeNextUrl(
+  linkHeader: string | null,
+  treePath: string,
+  repoId: string
+): string | null {
+  const rawNextUrl = huggingFaceNextLink(linkHeader);
+  if (!rawNextUrl) return null;
+  const parsed = new URL(rawNextUrl, HUGGING_FACE_ORIGIN);
+  if (parsed.origin !== HUGGING_FACE_ORIGIN || parsed.pathname !== treePath) {
+    throw new Error(`Hugging Face dataset file listing returned an invalid pagination URL for ${repoId}.`);
+  }
+  return parsed.toString();
+}
+
+function huggingFaceNextLink(linkHeader: string | null): string | null {
+  if (!linkHeader) return null;
+  for (const part of linkHeader.split(/,\s*(?=<)/)) {
+    const url = part.match(/<([^>]+)>/)?.[1];
+    const relation = part.match(/;\s*rel=(?:"([^"]+)"|([^;\s,]+))/i);
+    const relations = (relation?.[1] ?? relation?.[2] ?? "").split(/\s+/);
+    if (url && relations.includes("next")) return url;
+  }
+  return null;
 }
 
 async function retryingHuggingFaceFetch(
