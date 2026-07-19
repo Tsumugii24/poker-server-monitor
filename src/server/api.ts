@@ -70,6 +70,8 @@ import type {
   ServerNetworkCheckRequest,
   ServerNetworkSyncRequest,
   ServerSyncRequest,
+  ServerUploadCandidateDeleteRequest,
+  ServerUploadCandidatesBulkDeleteRequest,
   ServerUploadRequest
 } from "../shared/serverOperations";
 import {
@@ -851,6 +853,32 @@ export function createApp({
       );
     } catch (error) {
       respondSolverJobError(response, error, "server_upload_candidates_failed");
+    }
+  });
+
+  app.delete("/api/server-operations/upload-candidates", async (request, response) => {
+    if (!isServerUploadCandidateDeleteRequest(request.body)) {
+      response.status(400).json({ error: "invalid_server_upload_candidate_delete" });
+      return;
+    }
+
+    try {
+      response.json(await solverJobService.deleteUploadCandidate(request.body));
+    } catch (error) {
+      respondSolverJobError(response, error, "server_upload_candidate_delete_failed");
+    }
+  });
+
+  app.delete("/api/server-operations/upload-candidates/bulk", async (request, response) => {
+    if (!isServerUploadCandidatesBulkDeleteRequest(request.body)) {
+      response.status(400).json({ error: "invalid_server_upload_candidates_bulk_delete" });
+      return;
+    }
+
+    try {
+      response.json(await solverJobService.deleteUploadCandidates(request.body));
+    } catch (error) {
+      respondSolverJobError(response, error, "server_upload_candidates_bulk_delete_failed");
     }
   });
 
@@ -1686,6 +1714,20 @@ function isServerUploadRequest(value: unknown): value is ServerUploadRequest {
       (item.fileCount == null || typeof item.fileCount === "number")
     );
   });
+}
+
+function isServerUploadCandidateDeleteRequest(value: unknown): value is ServerUploadCandidateDeleteRequest {
+  return isRecord(value) &&
+    typeof value.serverId === "string" && value.serverId.trim() !== "" &&
+    typeof value.resultsDir === "string" && value.resultsDir.trim() !== "";
+}
+
+function isServerUploadCandidatesBulkDeleteRequest(value: unknown): value is ServerUploadCandidatesBulkDeleteRequest {
+  return isRecord(value) &&
+    Array.isArray(value.items) &&
+    value.items.length > 0 &&
+    value.items.length <= 5000 &&
+    value.items.every(isServerUploadCandidateDeleteRequest);
 }
 
 function alertStatus(settings: AlertSettings): { enabled: boolean; configured: boolean } {

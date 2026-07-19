@@ -90,6 +90,30 @@ export type ServerUploadCandidatesResponse = {
   failedServers?: Array<{ serverId: string; message: string }>;
 };
 
+export type ServerUploadCandidateDeleteRequest = {
+  serverId: string;
+  resultsDir: string;
+};
+
+export type ServerUploadCandidateDeleteResponse = {
+  serverId: string;
+  resultsDir: string;
+  datasetName: string;
+  jobId: string;
+  parquetDeleted: number;
+  jsonDeleted: number;
+};
+
+export type ServerUploadCandidatesBulkDeleteRequest = {
+  items: ServerUploadCandidateDeleteRequest[];
+};
+
+export type ServerUploadCandidatesBulkDeleteResponse = {
+  requested: number;
+  deleted: ServerUploadCandidateDeleteResponse[];
+  failed: Array<ServerUploadCandidateDeleteRequest & { message: string }>;
+};
+
 export type ServerSyncRequest = {
   serverIds?: string[];
 };

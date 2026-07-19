@@ -12,6 +12,7 @@ import { RefreshService } from "../../src/server/refreshService";
 import {
   buildForceKillPipelineCommand,
   buildDispatchPreflightCommand,
+  buildDeleteUploadCandidateCommand,
   buildGracefulStopPipelineCommand,
   buildRunPipelineCommand,
   buildReadServerOperationStatusCommand,
@@ -21,6 +22,7 @@ import {
   buildServerUploadCommand,
   datasetNameFromRangePath,
   parseUploadCandidatesOutput,
+  parseDeletedUploadCandidateOutput,
   scenarioFromRangePath,
   solverRangeTextFromDocument,
   SolverJobService
@@ -245,6 +247,9 @@ describe("solver job helpers", () => {
     expect(command).toContain('"fileFormat":"parquet"');
     expect(command).toContain('"upload_success"');
     expect(command).toContain('"upload_failed"');
+    expect(command).toContain('"files_uploaded"');
+    expect(command).toContain('"files_deleted"');
+    expect(command).toContain('"files_remaining"');
   });
 
   it("parses retained upload directories from remote scan output", () => {
@@ -271,6 +276,30 @@ describe("solver job helpers", () => {
         fileCount: 4
       })
     ]);
+  });
+
+  it("builds a guarded retained-result deletion command and parses its result", () => {
+    const command = buildDeleteUploadCandidateCommand(
+      "~/solver",
+      "/home/jane/solver/results/sia-30-sod-13.5/job-1"
+    );
+
+    expect(command).toContain('RESULTS_ROOT="$HOME/solver/results"');
+    expect(command).toContain('ROOT_REAL=$(realpath -e "$RESULTS_ROOT")');
+    expect(command).toContain('Refusing to delete a non-job result folder');
+    expect(command).toContain('rm -rf -- "$TARGET_REAL"');
+
+    expect(parseDeletedUploadCandidateOutput(
+      "DELETED\t/home/jane/solver/results/sia-30-sod-13.5/job-1\tsia-30-sod-13.5\tjob-1\t12\t3\n",
+      "solver-08"
+    )).toEqual({
+      serverId: "solver-08",
+      resultsDir: "/home/jane/solver/results/sia-30-sod-13.5/job-1",
+      datasetName: "sia-30-sod-13.5",
+      jobId: "job-1",
+      parquetDeleted: 12,
+      jsonDeleted: 3
+    });
   });
 
   it("requires HF_TOKEN when upload is enabled", () => {
@@ -599,7 +628,7 @@ describe("solver job API", () => {
       run: vi.fn(async (_server, _credentials, command) => {
         commands.push(command);
         if (command.includes("CANDIDATE")) {
-          return "CANDIDATE\tsia-30-sod-13.5\tjob-1\t/srv/solver/results/sia-30-sod-13.5/job-1\t5\t0\tTsumugii/sia-30-sod-13.5\n";
+          return "CANDIDATE\tsia-30-sod-13.5\tjob-1\t/srv/solver/results/sia-30-sod-13.5/job-1\t5\t2\tTsumugii/sia-30-sod-13.5\n";
         }
         return "ok";
       })
@@ -630,12 +659,104 @@ describe("solver job API", () => {
     expect(started.body.operations[0].items).toContainEqual(expect.objectContaining({
       repoId: "Tsumugii/sia-30-sod-13.5",
       resultsDir: "/srv/solver/results/sia-30-sod-13.5/job-1",
+      fileFormat: "parquet",
       fileCount: 5
+    }));
+    expect(started.body.operations[0].items).toContainEqual(expect.objectContaining({
+      repoId: "Tsumugii/sia-30-sod-13.5",
+      resultsDir: "/srv/solver/results/sia-30-sod-13.5/job-1",
+      fileFormat: "json",
+      fileCount: 2
     }));
     expect(started.body.operations[0].command).toContain("export HF_TOKEN=$HF_TOKEN");
     expect(started.body.operations[0].command).not.toContain("hf_test_token");
     expect(commands.some((command) => command.includes("find \"$RESULTS_ROOT\""))).toBe(true);
     expect(commands.some((command) => command.includes("tmux send-keys"))).toBe(true);
+  });
+
+  it("deletes one scanned retained-result folder through the selected server", async () => {
+    const executor: SshExecutor = {
+      run: vi.fn(async (_server, _credentials, command) => {
+        commands.push(command);
+        return "DELETED\t/srv/solver/results/sia-30-sod-13.5/job-old\tsia-30-sod-13.5\tjob-old\t8\t2\n";
+      })
+    };
+    const solverJobService = new SolverJobService({
+      db,
+      preflopRangesPath,
+      credentials: { username: "root", password: "secret" },
+      executor,
+      defaultPipelineStatusFilePath: "~/run/solver_running_status.json"
+    });
+    const app = createApp({ db, refreshService, preflopRangesPath, solverJobService });
+
+    const response = await request(app)
+      .delete("/api/server-operations/upload-candidates")
+      .send({
+        serverId: "solver-01",
+        resultsDir: "/srv/solver/results/sia-30-sod-13.5/job-old"
+      });
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({
+      serverId: "solver-01",
+      resultsDir: "/srv/solver/results/sia-30-sod-13.5/job-old",
+      datasetName: "sia-30-sod-13.5",
+      jobId: "job-old",
+      parquetDeleted: 8,
+      jsonDeleted: 2
+    });
+    expect(commands).toHaveLength(1);
+    expect(commands[0]).toContain("realpath -e");
+    expect(commands[0]).toContain('rm -rf -- "$TARGET_REAL"');
+  });
+
+  it("bulk deletes selected range folders and reports partial failures", async () => {
+    const executor: SshExecutor = {
+      run: vi.fn(async (_server, _credentials, command) => {
+        commands.push(command);
+        if (command.includes("job-failed")) throw new Error("remote delete failed");
+        return "DELETED\t/srv/solver/results/sia-30-sod-13.5/job-ready\tsia-30-sod-13.5\tjob-ready\t8\t2\n";
+      })
+    };
+    const solverJobService = new SolverJobService({
+      db,
+      preflopRangesPath,
+      credentials: { username: "root", password: "secret" },
+      executor,
+      defaultPipelineStatusFilePath: "~/run/solver_running_status.json"
+    });
+    const app = createApp({ db, refreshService, preflopRangesPath, solverJobService });
+
+    const response = await request(app)
+      .delete("/api/server-operations/upload-candidates/bulk")
+      .send({
+        items: [{
+          serverId: "solver-01",
+          resultsDir: "/srv/solver/results/sia-30-sod-13.5/job-ready"
+        }, {
+          serverId: "solver-01",
+          resultsDir: "/srv/solver/results/3ia-9-3od-5.8/job-failed"
+        }]
+      });
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({
+      requested: 2,
+      deleted: [{
+        serverId: "solver-01",
+        datasetName: "sia-30-sod-13.5",
+        jobId: "job-ready",
+        parquetDeleted: 8,
+        jsonDeleted: 2
+      }],
+      failed: [{
+        serverId: "solver-01",
+        resultsDir: "/srv/solver/results/3ia-9-3od-5.8/job-failed",
+        message: "remote delete failed"
+      }]
+    });
+    expect(commands).toHaveLength(2);
   });
 
   it("starts manual network sync operations without exposing the subscription URL", async () => {

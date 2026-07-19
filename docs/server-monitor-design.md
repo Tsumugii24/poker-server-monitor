@@ -220,8 +220,9 @@ The current implementation also includes solver job orchestration for the shared
 - Hugging Face dataset checks use exact Repo ID matching. A rename redirect such as `dataset` to `dataset-backup` is treated as a missing `dataset`, allowing the original name to be created independently after explicit confirmation instead of reading coverage from the backup.
 - Range progress prefers the Hugging Face dataset size service. If that service is unavailable during a refresh, the remaining checks use paginated repository file listings and count unique solver board artifacts, matching Parallel Preview coverage instead of failing the entire batch.
 - Multi-server code sync, network sync, result scans, and upload tmux startup use bounded concurrency instead of waiting for every server serially.
-- `Scan All Results` inspects `~/solver/results/<dataset>/<job-id>` on every online enabled server and lists retained parquet/json result folders.
-- `Scan All Results` and `Scan + Upload All` are manually initiated. The latter performs a fresh scan server-side after confirmation before starting upload tmux sessions. Each server serially uploads every retained result folder assigned to that server through `python upload.py --results-dir <dir> --repo-id <repo> --file-format <format>`.
+- `Scan All Results` inspects `~/solver/results/<dataset>/<job-id>` on every online enabled server and lists retained parquet/json result folders in a filterable, bounded-height inventory. Operators can select all folders matching the current Range/Dataset filter, then upload the selection or delete it without uploading. Each row retains its own targeted Upload/Delete actions.
+- `Scan All Results` and `Scan + Upload All` are manually initiated. The latter performs a fresh scan server-side after confirmation before starting upload tmux sessions. Each server serially uploads every retained format in every assigned result folder through `python upload.py --results-dir <dir> --repo-id <repo> --file-format <format>`.
+- Upload reports persist per-folder and per-format counts for files found, uploaded, deleted locally, and remaining. Successful `upload.py` calls delete the uploaded local format; the report keeps upload and cleanup outcomes distinct.
 - Upload uses `HF_TOKEN` only on the backend/remote command path. Frontend command previews redact it as `export HF_TOKEN=$HF_TOKEN`.
 - Operation records persist command, tmux session, log path, status, and structured result JSON. The UI summarizes sync latest/synced/failed counts and upload success/failed/no-file/file counts.
 - Reading the operation report is database-only and never blocks page rendering on SSH. Background/manual reconciliation probes both the remote status file and tmux session; stale active records are marked failed after a server restart, and overlapping reconciliation ticks share one in-flight run.
@@ -245,6 +246,8 @@ Representative backend endpoints:
 - `DELETE /api/parallel-jobs/failure-pool`: clear all recorded failure-pool entries without stopping parallel runs.
 - `GET /api/server-operations`: list server operation records and events.
 - `GET /api/server-operations/upload-candidates`: scan all SSH-ready servers for retained result folders.
+- `DELETE /api/server-operations/upload-candidates`: validate and delete one remote `results/<dataset>/<job-id>` directory.
+- `DELETE /api/server-operations/upload-candidates/bulk`: validate and delete selected Range result directories, serializing work per server and returning per-directory success/failure results.
 - `POST /api/server-operations/sync`: start sync tmux sessions for online enabled servers.
 - `POST /api/server-operations/network-sync`: update Mihomo and restart network tmux sessions for online enabled servers.
 - `POST /api/server-operations/upload`: scan and start upload tmux sessions for online enabled servers.

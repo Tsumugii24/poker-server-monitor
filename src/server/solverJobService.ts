@@ -27,7 +27,8 @@ import {
   type SolverJobSettings,
   type SolverJobStatus,
   type SolverScenario,
-  type SolverScenarioLibraryItem
+  type SolverScenarioLibraryItem,
+  type SolverUploadFormat
 } from "../shared/solverJobs";
 import type { AlertSettings } from "../shared/types";
 import type { PipelineStatusSnapshot, ServerRow } from "../shared/types";
@@ -57,6 +58,10 @@ import type {
   ServerNetworkSyncRequest,
   ServerSyncRequest,
   ServerUploadCandidate,
+  ServerUploadCandidateDeleteRequest,
+  ServerUploadCandidateDeleteResponse,
+  ServerUploadCandidatesBulkDeleteRequest,
+  ServerUploadCandidatesBulkDeleteResponse,
   ServerUploadCandidatesResponse,
   ServerUploadItem,
   ServerUploadRequest
@@ -627,6 +632,61 @@ export class SolverJobService {
     };
   }
 
+  async deleteUploadCandidate(input: ServerUploadCandidateDeleteRequest): Promise<ServerUploadCandidateDeleteResponse> {
+    const server = this.requireServer(input.serverId);
+    this.ensureServerOnline(server);
+    if (!server.enabled) throw new Error(`Server ${server.id} is offline or disabled.`);
+    this.ensureCredentials();
+    const activeUpload = this.options.db.getLatestServerOperation(server.id, "upload");
+    if (activeUpload && ACTIVE_SERVER_OPERATION_STATUSES.has(activeUpload.status)) {
+      throw new Error(`Active upload operation on server ${server.id} must be stopped before deleting retained results.`);
+    }
+    const activeJob = this.options.db.getActiveSolverJobForServer(server.id);
+    const requestedJobId = remotePathBasename(input.resultsDir);
+    if (activeJob && activeJob.id === requestedJobId) {
+      throw new Error(`Active solver job ${activeJob.datasetName} must be stopped before deleting its results.`);
+    }
+    const output = await this.executor.run(
+      server,
+      this.options.credentials!,
+      buildDeleteUploadCandidateCommand(effectiveSolverRoot(server), input.resultsDir)
+    );
+    return parseDeletedUploadCandidateOutput(output, server.id);
+  }
+
+  async deleteUploadCandidates(
+    input: ServerUploadCandidatesBulkDeleteRequest
+  ): Promise<ServerUploadCandidatesBulkDeleteResponse> {
+    const uniqueItems = uniqueUploadCandidateDeleteRequests(input.items);
+    const deleted: ServerUploadCandidateDeleteResponse[] = [];
+    const failed: ServerUploadCandidatesBulkDeleteResponse["failed"] = [];
+    const itemsByServer = new Map<string, ServerUploadCandidateDeleteRequest[]>();
+    for (const item of uniqueItems) {
+      const serverItems = itemsByServer.get(item.serverId) ?? [];
+      serverItems.push(item);
+      itemsByServer.set(item.serverId, serverItems);
+    }
+
+    await forEachWithConcurrency([...itemsByServer.values()], 6, async (serverItems) => {
+      for (const item of serverItems) {
+        try {
+          deleted.push(await this.deleteUploadCandidate(item));
+        } catch (error) {
+          failed.push({
+            ...item,
+            message: error instanceof Error ? error.message : String(error)
+          });
+        }
+      }
+    });
+
+    return {
+      requested: uniqueItems.length,
+      deleted,
+      failed
+    };
+  }
+
   async startSyncOperations(input: ServerSyncRequest = {}): Promise<ServerOperationsResponse> {
     this.ensureCredentials();
     const servers = this.operationTargetServers(input.serverIds);
@@ -706,15 +766,7 @@ export class SolverJobService {
     const scanFailedServerIds = new Set<string>();
     if (items.length === 0) {
       const scan = await this.scanAllUploadCandidates(targetServers.map((server) => server.id));
-      items = normalizeUploadItems(scan.candidates.map((candidate) => ({
-        serverId: candidate.serverId,
-        datasetName: candidate.datasetName,
-        repoId: candidate.repoId,
-        jobId: candidate.jobId,
-        resultsDir: candidate.resultsDir,
-        fileFormat: candidate.fileFormat,
-        fileCount: candidate.fileCount
-      })));
+      items = normalizeUploadItems(scan.candidates.flatMap(serverUploadItemsFromCandidate));
       for (const failed of scan.failedServers ?? []) {
         scanFailedServerIds.add(failed.serverId);
         const server = targetServers.find((candidate) => candidate.id === failed.serverId);
@@ -2844,16 +2896,22 @@ import json
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 plan_path, result_path = sys.argv[1:3]
 with open(plan_path, "r", encoding="utf-8") as handle:
     items = json.load(handle)
 
 summary = {
-    "folders": len(items),
+    "folders": len(set(item.get("resultsDir") or "" for item in items)),
+    "upload_attempts": len(items),
     "upload_success": 0,
     "upload_failed": 0,
     "files_requested": 0,
+    "files_found": 0,
+    "files_uploaded": 0,
+    "files_deleted": 0,
+    "files_remaining": 0,
     "no_files": 1 if not items else 0,
     "duration_seconds": 0,
 }
@@ -2863,6 +2921,11 @@ started = time.time()
 for item in items:
     file_count = int(item.get("fileCount") or 0)
     summary["files_requested"] += file_count
+    file_format = item.get("fileFormat") or "parquet"
+    pattern = "*.parquet" if file_format == "parquet" else "*.json"
+    result_dir = Path(item["resultsDir"]).expanduser()
+    files_before = len(list(result_dir.glob(pattern))) if result_dir.is_dir() else 0
+    summary["files_found"] += files_before
     command = [
         "python",
         "upload.py",
@@ -2871,7 +2934,7 @@ for item in items:
         "--repo-id",
         item["repoId"],
         "--file-format",
-        item.get("fileFormat") or "parquet",
+        file_format,
     ]
     item_started = time.time()
     print("[Upload]", item["repoId"], "<-", item["resultsDir"], flush=True)
@@ -2881,6 +2944,12 @@ for item in items:
         print(output, end="" if output.endswith("\n") else "\n", flush=True)
     duration = max(0, round(time.time() - item_started))
     success = process.returncode == 0
+    files_after = len(list(result_dir.glob(pattern))) if result_dir.is_dir() else 0
+    files_deleted = max(0, files_before - files_after)
+    files_uploaded = files_before if success else 0
+    summary["files_uploaded"] += files_uploaded
+    summary["files_deleted"] += files_deleted
+    summary["files_remaining"] += files_after
     if success:
         summary["upload_success"] += 1
     else:
@@ -2890,8 +2959,12 @@ for item in items:
         "repo_id": item["repoId"],
         "job_id": item.get("jobId") or "",
         "results_dir": item["resultsDir"],
-        "file_format": item.get("fileFormat") or "parquet",
+        "file_format": file_format,
         "file_count": file_count,
+        "files_found": files_before,
+        "files_uploaded": files_uploaded,
+        "files_deleted": files_deleted,
+        "files_remaining": files_after,
         "exit_code": process.returncode,
         "success": success,
         "duration_seconds": duration,
@@ -2903,6 +2976,32 @@ with open(result_path, "w", encoding="utf-8") as handle:
     json.dump({"summary": summary, "details": details}, handle, ensure_ascii=True)
 sys.exit(0 if summary["upload_failed"] == 0 else 1)
 PY`;
+}
+
+export function buildDeleteUploadCandidateCommand(solverRoot: string, resultsDir: string): string {
+  const resultsRoot = joinRemotePath(solverRoot, "results");
+  return String.raw`set -e
+RESULTS_ROOT=${shellQuoteRemotePath(resultsRoot)}
+TARGET=${shellQuoteRemotePath(resultsDir)}
+[ -d "$RESULTS_ROOT" ] || { echo "Results root does not exist" >&2; exit 2; }
+[ -d "$TARGET" ] || { echo "Result folder does not exist" >&2; exit 3; }
+ROOT_REAL=$(realpath -e "$RESULTS_ROOT")
+TARGET_REAL=$(realpath -e "$TARGET")
+case "$TARGET_REAL" in
+  "$ROOT_REAL"/*/*) ;;
+  *) echo "Refusing to delete a path outside results/<dataset>/<job-id>" >&2; exit 4 ;;
+esac
+RELATIVE=${"${TARGET_REAL#\"$ROOT_REAL\"/}"}
+case "$RELATIVE" in
+  */*/*|/*|*/|"") echo "Refusing to delete a non-job result folder" >&2; exit 5 ;;
+esac
+DATASET=${"${RELATIVE%%/*}"}
+JOB_ID=${"${RELATIVE#*/}"}
+PARQUET_COUNT=$(find "$TARGET_REAL" -maxdepth 1 -type f -name '*.parquet' | wc -l | tr -d ' ')
+JSON_COUNT=$(find "$TARGET_REAL" -maxdepth 1 -type f -name '*.json' | wc -l | tr -d ' ')
+rm -rf -- "$TARGET_REAL"
+[ ! -e "$TARGET_REAL" ] || { echo "Result folder still exists after deletion" >&2; exit 6; }
+printf 'DELETED\t%s\t%s\t%s\t%s\t%s\n' "$TARGET_REAL" "$DATASET" "$JOB_ID" "$PARQUET_COUNT" "$JSON_COUNT"`;
 }
 
 export function buildTrackedServerOperationCommand({
@@ -3311,6 +3410,27 @@ export function parseUploadCandidatesOutput(output: string, serverId: string, re
     });
 }
 
+export function parseDeletedUploadCandidateOutput(
+  output: string,
+  serverId: string
+): ServerUploadCandidateDeleteResponse {
+  const line = output.split(/\r?\n/).find((candidate) => candidate.startsWith("DELETED\t"));
+  const parts = line?.split("\t") ?? [];
+  if (parts.length < 6) {
+    throw new Error(`Server ${serverId} returned an invalid result-folder deletion response.`);
+  }
+  const parquetDeleted = Number(parts[4]);
+  const jsonDeleted = Number(parts[5]);
+  return {
+    serverId,
+    resultsDir: parts[1]!,
+    datasetName: parts[2]!,
+    jobId: parts[3]!,
+    parquetDeleted: Number.isFinite(parquetDeleted) ? Math.max(0, Math.trunc(parquetDeleted)) : 0,
+    jsonDeleted: Number.isFinite(jsonDeleted) ? Math.max(0, Math.trunc(jsonDeleted)) : 0
+  };
+}
+
 function normalizeUploadItems(items: ServerUploadItem[] | undefined): ServerUploadItem[] {
   if (!Array.isArray(items)) return [];
   const normalized: ServerUploadItem[] = [];
@@ -3337,6 +3457,40 @@ function normalizeUploadItems(items: ServerUploadItem[] | undefined): ServerUplo
     });
   }
   return normalized;
+}
+
+function uniqueUploadCandidateDeleteRequests(
+  items: ServerUploadCandidateDeleteRequest[]
+): ServerUploadCandidateDeleteRequest[] {
+  const normalized: ServerUploadCandidateDeleteRequest[] = [];
+  const seen = new Set<string>();
+  for (const item of items) {
+    const serverId = item.serverId.trim();
+    const resultsDir = item.resultsDir.trim();
+    const key = `${serverId}:${resultsDir}`;
+    if (!serverId || !resultsDir || seen.has(key)) continue;
+    seen.add(key);
+    normalized.push({ serverId, resultsDir });
+  }
+  return normalized;
+}
+
+function serverUploadItemsFromCandidate(candidate: ServerUploadCandidate): ServerUploadItem[] {
+  const formats: Array<{ fileFormat: SolverUploadFormat; fileCount: number }> = [
+    { fileFormat: "parquet", fileCount: candidate.parquetCount },
+    { fileFormat: "json", fileCount: candidate.jsonCount }
+  ];
+  return formats
+    .filter(({ fileCount }) => fileCount > 0)
+    .map(({ fileFormat, fileCount }) => ({
+      serverId: candidate.serverId,
+      datasetName: candidate.datasetName,
+      repoId: candidate.repoId,
+      jobId: candidate.jobId,
+      resultsDir: candidate.resultsDir,
+      fileFormat,
+      fileCount
+    }));
 }
 
 function isServerUploadOperationItem(item: ServerOperation["items"][number]): item is ServerUploadItem {
@@ -3864,6 +4018,10 @@ function joinRemotePath(...parts: string[]): string {
     .map((part, index) => index === 0 ? part.replace(/\/+$/g, "") : part.replace(/^\/+|\/+$/g, ""))
     .filter(Boolean)
     .join("/");
+}
+
+function remotePathBasename(remotePath: string): string {
+  return remotePath.replace(/\/+$/g, "").split("/").pop()?.trim() ?? "";
 }
 
 function effectiveSolverRoot(server?: Pick<ServerRow, "solverRoot"> | null): string {

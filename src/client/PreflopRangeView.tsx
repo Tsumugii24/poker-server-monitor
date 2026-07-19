@@ -75,6 +75,8 @@ import type {
   ServerOperation,
   ServerOperationsResponse,
   ServerUploadCandidate,
+  ServerUploadCandidateDeleteResponse,
+  ServerUploadCandidatesBulkDeleteResponse,
   ServerUploadCandidatesResponse,
   ServerUploadItem
 } from "../shared/serverOperations";
@@ -153,13 +155,17 @@ type PendingParallelQueueDeleteAction = {
 };
 
 type PendingServerOperationAction = {
-  action: "sync" | "network_sync" | "network_check" | "upload" | "retry" | "clear";
+  action: "sync" | "network_sync" | "network_check" | "upload" | "delete_upload_candidate" | "delete_upload_candidates" | "retry" | "clear";
   serverCount: number;
   itemCount: number;
+  fileCount?: number;
   serverIds?: string[];
   itemIds?: string[];
   operationId?: string;
   operationType?: ServerOperation["type"];
+  uploadItems?: ServerUploadItem[];
+  candidate?: ServerUploadCandidate;
+  candidates?: ServerUploadCandidate[];
 };
 
 type ServerOperationInventoryTab = "sync" | "network" | "upload";
@@ -1356,6 +1362,54 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
     });
   };
 
+  const requestUploadCandidate = (candidate: ServerUploadCandidate) => {
+    setPendingServerOperationAction({
+      action: "upload",
+      serverCount: 1,
+      itemCount: 1,
+      serverIds: [candidate.serverId],
+      uploadItems: uploadItemsFromCandidate(candidate),
+      candidate
+    });
+  };
+
+  const requestUploadCandidates = (candidates: ServerUploadCandidate[]) => {
+    if (candidates.length === 0) return;
+    const summary = summarizeUploadCandidates(candidates);
+    setPendingServerOperationAction({
+      action: "upload",
+      serverCount: summary.servers,
+      itemCount: summary.folders,
+      fileCount: summary.files,
+      serverIds: [...new Set(candidates.map((candidate) => candidate.serverId))],
+      uploadItems: candidates.flatMap(uploadItemsFromCandidate),
+      candidates
+    });
+  };
+
+  const requestDeleteUploadCandidate = (candidate: ServerUploadCandidate) => {
+    setPendingServerOperationAction({
+      action: "delete_upload_candidate",
+      serverCount: 1,
+      itemCount: candidate.parquetCount + candidate.jsonCount,
+      serverIds: [candidate.serverId],
+      candidate
+    });
+  };
+
+  const requestDeleteUploadCandidates = (candidates: ServerUploadCandidate[]) => {
+    if (candidates.length === 0) return;
+    const summary = summarizeUploadCandidates(candidates);
+    setPendingServerOperationAction({
+      action: "delete_upload_candidates",
+      serverCount: summary.servers,
+      itemCount: summary.folders,
+      fileCount: summary.files,
+      serverIds: [...new Set(candidates.map((candidate) => candidate.serverId))],
+      candidates
+    });
+  };
+
   const requestClearServerOperations = () => {
     const clearableCount = serverOperations.filter((operation) => serverOperationIsTerminal(operation)).length;
     if (clearableCount === 0) return;
@@ -1398,10 +1452,44 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            serverIds: pending.serverIds ?? []
+            serverIds: pending.serverIds ?? [],
+            items: pending.uploadItems
           })
         });
         applyServerOperationsResponse(response);
+      } else if (pending.action === "delete_upload_candidate" && pending.candidate) {
+        await fetchPreflopJson<ServerUploadCandidateDeleteResponse>("/api/server-operations/upload-candidates", {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            serverId: pending.candidate.serverId,
+            resultsDir: pending.candidate.resultsDir
+          })
+        });
+        setUploadCandidates((current) => current.filter((candidate) => candidate.id !== pending.candidate?.id));
+      } else if (pending.action === "delete_upload_candidates" && pending.candidates?.length) {
+        const response = await fetchPreflopJson<ServerUploadCandidatesBulkDeleteResponse>(
+          "/api/server-operations/upload-candidates/bulk",
+          {
+            method: "DELETE",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              items: pending.candidates.map((candidate) => ({
+                serverId: candidate.serverId,
+                resultsDir: candidate.resultsDir
+              }))
+            })
+          }
+        );
+        const deletedIds = new Set(response.deleted.map((item) => `${item.serverId}:${item.resultsDir}`));
+        setUploadCandidates((current) => current.filter((candidate) => !deletedIds.has(candidate.id)));
+        if (response.failed.length > 0) {
+          const firstFailure = response.failed[0];
+          setJobError(
+            `Deleted ${response.deleted.length} of ${response.requested} retained result folders. ` +
+            `${response.failed.length} failed. ${firstFailure?.serverId ?? "Server"}: ${firstFailure?.message ?? "Unknown error"}`
+          );
+        }
       } else if (pending.action === "retry" && pending.operationId) {
         const response = await fetchPreflopJson<ServerOperationsResponse>(
           `/api/server-operations/${encodeURIComponent(pending.operationId)}/retry`,
@@ -2399,6 +2487,10 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
           onOperationNetworkSync={requestNetworkSyncOperations}
           onOperationNetworkCheck={requestNetworkCheckOperations}
           onOperationUpload={requestUploadOperation}
+          onOperationUploadCandidate={requestUploadCandidate}
+          onOperationUploadCandidates={requestUploadCandidates}
+          onOperationDeleteCandidate={requestDeleteUploadCandidate}
+          onOperationDeleteCandidates={requestDeleteUploadCandidates}
           onOperationStop={(operation) => void stopServerOperation(operation)}
           onOperationRetry={requestRetryServerOperation}
           onOperationClear={requestClearServerOperations}
@@ -2732,14 +2824,14 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
       {pendingServerOperationAction ? (
         <div className="modal-backdrop preflop-confirm-backdrop" role="presentation" onClick={() => setPendingServerOperationAction(null)}>
           <section
-            className="preflop-confirm-dialog"
+            className={`preflop-confirm-dialog ${pendingServerOperationAction.candidate || pendingServerOperationAction.candidates ? "server-operation-confirm-dialog" : ""}`}
             role="dialog"
             aria-modal="true"
             aria-labelledby="server-operation-confirm-title"
             onClick={(event) => event.stopPropagation()}
           >
             <div className="preflop-confirm-icon">
-              {pendingServerOperationAction.action === "clear" ? <Trash2 size={18} /> : (
+              {pendingServerOperationAction.action === "clear" || pendingServerOperationAction.action === "delete_upload_candidate" || pendingServerOperationAction.action === "delete_upload_candidates" ? <Trash2 size={18} /> : (
                 pendingServerOperationAction.action === "sync" ? <RefreshCw size={18} /> : (
                   pendingServerOperationAction.action === "network_sync" || pendingServerOperationAction.action === "network_check" ? <Wifi size={18} /> : (
                     pendingServerOperationAction.action === "retry" ? <RotateCcw size={18} /> : <Upload size={18} />
@@ -2752,17 +2844,43 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
                 {serverOperationConfirmTitle(pendingServerOperationAction.action)}
               </h3>
               <p>{serverOperationConfirmCopy(pendingServerOperationAction)}</p>
+              {pendingServerOperationAction.candidate ? (
+                <dl className="server-operation-confirm-details">
+                  <div><dt>Server</dt><dd>{pendingServerOperationAction.candidate.serverId}</dd></div>
+                  <div><dt>Dataset</dt><dd>{displayDatasetName(pendingServerOperationAction.candidate.datasetName)}</dd></div>
+                  <div><dt>Job</dt><dd>{pendingServerOperationAction.candidate.jobId}</dd></div>
+                  <div><dt>Files</dt><dd>{pendingServerOperationAction.candidate.parquetCount} parquet · {pendingServerOperationAction.candidate.jsonCount} json</dd></div>
+                  <div className="wide"><dt>Directory</dt><dd><code>{pendingServerOperationAction.candidate.resultsDir}</code></dd></div>
+                </dl>
+              ) : null}
+              {pendingServerOperationAction.candidates ? (
+                <dl className="server-operation-confirm-details">
+                  <div><dt>Servers</dt><dd>{pendingServerOperationAction.serverCount}</dd></div>
+                  <div><dt>Range folders</dt><dd>{pendingServerOperationAction.itemCount}</dd></div>
+                  <div><dt>Files</dt><dd>{pendingServerOperationAction.fileCount ?? 0}</dd></div>
+                  <div><dt>Datasets</dt><dd>{new Set(pendingServerOperationAction.candidates.map((candidate) => candidate.datasetName)).size}</dd></div>
+                  <div className="wide">
+                    <dt>Selected ranges</dt>
+                    <dd className="server-operation-confirm-range-list">
+                      {[...new Set(pendingServerOperationAction.candidates.map((candidate) => displayDatasetName(candidate.datasetName)))].slice(0, 8).join(", ")}
+                      {new Set(pendingServerOperationAction.candidates.map((candidate) => candidate.datasetName)).size > 8
+                        ? ` +${new Set(pendingServerOperationAction.candidates.map((candidate) => candidate.datasetName)).size - 8} more`
+                        : ""}
+                    </dd>
+                  </div>
+                </dl>
+              ) : null}
             </div>
             <div className="preflop-confirm-actions">
               <button className="icon-button compact" onClick={() => setPendingServerOperationAction(null)} disabled={jobBusy?.startsWith("operation-")}>
                 Cancel
               </button>
               <button
-                className={`icon-button compact ${pendingServerOperationAction.action === "clear" ? "danger" : "primary"}`}
+                className={`icon-button compact ${pendingServerOperationAction.action === "clear" || pendingServerOperationAction.action === "delete_upload_candidate" || pendingServerOperationAction.action === "delete_upload_candidates" ? "danger" : "primary"}`}
                 onClick={() => void confirmServerOperationAction()}
                 disabled={jobBusy?.startsWith("operation-")}
               >
-                {pendingServerOperationAction.action === "clear" ? <Trash2 size={15} /> : <Check size={15} />}
+                {pendingServerOperationAction.action === "clear" || pendingServerOperationAction.action === "delete_upload_candidate" || pendingServerOperationAction.action === "delete_upload_candidates" ? <Trash2 size={15} /> : <Check size={15} />}
                 Confirm
               </button>
             </div>
@@ -2961,6 +3079,10 @@ function SolverJobPanel({
   onOperationNetworkSync,
   onOperationNetworkCheck,
   onOperationUpload,
+  onOperationUploadCandidate,
+  onOperationUploadCandidates,
+  onOperationDeleteCandidate,
+  onOperationDeleteCandidates,
   onOperationStop,
   onOperationRetry,
   onOperationClear,
@@ -3042,6 +3164,10 @@ function SolverJobPanel({
   onOperationNetworkSync: () => void;
   onOperationNetworkCheck: () => void;
   onOperationUpload: () => void;
+  onOperationUploadCandidate: (candidate: ServerUploadCandidate) => void;
+  onOperationUploadCandidates: (candidates: ServerUploadCandidate[]) => void;
+  onOperationDeleteCandidate: (candidate: ServerUploadCandidate) => void;
+  onOperationDeleteCandidates: (candidates: ServerUploadCandidate[]) => void;
   onOperationStop: (operation: ServerOperation) => void;
   onOperationRetry: (operation: ServerOperation) => void;
   onOperationClear: () => void;
@@ -3459,6 +3585,10 @@ function SolverJobPanel({
           onNetworkSync={onOperationNetworkSync}
           onNetworkCheck={onOperationNetworkCheck}
           onUpload={onOperationUpload}
+          onUploadCandidate={onOperationUploadCandidate}
+          onUploadCandidates={onOperationUploadCandidates}
+          onDeleteCandidate={onOperationDeleteCandidate}
+          onDeleteCandidates={onOperationDeleteCandidates}
           onStop={onOperationStop}
           onRetry={onOperationRetry}
           onClear={onOperationClear}
@@ -4322,7 +4452,7 @@ function ParallelHistoryBoard({
   );
 }
 
-function ServerOperationsPanel({
+export function ServerOperationsPanel({
   servers,
   bestServerId,
   operations,
@@ -4335,6 +4465,10 @@ function ServerOperationsPanel({
   onNetworkSync,
   onNetworkCheck,
   onUpload,
+  onUploadCandidate,
+  onUploadCandidates,
+  onDeleteCandidate,
+  onDeleteCandidates,
   onStop,
   onRetry,
   onBestServerChange
@@ -4351,6 +4485,10 @@ function ServerOperationsPanel({
   onNetworkSync: () => void;
   onNetworkCheck: () => void;
   onUpload: () => void;
+  onUploadCandidate: (candidate: ServerUploadCandidate) => void;
+  onUploadCandidates: (candidates: ServerUploadCandidate[]) => void;
+  onDeleteCandidate: (candidate: ServerUploadCandidate) => void;
+  onDeleteCandidates: (candidates: ServerUploadCandidate[]) => void;
   onStop: (operation: ServerOperation) => void;
   onRetry: (operation: ServerOperation) => void;
   onClear: () => void;
@@ -4365,6 +4503,9 @@ function ServerOperationsPanel({
   const activeOperations = operations
     .filter((operation) => !serverOperationIsTerminal(operation))
     .sort(compareServerOperations);
+  const activeUploadServerIds = new Set(
+    activeOperations.filter((operation) => operation.type === "upload").map((operation) => operation.serverId)
+  );
   const operationsByServer = new Map<string, Map<ServerOperation["type"], ServerOperation>>();
   for (const operation of operations) {
     const byType = operationsByServer.get(operation.serverId) ?? new Map<ServerOperation["type"], ServerOperation>();
@@ -4374,6 +4515,76 @@ function ServerOperationsPanel({
   }
   const operationBusy = busy?.startsWith("operation-") ?? false;
   const [inventoryTab, setInventoryTab] = useState<ServerOperationInventoryTab>("network");
+  const [uploadQuery, setUploadQuery] = useState("");
+  const [uploadServerFilter, setUploadServerFilter] = useState("all");
+  const [uploadFormatFilter, setUploadFormatFilter] = useState<"all" | SolverUploadFormat>("all");
+  const [selectedUploadCandidateIds, setSelectedUploadCandidateIds] = useState<Set<string>>(() => new Set());
+  const [uploadDetailOperationId, setUploadDetailOperationId] = useState<string | null>(null);
+  const candidateServerIds = useMemo(
+    () => [...new Set(uploadCandidates.map((candidate) => candidate.serverId))].sort((left, right) =>
+      left.localeCompare(right, undefined, { numeric: true, sensitivity: "base" })
+    ),
+    [uploadCandidates]
+  );
+  const filteredUploadCandidates = useMemo(() => {
+    const normalizedQuery = uploadQuery.trim().toLowerCase();
+    return uploadCandidates.filter((candidate) => {
+      if (uploadServerFilter !== "all" && candidate.serverId !== uploadServerFilter) return false;
+      if (uploadFormatFilter === "parquet" && candidate.parquetCount === 0) return false;
+      if (uploadFormatFilter === "json" && candidate.jsonCount === 0) return false;
+      if (!normalizedQuery) return true;
+      return [candidate.datasetName, displayDatasetName(candidate.repoId)]
+        .some((value) => value.toLowerCase().includes(normalizedQuery));
+    });
+  }, [uploadCandidates, uploadFormatFilter, uploadQuery, uploadServerFilter]);
+  const filteredCandidateSummary = summarizeUploadCandidates(filteredUploadCandidates);
+  const selectedUploadCandidates = useMemo(
+    () => uploadCandidates.filter((candidate) => selectedUploadCandidateIds.has(candidate.id)),
+    [selectedUploadCandidateIds, uploadCandidates]
+  );
+  const selectedCandidateSummary = summarizeUploadCandidates(selectedUploadCandidates);
+  const selectedBlockedServerIds = useMemo(() => {
+    const serverById = new Map(servers.map((server) => [server.id, server]));
+    return [...new Set(selectedUploadCandidates.flatMap((candidate) => {
+      const server = serverById.get(candidate.serverId);
+      return !server?.enabled || !serverIsOnlineForJob(server) || activeUploadServerIds.has(candidate.serverId)
+        ? [candidate.serverId]
+        : [];
+    }))];
+  }, [activeUploadServerIds, selectedUploadCandidates, servers]);
+  const filteredCandidateIds = filteredUploadCandidates.map((candidate) => candidate.id);
+  const allFilteredCandidatesSelected = filteredCandidateIds.length > 0 &&
+    filteredCandidateIds.every((id) => selectedUploadCandidateIds.has(id));
+  const someFilteredCandidatesSelected = filteredCandidateIds.some((id) => selectedUploadCandidateIds.has(id));
+  const uploadDetailOperation = uploadDetailOperationId
+    ? operations.find((operation) => operation.id === uploadDetailOperationId) ?? null
+    : null;
+
+  useEffect(() => {
+    const currentIds = new Set(uploadCandidates.map((candidate) => candidate.id));
+    setSelectedUploadCandidateIds((selected) => {
+      if ([...selected].every((id) => currentIds.has(id))) return selected;
+      return new Set([...selected].filter((id) => currentIds.has(id)));
+    });
+  }, [uploadCandidates]);
+
+  const toggleUploadCandidate = (candidateId: string) => {
+    setSelectedUploadCandidateIds((selected) => {
+      const next = new Set(selected);
+      if (next.has(candidateId)) next.delete(candidateId);
+      else next.add(candidateId);
+      return next;
+    });
+  };
+
+  const toggleAllFilteredUploadCandidates = () => {
+    setSelectedUploadCandidateIds((selected) => {
+      const next = new Set(selected);
+      if (allFilteredCandidatesSelected) filteredCandidateIds.forEach((id) => next.delete(id));
+      else filteredCandidateIds.forEach((id) => next.add(id));
+      return next;
+    });
+  };
 
   return (
     <div className="server-ops-shell">
@@ -4466,14 +4677,109 @@ function ServerOperationsPanel({
             <span className="server-ops-muted">Both actions are manual. Scan + Upload performs a fresh scan after confirmation.</span>
           </div>
 
+          {uploadCandidates.length > 0 ? (
+            <div className="server-ops-upload-filterbar">
+              <label className="server-ops-upload-search">
+                <Search size={14} />
+                <input
+                  type="search"
+                  value={uploadQuery}
+                  onChange={(event) => setUploadQuery(event.target.value)}
+                  placeholder="Search range / dataset name"
+                  aria-label="Filter retained results"
+                />
+              </label>
+              <select value={uploadServerFilter} onChange={(event) => setUploadServerFilter(event.target.value)} aria-label="Filter by server">
+                <option value="all">All servers</option>
+                {candidateServerIds.map((serverId) => <option key={serverId} value={serverId}>{serverId}</option>)}
+              </select>
+              <select
+                value={uploadFormatFilter}
+                onChange={(event) => setUploadFormatFilter(event.target.value as "all" | SolverUploadFormat)}
+                aria-label="Filter by file format"
+              >
+                <option value="all">All formats</option>
+                <option value="parquet">Parquet</option>
+                <option value="json">JSON</option>
+              </select>
+              <span>{filteredCandidateSummary.folders} of {candidateSummary.folders} folders · {filteredCandidateSummary.files} files</span>
+            </div>
+          ) : null}
+
+          {uploadCandidates.length > 0 ? (
+            <div className="server-ops-upload-selectionbar">
+              <label className="server-ops-select-all">
+                <input
+                  type="checkbox"
+                  checked={allFilteredCandidatesSelected}
+                  ref={(element) => {
+                    if (element) element.indeterminate = someFilteredCandidatesSelected && !allFilteredCandidatesSelected;
+                  }}
+                  onChange={toggleAllFilteredUploadCandidates}
+                  disabled={filteredUploadCandidates.length === 0}
+                  aria-label="Select all filtered ranges"
+                />
+                <span>Select filtered</span>
+              </label>
+              <span className="server-ops-selection-summary">
+                {selectedCandidateSummary.folders} selected · {selectedCandidateSummary.files} files
+                {selectedBlockedServerIds.length > 0 ? ` · ${selectedBlockedServerIds.length} server unavailable or busy` : ""}
+              </span>
+              <div className="server-ops-selection-actions">
+                <button
+                  className="inventory-confirm-button"
+                  type="button"
+                  onClick={() => setSelectedUploadCandidateIds(new Set())}
+                  disabled={selectedUploadCandidates.length === 0 || operationBusy}
+                >
+                  <X size={13} />
+                  Clear
+                </button>
+                <button
+                  className="inventory-confirm-button"
+                  type="button"
+                  onClick={() => onUploadCandidates(selectedUploadCandidates)}
+                  disabled={selectedUploadCandidates.length === 0 || operationBusy || selectedBlockedServerIds.length > 0}
+                  title={selectedBlockedServerIds.length > 0 ? "Every selected server must be online and have no active upload" : "Upload all selected range folders"}
+                >
+                  <Upload size={13} />
+                  Upload Selected
+                </button>
+                <button
+                  className="inventory-confirm-button danger"
+                  type="button"
+                  onClick={() => onDeleteCandidates(selectedUploadCandidates)}
+                  disabled={selectedUploadCandidates.length === 0 || operationBusy}
+                >
+                  <Trash2 size={13} />
+                  Delete Selected
+                </button>
+              </div>
+            </div>
+          ) : null}
+
           <div className="server-ops-upload-list">
             {uploadCandidates.length === 0 ? (
               <p className="solver-job-empty">Scan all SSH-ready servers to preview retained result folders under results/&lt;dataset&gt;/&lt;job-id&gt;.</p>
             ) : null}
-            {uploadCandidates.map((candidate) => {
+            {uploadCandidates.length > 0 && filteredUploadCandidates.length === 0 ? (
+              <p className="solver-job-empty">No retained result folders match the current filters.</p>
+            ) : null}
+            {filteredUploadCandidates.map((candidate) => {
+              const uploadActive = activeUploadServerIds.has(candidate.serverId);
+              const server = servers.find((item) => item.id === candidate.serverId);
+              const serverUnavailable = !server?.enabled || !serverIsOnlineForJob(server);
+              const selected = selectedUploadCandidateIds.has(candidate.id);
               return (
-                <article key={candidate.id} className="server-ops-upload-row selected">
+                <article key={candidate.id} className={`server-ops-upload-row${selected ? " selected" : ""}`}>
                   <div className="server-ops-upload-check">
+                    <input
+                      className="server-ops-candidate-select"
+                      type="checkbox"
+                      checked={selected}
+                      onChange={() => toggleUploadCandidate(candidate.id)}
+                      aria-label={`Select ${candidate.datasetName} on server ${candidate.serverId}`}
+                    />
                     <strong>{candidate.serverId}</strong>
                     <span>
                       <strong>{displayDatasetName(candidate.datasetName)}</strong>
@@ -4486,7 +4792,31 @@ function ServerOperationsPanel({
                     <code>{candidate.resultsDir}</code>
                   </div>
                   <code className="server-ops-repo-code">{displayDatasetName(candidate.repoId)}</code>
-                  <span className="server-ops-format-pill">{candidate.fileFormat}</span>
+                  <span className="server-ops-format-pill">
+                    {candidate.parquetCount > 0 && candidate.jsonCount > 0 ? "mixed" : candidate.fileFormat}
+                  </span>
+                  <div className="server-ops-upload-actions">
+                    <button
+                      className="inventory-confirm-button"
+                      type="button"
+                      onClick={() => onUploadCandidate(candidate)}
+                      disabled={operationBusy || uploadActive || serverUnavailable}
+                      title={serverUnavailable ? `Server ${candidate.serverId} is unavailable` : uploadActive ? `An upload is already running on server ${candidate.serverId}` : `Upload ${candidate.datasetName}`}
+                    >
+                      <Upload size={13} />
+                      Upload
+                    </button>
+                    <button
+                      className="inventory-confirm-button danger"
+                      type="button"
+                      onClick={() => onDeleteCandidate(candidate)}
+                      disabled={operationBusy || uploadActive || serverUnavailable}
+                      title={serverUnavailable ? `Server ${candidate.serverId} is unavailable` : uploadActive ? `Stop the active upload on server ${candidate.serverId} before deleting results` : `Delete retained results for ${candidate.datasetName}`}
+                    >
+                      <Trash2 size={13} />
+                      Delete
+                    </button>
+                  </div>
                 </article>
               );
             })}
@@ -4549,6 +4879,7 @@ function ServerOperationsPanel({
                     busy={busy}
                     onStop={onStop}
                     onRetry={onRetry}
+                    onDetails={setUploadDetailOperationId}
                   />
                 ))}
               </tbody>
@@ -4556,6 +4887,12 @@ function ServerOperationsPanel({
           </div>
         ) : <p className="solver-job-empty">No enabled server is configured.</p>}
       </section>
+      {uploadDetailOperation ? (
+        <UploadOperationDetailDialog
+          operation={uploadDetailOperation}
+          onClose={() => setUploadDetailOperationId(null)}
+        />
+      ) : null}
     </div>
   );
 }
@@ -4566,7 +4903,8 @@ function ServerOperationRow({
   inventoryTab,
   busy,
   onStop,
-  onRetry
+  onRetry,
+  onDetails
 }: {
   server: ServerRow;
   operations: Map<ServerOperation["type"], ServerOperation>;
@@ -4574,6 +4912,7 @@ function ServerOperationRow({
   busy: string | null;
   onStop: (operation: ServerOperation) => void;
   onRetry: (operation: ServerOperation) => void;
+  onDetails: (operationId: string) => void;
 }) {
   const visibleTypes: ServerOperation["type"][] = inventoryTab === "sync"
     ? ["sync"]
@@ -4623,6 +4962,17 @@ function ServerOperationRow({
               </button>
             );
           })}
+          {inventoryTab === "upload" && primaryOperation ? (
+            <button
+              className="inventory-confirm-button"
+              type="button"
+              onClick={() => onDetails(primaryOperation.id)}
+              title="View upload details"
+            >
+              <ClipboardList size={14} />
+              Details
+            </button>
+          ) : null}
         </div>
       </td>
     </tr>
@@ -4637,6 +4987,89 @@ function ServerOperationState({ operation }: { operation: ServerOperation | null
     <div className="server-ops-result-cell" title={detail ?? undefined}>
       <span className={`server-ops-result-pill ${result.tone}`}>{result.label}</span>
       <small>{detail ?? formatServerOperationStatus(operation.status)}</small>
+    </div>
+  );
+}
+
+function UploadOperationDetailDialog({
+  operation,
+  onClose
+}: {
+  operation: ServerOperation;
+  onClose: () => void;
+}) {
+  const summary = operation.result?.summary ?? {};
+  const details = operation.result?.details ?? [];
+  const compact = serverOperationCompactResult(operation);
+  const plannedItems = operation.items.filter((item): item is ServerUploadItem => "resultsDir" in item);
+  const hasResult = operation.result != null;
+  const plannedFolderCount = new Set(plannedItems.map((item) => item.resultsDir)).size;
+  const plannedFileCount = plannedItems.reduce((total, item) => total + (item.fileCount ?? 0), 0);
+  return (
+    <div className="modal-backdrop preflop-confirm-backdrop" role="presentation" onClick={onClose}>
+      <section
+        className="server-upload-detail-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="server-upload-detail-title"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <header className="server-upload-detail-head">
+          <div>
+            <span>Server {operation.serverId}</span>
+            <h3 id="server-upload-detail-title">Upload Result</h3>
+          </div>
+          <div>
+            <span className={`server-ops-result-pill ${compact.tone}`}>{compact.label}</span>
+            <button className="icon-button compact" type="button" onClick={onClose} title="Close upload details">
+              <X size={15} />
+            </button>
+          </div>
+        </header>
+
+        <div className="server-upload-detail-metrics">
+          <div><span>Folders</span><strong>{hasResult ? numericResult(summary.folders) : plannedFolderCount}</strong></div>
+          <div><span>Files Found</span><strong>{hasResult ? numericResult(summary.files_found) : plannedFileCount}</strong></div>
+          <div><span>Uploaded</span><strong>{numericResult(summary.files_uploaded)}</strong></div>
+          <div><span>Deleted Local</span><strong>{numericResult(summary.files_deleted)}</strong></div>
+          <div><span>Remaining</span><strong>{numericResult(summary.files_remaining)}</strong></div>
+          <div><span>Duration</span><strong>{hasResult ? formatDuration(numericResult(summary.duration_seconds)) : "-"}</strong></div>
+        </div>
+
+        <div className="server-upload-detail-list">
+          {details.length === 0 ? (
+            plannedItems.length > 0 ? plannedItems.map((item) => (
+              <article key={`${item.repoId}:${item.resultsDir}:${item.fileFormat}`} className="server-upload-detail-item pending">
+                <div><strong>{displayDatasetName(item.datasetName)}</strong><span>Pending result</span></div>
+                <code>{item.resultsDir}</code>
+                <p>{item.fileCount ?? 0} {item.fileFormat} files planned</p>
+              </article>
+            )) : <p className="solver-job-empty">No retained result folders were found for this server.</p>
+          ) : details.map((detail, index) => {
+            const success = detail.success === true;
+            const datasetName = typeof detail.dataset_name === "string" ? detail.dataset_name : `Folder ${index + 1}`;
+            const resultDir = typeof detail.results_dir === "string" ? detail.results_dir : "";
+            const output = typeof detail.output_tail === "string" ? detail.output_tail.trim() : "";
+            return (
+              <article key={`${resultDir}:${index}`} className={`server-upload-detail-item ${success ? "success" : "failed"}`}>
+                <div>
+                  <strong>{displayDatasetName(datasetName)}</strong>
+                  <span>{success ? "Uploaded" : `Failed · exit ${numericResult(detail.exit_code)}`}</span>
+                </div>
+                <code>{resultDir}</code>
+                <dl>
+                  <div><dt>Found</dt><dd>{numericResult(detail.files_found)}</dd></div>
+                  <div><dt>Uploaded</dt><dd>{numericResult(detail.files_uploaded)}</dd></div>
+                  <div><dt>Deleted</dt><dd>{numericResult(detail.files_deleted)}</dd></div>
+                  <div><dt>Remaining</dt><dd>{numericResult(detail.files_remaining)}</dd></div>
+                  <div><dt>Duration</dt><dd>{formatDuration(numericResult(detail.duration_seconds))}</dd></div>
+                </dl>
+                {output ? <details><summary>Output</summary><pre>{output}</pre></details> : null}
+              </article>
+            );
+          })}
+        </div>
+      </section>
     </div>
   );
 }
@@ -5098,9 +5531,26 @@ function compareServerOperations(left: ServerOperation, right: ServerOperation):
 function summarizeUploadCandidates(candidates: ServerUploadCandidate[]): { folders: number; files: number; servers: number } {
   return {
     folders: candidates.length,
-    files: candidates.reduce((total, candidate) => total + candidate.fileCount, 0),
+    files: candidates.reduce((total, candidate) => total + candidate.parquetCount + candidate.jsonCount, 0),
     servers: new Set(candidates.map((candidate) => candidate.serverId)).size
   };
+}
+
+function uploadItemsFromCandidate(candidate: ServerUploadCandidate): ServerUploadItem[] {
+  return ([
+    ["parquet", candidate.parquetCount],
+    ["json", candidate.jsonCount]
+  ] as const)
+    .filter(([, fileCount]) => fileCount > 0)
+    .map(([fileFormat, fileCount]) => ({
+      serverId: candidate.serverId,
+      datasetName: candidate.datasetName,
+      repoId: candidate.repoId,
+      jobId: candidate.jobId,
+      resultsDir: candidate.resultsDir,
+      fileFormat,
+      fileCount
+    }));
 }
 
 function serverOperationCompactResult(operation: ServerOperation): { label: string; tone: "success" | "danger" | "warning" | "neutral" | "active" } {
@@ -5133,11 +5583,13 @@ function serverOperationCompactResult(operation: ServerOperation): { label: stri
 
   const success = numericResult(summary.upload_success);
   const failed = numericResult(summary.upload_failed);
+  const uploadedFiles = numericResult(summary.files_uploaded);
   if (operation.status === "failed" || failed > 0) {
     return { label: success > 0 ? `${success} ok / ${failed || 1} failed` : "failed", tone: "danger" };
   }
   if (numericResult(summary.no_files) > 0) return { label: "no files", tone: "neutral" };
-  if (success > 0) return { label: `${success} uploaded`, tone: "success" };
+  if (uploadedFiles > 0) return { label: `${uploadedFiles} files uploaded`, tone: "success" };
+  if (success > 0) return { label: `${success} folder${success === 1 ? "" : "s"} uploaded`, tone: "success" };
   if (operation.status === "canceled") return { label: "canceled", tone: "warning" };
   if (!serverOperationIsTerminal(operation)) return { label: "in progress", tone: "active" };
   return { label: formatServerOperationStatus(operation.status), tone: operation.status === "completed" ? "success" : "neutral" };
@@ -5148,6 +5600,19 @@ function serverOperationResultDetail(operation: ServerOperation): string | null 
     const detail = operation.result?.details[0];
     const output = typeof detail?.git_output === "string" ? detail.git_output.trim().split(/\r?\n/).filter(Boolean).at(-1) : "";
     return output ? `Git pull failed; existing Mihomo used: ${output}` : "Git pull failed; the existing Mihomo binary was used.";
+  }
+  if (operation.type === "upload" && operation.result) {
+    const uploaded = numericResult(operation.result.summary.files_uploaded);
+    const deleted = numericResult(operation.result.summary.files_deleted);
+    const remaining = numericResult(operation.result.summary.files_remaining);
+    if (operation.status !== "failed") {
+      return `${uploaded} uploaded · ${deleted} deleted locally · ${remaining} remaining`;
+    }
+    const failedDetail = operation.result.details.find((detail) => detail.success === false);
+    const output = typeof failedDetail?.output_tail === "string"
+      ? failedDetail.output_tail.trim().split(/\r?\n/).filter(Boolean).at(-1)
+      : "";
+    return output || `${uploaded} uploaded · ${remaining} remaining`;
   }
   if (operation.status !== "failed") return null;
   const detail = operation.result?.details[0];
@@ -5196,6 +5661,8 @@ function serverOperationConfirmTitle(action: PendingServerOperationAction["actio
   if (action === "network_sync") return "Start network sync tmux?";
   if (action === "network_check") return "Check server network?";
   if (action === "upload") return "Start upload tmux?";
+  if (action === "delete_upload_candidate") return "Delete retained result folder?";
+  if (action === "delete_upload_candidates") return "Delete selected range folders?";
   if (action === "retry") return "Retry server operation?";
   return "Clear operation history?";
 }
@@ -5211,8 +5678,21 @@ function serverOperationConfirmCopy(action: PendingServerOperationAction): strin
     return `This will test access to huggingface.co through the 127.0.0.1:7890 proxy on ${action.serverCount} online enabled server${action.serverCount === 1 ? "" : "s"}.`;
   }
   if (action.action === "upload") {
+    if (action.candidate) {
+      const fileCount = action.candidate.parquetCount + action.candidate.jsonCount;
+      return `This uploads ${fileCount} retained result file${fileCount === 1 ? "" : "s"} to ${displayDatasetName(action.candidate.repoId)}. Parquet and JSON are processed sequentially. After each successful upload, upload.py deletes that format's local files and the report records the actual cleanup count.`;
+    }
+    if (action.candidates) {
+      return `This starts upload tmux sessions for ${action.itemCount} selected range folder${action.itemCount === 1 ? "" : "s"} across ${action.serverCount} server${action.serverCount === 1 ? "" : "s"}. Each successful upload is followed by local file cleanup; failed uploads retain their files for retry.`;
+    }
     const preview = action.itemCount > 0 ? ` Last scan found ${action.itemCount} retained folder${action.itemCount === 1 ? "" : "s"}.` : "";
     return `This will scan ${action.serverCount} online enabled server${action.serverCount === 1 ? "" : "s"} and start upload tmux sessions for retained results.${preview}`;
+  }
+  if (action.action === "delete_upload_candidate") {
+    return `This permanently deletes the selected job result folder and all ${action.itemCount} retained result file${action.itemCount === 1 ? "" : "s"} inside it. This cannot be undone.`;
+  }
+  if (action.action === "delete_upload_candidates") {
+    return `This skips upload and permanently deletes ${action.itemCount} selected range folder${action.itemCount === 1 ? "" : "s"} containing ${action.fileCount ?? 0} retained result files. Successful deletions cannot be undone; failures remain listed.`;
   }
   if (action.action === "retry") {
     return `This will create a new ${serverOperationTypeLabel(action.operationType ?? "sync").toLowerCase()} operation on ${action.serverIds?.[0] ?? "the selected server"}. The previous record will remain in the report.`;
