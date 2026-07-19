@@ -5826,7 +5826,7 @@ td .port-value {
 }
 
 .parallel-queue-item.parallel-history-item {
-  grid-template-columns: 4px minmax(0, 1fr);
+  grid-template-columns: 4px minmax(0, 1fr) auto;
   min-height: 72px;
 }
 
@@ -5838,6 +5838,11 @@ td .port-value {
 .parallel-history-item .parallel-queue-copy {
   grid-column: 2;
   min-width: 0;
+}
+
+.parallel-history-item .parallel-queue-actions {
+  grid-column: 3;
+  grid-row: 1;
 }
 
 .parallel-queue-item.queued {
@@ -6706,6 +6711,119 @@ td .port-value {
   align-items: center;
 }
 
+.server-upload-progress {
+  display: grid;
+  gap: 9px;
+  border: 1px solid color-mix(in srgb, var(--accent) 25%, var(--border));
+  border-radius: var(--radius-sm);
+  padding: 11px;
+  background: color-mix(in srgb, var(--accent-subtle) 46%, var(--bg-base));
+}
+
+.server-upload-progress-head,
+.server-upload-progress-head > div {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.server-upload-progress-head > div {
+  display: grid;
+  justify-content: start;
+  gap: 2px;
+}
+
+.server-upload-progress-head strong,
+.server-upload-progress-head b {
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.server-upload-progress-head span {
+  color: var(--text-tertiary);
+  font-size: 10px;
+  font-weight: 750;
+}
+
+.server-upload-progress-head b {
+  color: var(--accent);
+  font-size: 16px;
+}
+
+.server-upload-progress-track,
+.server-ops-inline-progress {
+  width: 100%;
+  height: 6px;
+  display: block;
+  overflow: hidden;
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--border-strong) 45%, transparent);
+}
+
+.server-upload-progress-track > span,
+.server-upload-progress-track > i,
+.server-ops-inline-progress > i {
+  height: 100%;
+  display: block;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 220ms ease;
+}
+
+.server-upload-progress-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.server-upload-progress-metrics > div {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+  border-left: 1px solid var(--border);
+  padding-left: 8px;
+}
+
+.server-upload-progress-metrics > div:first-child {
+  border-left: 0;
+  padding-left: 0;
+}
+
+.server-upload-progress-metrics span,
+.server-upload-progress > p span {
+  color: var(--text-tertiary);
+  font-size: 9px;
+  font-weight: 850;
+  text-transform: uppercase;
+}
+
+.server-upload-progress-metrics strong {
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.server-upload-progress > p {
+  min-width: 0;
+  display: flex;
+  gap: 8px;
+  margin: 0;
+}
+
+.server-upload-progress > p strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .server-ops-upload-list {
   display: grid;
   gap: 9px;
@@ -6972,6 +7090,17 @@ td .port-value {
   white-space: nowrap;
 }
 
+.server-ops-result-detail {
+  min-width: 100px;
+  display: grid;
+  gap: 4px;
+}
+
+.server-ops-inline-progress {
+  max-width: 180px;
+  height: 3px;
+}
+
 .server-ops-never {
   color: var(--text-tertiary);
   font-size: 11px;
@@ -7191,7 +7320,7 @@ td .port-value {
   width: min(900px, 100%);
   max-height: min(760px, 88vh);
   display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr);
+  grid-template-rows: auto auto auto minmax(0, 1fr);
   gap: 14px;
   overflow: hidden;
   border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--border));
@@ -7199,6 +7328,26 @@ td .port-value {
   padding: 18px;
   background: var(--bg-surface);
   box-shadow: var(--shadow-lg);
+}
+
+.server-upload-detail-progress {
+  display: grid;
+  gap: 6px;
+}
+
+.server-upload-detail-progress > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--text-tertiary);
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.server-upload-detail-progress > div strong {
+  color: var(--accent);
+  font-size: 12px;
 }
 
 .server-upload-detail-head,
@@ -7292,6 +7441,11 @@ td .port-value {
 
 .server-upload-detail-item.pending {
   border-left-color: var(--accent);
+}
+
+.server-upload-detail-item.uploading {
+  border-left-color: var(--accent);
+  background: color-mix(in srgb, var(--accent-subtle) 54%, var(--bg-base));
 }
 
 .server-upload-detail-item > div:first-child {
@@ -7716,6 +7870,7 @@ td .port-value {
   }
 
   .server-upload-detail-metrics,
+  .server-upload-progress-metrics,
   .server-upload-detail-item dl,
   .server-operation-confirm-details {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -7799,7 +7954,7 @@ td .port-value {
   }
 
   .parallel-queue-item.parallel-history-item {
-    grid-template-columns: 4px minmax(0, 1fr);
+    grid-template-columns: 4px minmax(0, 1fr) auto;
   }
 
   .parallel-queue-lane > .parallel-queue-item {

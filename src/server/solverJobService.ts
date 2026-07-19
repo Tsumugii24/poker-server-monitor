@@ -124,6 +124,8 @@ export class SolverJobService {
   private readonly getHfProxySettings: () => Pick<AlertSettings, "hfProxyEnabled" | "solverHfProxyEnabled">;
   private readonly getScenarioLibrary: () => SolverScenarioLibraryItem[];
   private queueReconciliationTask: Promise<void> | null = null;
+  private serverOperationReconciliationTask: Promise<void> | null = null;
+  private readonly serverOperationStartTasks = new Map<string, Promise<void>>();
 
   constructor(private readonly options: SolverJobServiceOptions) {
     this.executor = options.executor ?? new Ssh2Executor();
@@ -250,11 +252,11 @@ export class SolverJobService {
     };
   }
 
-  clearFailurePool(): { deletedCount: number } {
+  clearFailurePool(rangePath: string, datasetName: string): { deletedCount: number } {
     this.reconcileCompletedJobs();
     this.reconcileParallelRuns();
     return {
-      deletedCount: this.options.db.clearParallelFailurePoolEntries()
+      deletedCount: this.options.db.clearParallelFailurePoolEntries(rangePath, datasetName)
     };
   }
 
@@ -306,18 +308,31 @@ export class SolverJobService {
     return this.getParallelRun(id);
   }
 
-  deleteQueuedParallelRun(id: string): { deletedRunId: string } {
+  deleteParallelRun(id: string): {
+    deletedRunId: string;
+    deletedFailurePoolEntries: number;
+  } {
     this.reconcileCompletedJobs();
     this.reconcileParallelRuns();
     const run = this.getParallelRun(id);
-    if (parallelRunLocked(run) || run.status !== "queued") {
-      throw new Error("Only queued parallel runs with no active solver task can be deleted.");
+    if (parallelRunLocked(run)) {
+      throw new Error("Parallel runs with an active solver task cannot be deleted.");
     }
-    if (run.sourceType === "failure_pool") {
-      this.restoreFailurePoolEntries(run.rangePath, run.datasetName, run.totalIndices);
+    if (run.status === "queued") {
+      if (run.sourceType === "failure_pool") {
+        this.restoreFailurePoolEntries(run.rangePath, run.datasetName, run.totalIndices);
+      }
+      this.options.db.deleteParallelSolverRuns([id]);
+      return { deletedRunId: id, deletedFailurePoolEntries: 0 };
     }
-    this.options.db.deleteParallelSolverRuns([id]);
-    return { deletedRunId: id };
+    if (!TERMINAL_PARALLEL_RUN_STATUSES.has(run.status)) {
+      throw new Error("Only queued or finished parallel runs can be deleted.");
+    }
+    const deleted = this.options.db.deleteParallelSolverRuns([id], { deleteLinkedFailurePool: true });
+    return {
+      deletedRunId: id,
+      deletedFailurePoolEntries: deleted.deletedFailurePoolEntries
+    };
   }
 
   async previewFailurePool(input: ParallelFailurePoolPreviewRequest): Promise<ParallelSolverJobPreview> {
@@ -590,6 +605,13 @@ export class SolverJobService {
     };
   }
 
+  async refreshServerOperations(): Promise<ServerOperationsResponse> {
+    void this.reconcileServerOperations().catch((error: unknown) => {
+      console.error("Server operation reconciliation failed", error);
+    });
+    return this.listServerOperations();
+  }
+
   async scanUploadCandidates(serverId: string): Promise<ServerUploadCandidatesResponse> {
     const server = this.requireServer(serverId);
     this.ensureServerOnline(server);
@@ -798,11 +820,11 @@ export class SolverJobService {
     }
 
     const itemsByServer = groupUploadItemsByServer(items, targetServers);
-    await forEachWithConcurrency(targetServers, 6, async (server) => {
-      if (scanFailedServerIds.has(server.id)) return;
+    for (const server of targetServers) {
+      if (scanFailedServerIds.has(server.id)) continue;
       const operationItems = itemsByServer.get(server.id) ?? [];
       const operation = this.prepareServerOperation(server, "upload", (id) => this.createUploadOperation(server, operationItems, null, id));
-      if (!operation) return;
+      if (!operation) continue;
       this.options.db.upsertServerOperation(operation);
       this.recordOperationEvent(
         operation.id,
@@ -812,8 +834,8 @@ export class SolverJobService {
           : `Created upload operation for ${server.id}; no retained result folders were found.`,
         operation.command
       );
-      await this.startServerOperation(operation, server);
-    });
+      void this.launchServerOperation(operation, server);
+    }
     return this.listServerOperations();
   }
 
@@ -1324,11 +1346,12 @@ export class SolverJobService {
     const runs = this.options.db.getParallelSolverRuns();
     for (const run of runs) {
       for (const slice of run.slices) {
+        if (slice.status === "completed" || slice.status === "failed" || slice.status === "canceled") continue;
         if (!slice.job) continue;
         const next = sliceStateFromJob(slice, slice.job);
         const becameRunning = slice.status !== "running" && next.status === "running";
-        const becameCompleted = slice.status !== "completed" && next.status === "completed";
-        const becameFailed = slice.status !== "failed" && next.status === "failed";
+        const becameCompleted = next.status === "completed";
+        const becameFailed = next.status === "failed";
         if (
           next.status !== slice.status ||
           next.completedCount !== slice.completedCount ||
@@ -1511,12 +1534,14 @@ export class SolverJobService {
         if (!job.pipeline || !pipelineIsNewEnoughForJob(job.pipeline, job)) continue;
         if (isPipelineActive(job.pipeline) && pipelineBelongsToJob(job.pipeline, job)) continue;
         if (!pipelineCanSettleActiveJob(job.pipeline, job)) continue;
-        const nextStatus = completedStatusFromPipeline(job.pipeline);
+        const belongsToJob = pipelineBelongsToJob(job.pipeline, job);
+        const nextStatus = belongsToJob ? completedStatusFromPipeline(job.pipeline) : "failed";
         const lastError = nextStatus === "failed" ? pipelineReconciliationError(job.pipeline, job) : null;
         this.options.db.updateSolverJob(job.id, {
           status: nextStatus,
           finishedAt: job.pipeline?.finishedAt ?? new Date().toISOString(),
-          lastError
+          lastError,
+          pipeline: belongsToJob ? job.pipeline : null
         });
         this.recordEvent(job.id, nextStatus, `Server task reconciled job as ${nextStatus}.`, null);
       }
@@ -1761,7 +1786,39 @@ export class SolverJobService {
     }
   }
 
+  private launchServerOperation(
+    operation: ServerOperation,
+    server: ServerRow,
+    executionCommand = operation.command
+  ): Promise<void> {
+    const current = this.serverOperationStartTasks.get(operation.id);
+    if (current) return current;
+    const task = this.startServerOperation(operation, server, executionCommand)
+      .finally(() => {
+        if (this.serverOperationStartTasks.get(operation.id) === task) {
+          this.serverOperationStartTasks.delete(operation.id);
+        }
+      });
+    this.serverOperationStartTasks.set(operation.id, task);
+    return task;
+  }
+
   private async reconcileServerOperations(): Promise<void> {
+    if (this.serverOperationReconciliationTask) {
+      return this.serverOperationReconciliationTask;
+    }
+    const task = this.runServerOperationReconciliation();
+    this.serverOperationReconciliationTask = task;
+    try {
+      await task;
+    } finally {
+      if (this.serverOperationReconciliationTask === task) {
+        this.serverOperationReconciliationTask = null;
+      }
+    }
+  }
+
+  private async runServerOperationReconciliation(): Promise<void> {
     const activeOperations = this.options.db.getServerOperations()
       .filter((operation) => ACTIVE_SERVER_OPERATION_STATUSES.has(operation.status));
     if (activeOperations.length === 0 || !this.options.credentials) return;
@@ -1770,6 +1827,23 @@ export class SolverJobService {
     await forEachWithConcurrency(activeOperations, 6, async (operation) => {
       const server = servers.get(operation.serverId);
       if (!server || server.latest?.connectionStatus !== "online") return;
+      if (operation.status === "queued") {
+        try {
+          const executionCommand = operation.type === "upload"
+            ? this.buildUploadOperationExecutionCommand(operation, server)
+            : operation.command;
+          await this.launchServerOperation(operation, server, executionCommand);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          this.options.db.updateServerOperation(operation.id, {
+            status: "failed",
+            finishedAt: new Date().toISOString(),
+            lastError: message
+          });
+          this.recordOperationEvent(operation.id, "failed", message, null);
+        }
+        return;
+      }
       try {
         const output = await this.executor.run(
           server,
@@ -1800,6 +1874,14 @@ export class SolverJobService {
           if (!probe.statusFileExists && Number.isFinite(operationAgeMs) && operationAgeMs < 60_000) {
             return;
           }
+          if (operation.type === "upload" && operation.status === "deploying" && !probe.statusFileExists) {
+            await this.launchServerOperation(
+              operation,
+              server,
+              this.buildUploadOperationExecutionCommand(operation, server)
+            );
+            return;
+          }
           const message = probe.statusFileExists
             ? `Remote tmux session ${operation.tmuxSession} is no longer running; the server may have restarted.`
             : `Remote operation state and tmux session ${operation.tmuxSession} are missing; the server may have restarted.`;
@@ -1811,17 +1893,41 @@ export class SolverJobService {
           this.recordOperationEvent(operation.id, "orphaned", message, null);
           return;
         }
-        if (status?.status === "running" && operation.status !== "running") {
-          this.options.db.updateServerOperation(operation.id, {
-            status: "running",
-            startedAt: status.startedAt ?? operation.startedAt,
-            lastError: null,
-            updatedAt: status.updatedAt ?? new Date().toISOString()
-          });
+        if (status?.status === "running") {
+          const nextResult = status.result ?? operation.result;
+          const shouldUpdate = operation.status !== "running" ||
+            operation.startedAt !== (status.startedAt ?? operation.startedAt) ||
+            serverOperationProgressFingerprint(nextResult) !== serverOperationProgressFingerprint(operation.result);
+          if (shouldUpdate) {
+            this.options.db.updateServerOperation(operation.id, {
+              status: "running",
+              startedAt: status.startedAt ?? operation.startedAt,
+              lastError: null,
+              result: nextResult,
+              updatedAt: status.updatedAt ?? new Date().toISOString()
+            });
+          }
         }
       } catch {
         // A transient SSH failure must not erase an active operation.
       }
+    });
+  }
+
+  private buildUploadOperationExecutionCommand(operation: ServerOperation, server: ServerRow): string {
+    const items = normalizeUploadItems(operation.items.filter(isServerUploadOperationItem));
+    return buildTrackedServerOperationCommand({
+      id: operation.id,
+      type: operation.type,
+      statusFilePath: operation.statusFilePath,
+      logFilePath: operation.logFilePath,
+      bodyCommand: buildServerUploadCommand({
+        solverRoot: effectiveSolverRoot(server),
+        items,
+        hfToken: this.hfToken,
+        proxyUrl: this.effectiveRemoteOperationProxyUrl(),
+        redactSecrets: false
+      })
     });
   }
 
@@ -2904,28 +3010,76 @@ with open(plan_path, "r", encoding="utf-8") as handle:
 
 summary = {
     "folders": len(set(item.get("resultsDir") or "" for item in items)),
+    "folders_completed": 0,
+    "folders_remaining": len(set(item.get("resultsDir") or "" for item in items)),
     "upload_attempts": len(items),
+    "attempts_completed": 0,
+    "attempts_remaining": len(items),
     "upload_success": 0,
     "upload_failed": 0,
-    "files_requested": 0,
+    "files_requested": sum(int(item.get("fileCount") or 0) for item in items),
     "files_found": 0,
     "files_uploaded": 0,
     "files_deleted": 0,
     "files_remaining": 0,
+    "current_dataset": "",
+    "current_results_dir": "",
+    "current_file_format": "",
+    "current_item_index": 0,
     "no_files": 1 if not items else 0,
     "duration_seconds": 0,
 }
 details = []
 started = time.time()
+states = []
 
 for item in items:
-    file_count = int(item.get("fileCount") or 0)
-    summary["files_requested"] += file_count
     file_format = item.get("fileFormat") or "parquet"
     pattern = "*.parquet" if file_format == "parquet" else "*.json"
     result_dir = Path(item["resultsDir"]).expanduser()
     files_before = len(list(result_dir.glob(pattern))) if result_dir.is_dir() else 0
+    states.append({
+        "processed": False,
+        "success": False,
+        "remaining": files_before,
+        "results_dir": item["resultsDir"],
+    })
     summary["files_found"] += files_before
+summary["files_remaining"] = summary["files_found"]
+
+def write_progress():
+    summary["attempts_completed"] = sum(1 for state in states if state["processed"])
+    summary["attempts_remaining"] = max(0, summary["upload_attempts"] - summary["attempts_completed"])
+    folder_paths = {state["results_dir"] for state in states}
+    completed_folders = sum(
+        1
+        for folder in folder_paths
+        if all(state["processed"] for state in states if state["results_dir"] == folder)
+    )
+    summary["folders_completed"] = completed_folders
+    summary["folders_remaining"] = max(0, summary["folders"] - completed_folders)
+    summary["files_remaining"] = sum(int(state["remaining"]) for state in states)
+    summary["duration_seconds"] = max(0, round(time.time() - started))
+    target = Path(result_path).expanduser()
+    temporary = target.with_name(target.name + ".tmp")
+    with open(temporary, "w", encoding="utf-8") as handle:
+        json.dump({"summary": summary, "details": details}, handle, ensure_ascii=True)
+    temporary.replace(target)
+
+write_progress()
+
+for item_index, item in enumerate(items):
+    file_count = int(item.get("fileCount") or 0)
+    file_format = item.get("fileFormat") or "parquet"
+    pattern = "*.parquet" if file_format == "parquet" else "*.json"
+    result_dir = Path(item["resultsDir"]).expanduser()
+    files_before = len(list(result_dir.glob(pattern))) if result_dir.is_dir() else 0
+    summary["current_dataset"] = item.get("datasetName") or item.get("repoId") or ""
+    summary["current_results_dir"] = item["resultsDir"]
+    summary["current_file_format"] = file_format
+    summary["current_item_index"] = item_index + 1
+    states[item_index]["remaining"] = files_before
+    write_progress()
     command = [
         "python",
         "upload.py",
@@ -2954,6 +3108,9 @@ for item in items:
         summary["upload_success"] += 1
     else:
         summary["upload_failed"] += 1
+    states[item_index]["processed"] = True
+    states[item_index]["success"] = success
+    states[item_index]["remaining"] = files_after
     details.append({
         "dataset_name": item.get("datasetName") or "",
         "repo_id": item["repoId"],
@@ -2970,10 +3127,13 @@ for item in items:
         "duration_seconds": duration,
         "output_tail": output[-1600:],
     })
+    summary["current_dataset"] = ""
+    summary["current_results_dir"] = ""
+    summary["current_file_format"] = ""
+    summary["current_item_index"] = 0
+    write_progress()
 
-summary["duration_seconds"] = max(0, round(time.time() - started))
-with open(result_path, "w", encoding="utf-8") as handle:
-    json.dump({"summary": summary, "details": details}, handle, ensure_ascii=True)
+write_progress()
 sys.exit(0 if summary["upload_failed"] == 0 else 1)
 PY`;
 }
@@ -3061,17 +3221,141 @@ export function buildReadServerOperationStatusCommand(statusFilePath: string, tm
   return String.raw`set +e
 STATUS_FILE=${shellQuoteRemotePath(statusFilePath)}
 SESSION=${shellQuote(tmuxSession)}
+RESULT_FILE="${"$"}{STATUS_FILE}.result"
+PLAN_FILE="${"$"}{STATUS_FILE}.upload-plan.json"
 if [ -f "$STATUS_FILE" ]; then
   echo "OP_STATUS_FILE=1"
 else
   echo "OP_STATUS_FILE=0"
 fi
 if [ -n "$SESSION" ] && tmux has-session -t "$SESSION" 2>/dev/null; then
+  TMUX_ALIVE=1
   echo "OP_TMUX_ALIVE=1"
 else
+  TMUX_ALIVE=0
   echo "OP_TMUX_ALIVE=0"
 fi
-if [ -f "$STATUS_FILE" ]; then cat "$STATUS_FILE"; fi`;
+if [ -f "$STATUS_FILE" ]; then
+python - "$STATUS_FILE" "$RESULT_FILE" "$PLAN_FILE" "$TMUX_ALIVE" <<'PY'
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+status_path, result_path, plan_path, tmux_alive = sys.argv[1:5]
+
+def read_json(path):
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except (OSError, ValueError, TypeError):
+        return None
+
+status = read_json(status_path)
+if not isinstance(status, dict):
+    raise SystemExit(1)
+
+result = read_json(result_path)
+if isinstance(result, dict):
+    status["result"] = result
+elif status.get("type") == "upload" and status.get("status") == "running":
+    plan = read_json(plan_path)
+    if isinstance(plan, list):
+        records = []
+        for item in plan:
+            if not isinstance(item, dict):
+                continue
+            file_format = item.get("fileFormat") or "parquet"
+            pattern = "*.parquet" if file_format == "parquet" else "*.json"
+            result_dir = Path(str(item.get("resultsDir") or "")).expanduser()
+            remaining = len(list(result_dir.glob(pattern))) if result_dir.is_dir() else 0
+            requested = int(item.get("fileCount") or 0)
+            records.append((item, file_format, requested, remaining))
+        folder_paths = {str(item.get("resultsDir") or "") for item, _, _, _ in records}
+        completed_paths = {
+            folder
+            for folder in folder_paths
+            if all(remaining == 0 for item, _, _, remaining in records if str(item.get("resultsDir") or "") == folder)
+        }
+        files_requested = sum(requested for _, _, requested, _ in records)
+        files_remaining = sum(remaining for _, _, _, remaining in records)
+        attempts_completed = sum(1 for _, _, _, remaining in records if remaining == 0)
+        current_record = None
+        log_path = status.get("log_file")
+        if tmux_alive == "1" and isinstance(log_path, str):
+            try:
+                with open(Path(log_path).expanduser(), "rb") as handle:
+                    handle.seek(0, 2)
+                    size = handle.tell()
+                    handle.seek(max(0, size - 131072))
+                    tail_lines = handle.read().decode("utf-8", errors="replace").splitlines()
+                upload_line = next((line for line in reversed(tail_lines) if line.startswith("[Upload] ") and " <- " in line), "")
+                current_path = upload_line.rsplit(" <- ", 1)[1].strip() if upload_line else ""
+                current_record = next(
+                    (record for record in records if str(record[0].get("resultsDir") or "") == current_path and record[3] > 0),
+                    None,
+                )
+            except OSError:
+                pass
+        started_at = status.get("started_at")
+        duration = 0
+        if isinstance(started_at, str):
+            try:
+                duration = max(0, round((datetime.now(timezone.utc) - datetime.fromisoformat(started_at.replace("Z", "+00:00"))).total_seconds()))
+            except ValueError:
+                pass
+        details = []
+        for item, file_format, requested, remaining in records:
+            if remaining != 0:
+                continue
+            details.append({
+                "dataset_name": item.get("datasetName") or "",
+                "repo_id": item.get("repoId") or "",
+                "job_id": item.get("jobId") or "",
+                "results_dir": item.get("resultsDir") or "",
+                "file_format": file_format,
+                "file_count": requested,
+                "files_found": requested,
+                "files_uploaded": requested,
+                "files_deleted": requested,
+                "files_remaining": 0,
+                "exit_code": 0,
+                "success": True,
+                "inferred": True,
+                "duration_seconds": 0,
+            })
+        current_item = current_record[0] if current_record else {}
+        status["result"] = {
+            "summary": {
+                "folders": len(folder_paths),
+                "folders_completed": len(completed_paths),
+                "folders_remaining": max(0, len(folder_paths) - len(completed_paths)),
+                "upload_attempts": len(records),
+                "attempts_completed": attempts_completed,
+                "attempts_remaining": max(0, len(records) - attempts_completed),
+                "upload_success": attempts_completed,
+                "upload_failed": 0,
+                "files_requested": files_requested,
+                "files_found": files_requested,
+                "files_uploaded": max(0, files_requested - files_remaining),
+                "files_deleted": max(0, files_requested - files_remaining),
+                "files_remaining": files_remaining,
+                "current_dataset": current_item.get("datasetName") or current_item.get("repoId") or "",
+                "current_results_dir": current_item.get("resultsDir") or "",
+                "current_file_format": current_item.get("fileFormat") or "",
+                "current_item_index": (records.index(current_record) + 1) if current_record else 0,
+                "no_files": 1 if not records else 0,
+                "duration_seconds": duration,
+                "progress_inferred": True,
+            },
+            "details": details,
+        }
+        status["updated_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+print(json.dumps(status, ensure_ascii=True, separators=(",", ":")))
+PY
+if [ "$?" -ne 0 ]; then cat "$STATUS_FILE"; fi
+fi`;
 }
 
 export function buildStopServerOperationCommand(tmuxSession: string): string {
@@ -3608,6 +3892,17 @@ function normalizeOperationResultRecord(value: Record<string, unknown>): Record<
   return result;
 }
 
+function serverOperationProgressFingerprint(result: ServerOperationResult | null): string {
+  if (!result) return "";
+  const summary = Object.fromEntries(
+    Object.entries(result.summary).filter(([key]) => key !== "duration_seconds")
+  );
+  const details = result.details.map((detail) => Object.fromEntries(
+    Object.entries(detail).filter(([key]) => key !== "duration_seconds" && key !== "output_tail")
+  ));
+  return JSON.stringify({ summary, details });
+}
+
 function serverOperationPaths(id: string): { statusFilePath: string; logFilePath: string } {
   return {
     statusFilePath: `~/run/server_operation_${id}.json`,
@@ -3864,7 +4159,7 @@ function sliceStateFromJob(
   if (job.status === "completed") {
     return {
       status: "completed",
-      completedCount: completedCount || slice.assignedIndices.length,
+      completedCount: slice.assignedIndices.length,
       failedCount,
       startedAt: job.startedAt,
       finishedAt: job.finishedAt,

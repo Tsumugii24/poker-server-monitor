@@ -209,7 +209,9 @@ The current implementation also includes solver job orchestration for the shared
 
 - Single solver jobs submit one reviewed range to one selected server.
 - Parallel solver jobs split remaining board indices across available servers and keep a queue for follow-up chunks.
-- The parallel failure pool can be cleared from the UI after confirmation. This removes failure-pool records only; it does not stop active solver jobs or delete parallel runs.
+- The Failure Pool is scoped to the currently inspected Range and Dataset. Its count includes unresolved pending, queued, running, and failed entries; solved entries are omitted. Confirmed Clear removes only pending/failed entries in that exact scope and never removes queued/running retries.
+- Terminal Parallel History records have a separate confirmed Delete action. It permanently removes the selected run, its report, slices, solver jobs, events, and failure-pool entries linked to that run. Active or locked runs cannot be deleted.
+- A solver job stores the pipeline snapshot that settled it. Terminal slices are immutable during later reconciliation, so a newer task on the same server cannot overwrite historical Done, Failed, or Success Rate statistics.
 - `Best Server` is treated as an operations-level setting. It is configured from the `Server Operations` tab and used by failure-pool retries that require the strongest fallback server.
 - `Server Operations` is a manual maintenance center for work that runs across every SSH-ready server, not a single-server uploader.
 - `Sync Code` starts a sync tmux session on each online enabled server. The remote command exports the solver proxy variables, runs `git stash`, then `git pull --rebase`.
@@ -222,7 +224,9 @@ The current implementation also includes solver job orchestration for the shared
 - Multi-server code sync, network sync, result scans, and upload tmux startup use bounded concurrency instead of waiting for every server serially.
 - `Scan All Results` inspects `~/solver/results/<dataset>/<job-id>` on every online enabled server and lists retained parquet/json result folders in a filterable, bounded-height inventory. Operators can select all folders matching the current Range/Dataset filter, then upload the selection or delete it without uploading. Each row retains its own targeted Upload/Delete actions.
 - `Scan All Results` and `Scan + Upload All` are manually initiated. The latter performs a fresh scan server-side after confirmation before starting upload tmux sessions. Each server serially uploads every retained format in every assigned result folder through `python upload.py --results-dir <dir> --repo-id <repo> --file-format <format>`.
-- Upload reports persist per-folder and per-format counts for files found, uploaded, deleted locally, and remaining. Successful `upload.py` calls delete the uploaded local format; the report keeps upload and cleanup outcomes distinct.
+- Upload tmux startup is registered before SSH deployment and returns without waiting for every server. Queued starts remain in SQLite and are retried by reconciliation after a monitor restart; once a remote tmux is running, restarting only Server Monitor does not interrupt it. Restarting the remote solver server or losing that tmux interrupts the operation and leaves retained files available for Retry.
+- Upload reports persist incremental per-folder and per-format counts for files found, uploaded, deleted locally, and remaining. Successful `upload.py` calls delete the uploaded local format; the report keeps upload and cleanup outcomes distinct. Operations started by an older build are still observable by comparing their persisted upload plan with files remaining on disk.
+- While the Server Operations tab is open and any operation is active, the client requests lightweight operation-only reconciliation every 10 seconds. The upload panel shows aggregate folder/server progress, and each server detail separates completed, current, pending, and failed folders without blocking unrelated controls.
 - Upload uses `HF_TOKEN` only on the backend/remote command path. Frontend command previews redact it as `export HF_TOKEN=$HF_TOKEN`.
 - Operation records persist command, tmux session, log path, status, and structured result JSON. The UI summarizes sync latest/synced/failed counts and upload success/failed/no-file/file counts.
 - Reading the operation report is database-only and never blocks page rendering on SSH. Background/manual reconciliation probes both the remote status file and tmux session; stale active records are marked failed after a server restart, and overlapping reconciliation ticks share one in-flight run.
@@ -243,7 +247,8 @@ Representative backend endpoints:
 - `GET /api/settings/wechat/accounts`: list WeChat ClawBot recipient accounts and delivery state.
 - `POST /api/settings/wechat/accounts`: create a recipient and start QR login.
 - `POST /api/settings/wechat/accounts/:accountId/verify`: verify a target user from detected inbound messages.
-- `DELETE /api/parallel-jobs/failure-pool`: clear all recorded failure-pool entries without stopping parallel runs.
+- `DELETE /api/parallel-jobs/failure-pool?rangePath=<path>&datasetName=<dataset>`: clear pending/failed failure-pool entries for one exact Range/Dataset without stopping parallel runs.
+- `DELETE /api/parallel-jobs/:id`: delete an unlocked queued run or permanently delete one terminal history run and its linked jobs, slices, events, and failure-pool entries.
 - `GET /api/server-operations`: list server operation records and events.
 - `GET /api/server-operations/upload-candidates`: scan all SSH-ready servers for retained result folders.
 - `DELETE /api/server-operations/upload-candidates`: validate and delete one remote `results/<dataset>/<job-id>` directory.
@@ -251,6 +256,7 @@ Representative backend endpoints:
 - `POST /api/server-operations/sync`: start sync tmux sessions for online enabled servers.
 - `POST /api/server-operations/network-sync`: update Mihomo and restart network tmux sessions for online enabled servers.
 - `POST /api/server-operations/upload`: scan and start upload tmux sessions for online enabled servers.
+- `GET /api/server-operations?reconcile=1`: return persisted operation inventory immediately and trigger a deduplicated background SSH status reconciliation.
 - `POST /api/server-operations/:id/stop`: stop one operation tmux session.
 
 The first version did not need API routes for editing server inventory. The current app includes a visual server inventory manager that syncs supported editable fields back to `config/servers.json`. Credentials stay out of the inventory and out of the frontend.

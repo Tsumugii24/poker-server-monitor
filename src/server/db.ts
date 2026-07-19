@@ -307,6 +307,16 @@ export class MonitorDatabase {
     );
   }
 
+  getPipelineSnapshot(id: string): PipelineStatusSnapshot | null {
+    return (
+      this.query<PipelineStatusSnapshot>(
+        "SELECT * FROM pipeline_status_snapshots WHERE id = ? LIMIT 1",
+        [id],
+        mapPipelineSnapshot
+      )[0] ?? null
+    );
+  }
+
   getPipelineHistory(serverId: string, hours: number, now = new Date().toISOString()): PipelineStatusSnapshot[] {
     const since = new Date(new Date(now).getTime() - hours * 60 * 60 * 1000).toISOString();
     return this.query<PipelineStatusSnapshot>(
@@ -389,9 +399,9 @@ export class MonitorDatabase {
         id, server_id, range_path, range_name, dataset_name, scenario, repo_id,
         settings_json, command_text, solver_range_text, status, queue_mode,
         confirm_unstudied, tmux_session, remote_range_path, remote_result_path,
-        parallel_run_id, parallel_slice_id, assigned_indices_json, source_type,
+        parallel_run_id, parallel_slice_id, assigned_indices_json, source_type, pipeline_snapshot_id,
         created_at, updated_at, started_at, finished_at, last_error
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         job.id,
         job.serverId,
@@ -413,6 +423,7 @@ export class MonitorDatabase {
         job.parallelSliceId,
         JSON.stringify(job.assignedIndices),
         job.sourceType,
+        job.pipeline?.id ?? null,
         job.createdAt,
         job.updatedAt,
         job.startedAt,
@@ -425,7 +436,7 @@ export class MonitorDatabase {
 
   updateSolverJob(
     id: string,
-    patch: Partial<Pick<SolverJob, "status" | "startedAt" | "finishedAt" | "lastError" | "updatedAt">>
+    patch: Partial<Pick<SolverJob, "status" | "startedAt" | "finishedAt" | "lastError" | "updatedAt" | "pipeline">>
   ): SolverJob {
     const current = this.getSolverJob(id);
     if (!current) {
@@ -433,9 +444,15 @@ export class MonitorDatabase {
     }
 
     const updatedAt = patch.updatedAt ?? new Date().toISOString();
+    const enteringTerminal = patch.status !== undefined && solverJobStatusIsTerminal(patch.status);
+    const pipelineSnapshotId = patch.pipeline !== undefined
+      ? patch.pipeline?.id ?? null
+      : enteringTerminal && current.pipeline && pipelineSnapshotBelongsToJobIdentity(current.pipeline, current)
+        ? current.pipeline.id
+        : this.getSolverJobPipelineSnapshotId(id);
     this.database.run(
       `UPDATE solver_jobs
-       SET status = ?, started_at = ?, finished_at = ?, last_error = ?, updated_at = ?
+       SET status = ?, started_at = ?, finished_at = ?, last_error = ?, updated_at = ?, pipeline_snapshot_id = ?
        WHERE id = ?`,
       [
         patch.status ?? current.status,
@@ -443,6 +460,7 @@ export class MonitorDatabase {
         patch.finishedAt !== undefined ? patch.finishedAt : current.finishedAt,
         patch.lastError !== undefined ? patch.lastError : current.lastError,
         updatedAt,
+        pipelineSnapshotId,
         id
       ]
     );
@@ -458,7 +476,7 @@ export class MonitorDatabase {
     return this.query<SolverJob>(
       "SELECT * FROM solver_jobs ORDER BY created_at DESC",
       [],
-      (row) => mapSolverJob(row, this.getLatestPipelineSnapshot(String(row.server_id)))
+      (row) => mapSolverJob(row, this.getPipelineSnapshotForSolverJob(row))
     );
   }
 
@@ -467,7 +485,7 @@ export class MonitorDatabase {
       this.query<SolverJob>(
         "SELECT * FROM solver_jobs WHERE id = ?",
         [id],
-        (row) => mapSolverJob(row, this.getLatestPipelineSnapshot(String(row.server_id)))
+        (row) => mapSolverJob(row, this.getPipelineSnapshotForSolverJob(row))
       )[0] ?? null
     );
   }
@@ -487,7 +505,7 @@ export class MonitorDatabase {
            AND (? IS NULL OR id != ?)
          ORDER BY updated_at DESC LIMIT 1`,
         [serverId, exceptJobId ?? null, exceptJobId ?? null],
-        (row) => mapSolverJob(row, this.getLatestPipelineSnapshot(String(row.server_id)))
+        (row) => mapSolverJob(row, this.getPipelineSnapshotForSolverJob(row))
       )[0] ?? null
     );
   }
@@ -500,9 +518,27 @@ export class MonitorDatabase {
          WHERE solver_jobs.server_id = ? AND solver_jobs.status = 'queued' AND solver_jobs.queue_mode IN ('queue_next', 'parallel')
          ORDER BY COALESCE(parallel_solver_runs.queue_order, 999999), solver_jobs.created_at ASC LIMIT 1`,
         [serverId],
-        (row) => mapSolverJob(row, this.getLatestPipelineSnapshot(String(row.server_id)))
+        (row) => mapSolverJob(row, this.getPipelineSnapshotForSolverJob(row))
       )[0] ?? null
     );
+  }
+
+  private getSolverJobPipelineSnapshotId(id: string): string | null {
+    return this.query<string | null>(
+      "SELECT pipeline_snapshot_id FROM solver_jobs WHERE id = ? LIMIT 1",
+      [id],
+      (row) => row.pipeline_snapshot_id == null ? null : String(row.pipeline_snapshot_id)
+    )[0] ?? null;
+  }
+
+  private getPipelineSnapshotForSolverJob(row: Record<string, SqlValue>): PipelineStatusSnapshot | null {
+    const storedSnapshotId = row.pipeline_snapshot_id == null ? "" : String(row.pipeline_snapshot_id).trim();
+    if (storedSnapshotId) return this.getPipelineSnapshot(storedSnapshotId);
+
+    const status = String(row.status) as SolverJobStatus;
+    if (solverJobStatusIsTerminal(status)) return null;
+    const latest = this.getLatestPipelineSnapshot(String(row.server_id));
+    return latest && pipelineSnapshotCanReconcileSolverJob(latest, row) ? latest : null;
   }
 
   insertParallelSolverRun(run: ParallelSolverRun): void {
@@ -657,28 +693,66 @@ export class MonitorDatabase {
     );
   }
 
-  deleteParallelSolverRuns(ids: string[]): void {
+  deleteParallelSolverRuns(
+    ids: string[],
+    options: { deleteLinkedFailurePool?: boolean } = {}
+  ): { deletedRuns: number; deletedFailurePoolEntries: number } {
     const uniqueIds = [...new Set(ids.map((id) => id.trim()).filter(Boolean))];
-    if (uniqueIds.length === 0) return;
+    if (uniqueIds.length === 0) return { deletedRuns: 0, deletedFailurePoolEntries: 0 };
     const placeholders = uniqueIds.map(() => "?").join(", ");
-    this.database.run(
-      `DELETE FROM solver_job_events
-       WHERE job_id IN (SELECT id FROM solver_jobs WHERE parallel_run_id IN (${placeholders}))`,
-      uniqueIds
-    );
-    this.database.run(
-      `DELETE FROM solver_jobs WHERE parallel_run_id IN (${placeholders})`,
-      uniqueIds
-    );
-    this.database.run(
-      `DELETE FROM parallel_solver_slices WHERE run_id IN (${placeholders})`,
-      uniqueIds
-    );
-    this.database.run(
-      `DELETE FROM parallel_solver_runs WHERE id IN (${placeholders})`,
-      uniqueIds
-    );
+    const deletedRuns = this.query<{ count: number }>(
+      `SELECT COUNT(*) AS count FROM parallel_solver_runs WHERE id IN (${placeholders})`,
+      uniqueIds,
+      (row) => ({ count: Number(row.count ?? 0) })
+    )[0]?.count ?? 0;
+    let deletedFailurePoolEntries = 0;
+
+    this.database.run("BEGIN TRANSACTION");
+    try {
+      if (options.deleteLinkedFailurePool) {
+        deletedFailurePoolEntries = this.query<{ count: number }>(
+          `SELECT COUNT(*) AS count
+           FROM parallel_failure_pool_entries
+           WHERE last_run_id IN (${placeholders})
+              OR last_slice_id IN (
+                SELECT id FROM parallel_solver_slices WHERE run_id IN (${placeholders})
+              )`,
+          [...uniqueIds, ...uniqueIds],
+          (row) => ({ count: Number(row.count ?? 0) })
+        )[0]?.count ?? 0;
+        this.database.run(
+          `DELETE FROM parallel_failure_pool_entries
+           WHERE last_run_id IN (${placeholders})
+              OR last_slice_id IN (
+                SELECT id FROM parallel_solver_slices WHERE run_id IN (${placeholders})
+              )`,
+          [...uniqueIds, ...uniqueIds]
+        );
+      }
+      this.database.run(
+        `DELETE FROM solver_job_events
+         WHERE job_id IN (SELECT id FROM solver_jobs WHERE parallel_run_id IN (${placeholders}))`,
+        uniqueIds
+      );
+      this.database.run(
+        `DELETE FROM solver_jobs WHERE parallel_run_id IN (${placeholders})`,
+        uniqueIds
+      );
+      this.database.run(
+        `DELETE FROM parallel_solver_slices WHERE run_id IN (${placeholders})`,
+        uniqueIds
+      );
+      this.database.run(
+        `DELETE FROM parallel_solver_runs WHERE id IN (${placeholders})`,
+        uniqueIds
+      );
+      this.database.run("COMMIT");
+    } catch (error) {
+      this.database.run("ROLLBACK");
+      throw error;
+    }
     this.persist();
+    return { deletedRuns, deletedFailurePoolEntries };
   }
 
   clearParallelSolverRunReports(ids: string[]): void {
@@ -822,14 +896,16 @@ export class MonitorDatabase {
     this.persist();
   }
 
-  clearParallelFailurePoolEntries(): number {
+  clearParallelFailurePoolEntries(rangePath: string, datasetName: string): number {
+    const params = [rangePath.trim(), datasetName.trim()];
+    const where = " WHERE range_path = ? AND dataset_name = ? AND status IN ('pending', 'failed')";
     const count = this.query<{ count: number }>(
-      "SELECT COUNT(*) AS count FROM parallel_failure_pool_entries",
-      [],
+      `SELECT COUNT(*) AS count FROM parallel_failure_pool_entries${where}`,
+      params,
       (row) => ({ count: Number(row.count) })
     )[0]?.count ?? 0;
     if (count === 0) return 0;
-    this.database.run("DELETE FROM parallel_failure_pool_entries");
+    this.database.run(`DELETE FROM parallel_failure_pool_entries${where}`, params);
     this.persist();
     return count;
   }
@@ -1187,6 +1263,7 @@ export class MonitorDatabase {
         parallel_slice_id TEXT,
         assigned_indices_json TEXT,
         source_type TEXT NOT NULL DEFAULT 'single',
+        pipeline_snapshot_id TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         started_at TEXT,
@@ -1315,6 +1392,7 @@ export class MonitorDatabase {
     this.ensureServerSolverColumns();
     this.ensurePipelineDetailColumns();
     this.ensureSolverJobParallelColumns();
+    this.ensureSolverJobPipelineSnapshotColumn();
     this.ensureParallelSolverRunQueueOrderColumn();
     this.ensureParallelSolverRunReportClearedColumn();
     this.ensureParallelSolverSliceCandidateServerColumn();
@@ -1365,6 +1443,17 @@ export class MonitorDatabase {
     );
     if (!columns.some((column) => column.name === "remote_result_path")) {
       this.database.run("ALTER TABLE solver_jobs ADD COLUMN remote_result_path TEXT");
+    }
+  }
+
+  private ensureSolverJobPipelineSnapshotColumn(): void {
+    const columns = this.query<{ name: string }>(
+      "PRAGMA table_info(solver_jobs)",
+      [],
+      (row) => ({ name: String(row.name) })
+    );
+    if (!columns.some((column) => column.name === "pipeline_snapshot_id")) {
+      this.database.run("ALTER TABLE solver_jobs ADD COLUMN pipeline_snapshot_id TEXT");
     }
   }
 
@@ -1569,17 +1658,54 @@ function fallbackRemoteResultPath(datasetName: string, jobId: string): string {
   return `~/solver/results/${datasetName}/${jobId}`;
 }
 
+function solverJobStatusIsTerminal(status: SolverJobStatus): boolean {
+  return status === "completed" || status === "failed" || status === "canceled" || status === "interrupted";
+}
+
+function pipelineSnapshotCanReconcileSolverJob(
+  snapshot: PipelineStatusSnapshot,
+  row: Record<string, SqlValue>
+): boolean {
+  if (pipelineSnapshotBelongsToJobIdentity(snapshot, {
+    id: String(row.id),
+    repoId: String(row.repo_id),
+    datasetName: String(row.dataset_name)
+  })) return true;
+
+  const jobReference = Date.parse(
+    row.started_at == null ? String(row.created_at) : String(row.started_at)
+  );
+  const pipelineReference = Date.parse(snapshot.startedAt ?? snapshot.collectedAt);
+  const isNewEnough = Number.isFinite(jobReference) &&
+    Number.isFinite(pipelineReference) &&
+    pipelineReference >= jobReference - 15_000;
+  if (!isNewEnough) return false;
+
+  return true;
+}
+
+function pipelineSnapshotBelongsToJobIdentity(
+  snapshot: PipelineStatusSnapshot,
+  job: Pick<SolverJob, "id" | "repoId" | "datasetName">
+): boolean {
+  if (snapshot.resultPath?.includes(job.id) || snapshot.command?.includes(job.id)) return true;
+  return snapshot.repoId === job.repoId || snapshot.datasetName === job.datasetName;
+}
+
 function mapParallelSolverRun(row: Record<string, SqlValue>, slices: ParallelSolverSlice[]): ParallelSolverRun {
   const startedAt = row.started_at == null ? null : String(row.started_at);
   const finishedAt = row.finished_at == null ? null : String(row.finished_at);
   const totalBoards = parseNumberArray(row.total_indices_json).length;
   const completedBoards = uniqueCount(slices.flatMap((slice) => {
+    if (slice.status === "completed") return slice.assignedIndices;
     const completed = assignedPipelineIndices(slice, slice.job?.pipeline?.completedIndices ?? []);
-    if (completed.length > 0) return completed;
-    return slice.status === "completed" ? slice.assignedIndices : [];
+    return completed;
   }));
   const failedBoards = uniqueCount(slices.flatMap((slice) => {
-    const failed = assignedPipelineIndices(slice, slice.job?.pipeline?.failedIndices ?? []);
+    const failed = assignedPipelineIndices(slice, [
+      ...(slice.job?.pipeline?.failedIndices ?? []),
+      ...(slice.job?.pipeline?.skippedIndices ?? [])
+    ]);
     if (failed.length > 0) return failed;
     return slice.status === "failed" ? slice.assignedIndices : [];
   }));

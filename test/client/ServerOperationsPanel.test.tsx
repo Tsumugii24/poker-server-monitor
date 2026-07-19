@@ -90,6 +90,51 @@ const uploadOperation: ServerOperation = {
   }
 };
 
+const runningUploadOperation: ServerOperation = {
+  ...uploadOperation,
+  id: "upload-running",
+  status: "running",
+  finishedAt: null,
+  items: [0, 1, 2].map((index) => ({
+    serverId: "1",
+    datasetName: `dataset-${index + 1}`,
+    repoId: `Tsumugii/dataset-${index + 1}`,
+    jobId: `job-${index + 1}`,
+    resultsDir: `/home/jane/solver/results/dataset-${index + 1}/job-${index + 1}`,
+    fileFormat: "parquet" as const,
+    fileCount: 10
+  })),
+  result: {
+    summary: {
+      folders: 3,
+      folders_completed: 1,
+      folders_remaining: 2,
+      files_found: 30,
+      files_uploaded: 10,
+      files_deleted: 10,
+      files_remaining: 20,
+      upload_success: 1,
+      upload_failed: 0,
+      current_dataset: "dataset-2",
+      current_results_dir: "/home/jane/solver/results/dataset-2/job-2",
+      current_file_format: "parquet",
+      duration_seconds: 45
+    },
+    details: [{
+      dataset_name: "dataset-1",
+      results_dir: "/home/jane/solver/results/dataset-1/job-1",
+      file_format: "parquet",
+      files_found: 10,
+      files_uploaded: 10,
+      files_deleted: 10,
+      files_remaining: 0,
+      duration_seconds: 30,
+      exit_code: 0,
+      success: true
+    }]
+  }
+};
+
 describe("ServerOperationsPanel", () => {
   it("filters retained results and exposes row upload and delete actions", async () => {
     const user = userEvent.setup();
@@ -120,6 +165,23 @@ describe("ServerOperationsPanel", () => {
     expect(within(dialog).getAllByText("12").length).toBeGreaterThanOrEqual(3);
     expect(within(dialog).getAllByText("0").length).toBeGreaterThanOrEqual(1);
     expect(within(dialog).getAllByText("2m").length).toBe(2);
+  });
+
+  it("shows live aggregate and per-folder upload progress", async () => {
+    const user = userEvent.setup();
+    renderPanel({ operations: [runningUploadOperation] });
+
+    const overview = screen.getByRole("region", { name: "Upload progress" });
+    expect(within(overview).getByText("Upload in progress")).toBeInTheDocument();
+    expect(within(overview).getByText("1 / 3")).toBeInTheDocument();
+    expect(within(overview).getByText("dataset-2")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("tab", { name: "Scan + Upload" }));
+    await user.click(screen.getByRole("button", { name: "Details" }));
+    const dialog = screen.getByRole("dialog", { name: "Upload Progress" });
+    expect(within(dialog).getByText("1 of 3 folders processed")).toBeInTheDocument();
+    expect(within(dialog).getByText("Uploading now")).toBeInTheDocument();
+    expect(within(dialog).getByText("Pending")).toBeInTheDocument();
   });
 
   it("selects every filtered range folder for bulk upload or delete", async () => {

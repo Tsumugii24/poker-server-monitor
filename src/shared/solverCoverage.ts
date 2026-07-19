@@ -22,10 +22,9 @@ export function assignedBoardIndicesInSlice(slice: ParallelSolverSlice, indices:
 }
 
 export function completedBoardIndicesForSlice(slice: ParallelSolverSlice): number[] {
-  const fromPipeline = assignedBoardIndicesInSlice(slice, slice.job?.pipeline?.completedIndices ?? []);
-  if (fromPipeline.length > 0) return fromPipeline;
   if (slice.status === "completed") return slice.assignedIndices;
-  return [];
+  const fromPipeline = assignedBoardIndicesInSlice(slice, slice.job?.pipeline?.completedIndices ?? []);
+  return fromPipeline;
 }
 
 export function collectCompletedBoardIndicesFromRun(run: ParallelSolverRun): number[] {

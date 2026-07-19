@@ -146,12 +146,16 @@ type PendingParallelReportsAction = {
 
 type PendingFailurePoolClearAction = {
   entryCount: number;
+  rangePath: string;
+  datasetName: string;
 };
 
 type PendingParallelQueueDeleteAction = {
   runId: string;
   datasetName: string;
   totalBoards: number;
+  kind: "queue" | "history";
+  linkedFailureCount: number;
 };
 
 type PendingServerOperationAction = {
@@ -1175,12 +1179,19 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
     }
   };
 
-  const requestDeleteParallelQueueRun = (run: ParallelSolverRun) => {
-    if (parallelRunIsLocked(run) || run.status !== "queued") return;
+  const requestDeleteParallelRun = (run: ParallelSolverRun) => {
+    const terminal = terminalParallelReportRuns([run]).length === 1;
+    if (parallelRunIsLocked(run) || (run.status !== "queued" && !terminal)) return;
+    const sliceIds = new Set(run.slices.map((slice) => slice.id));
+    const linkedFailureCount = failurePool.filter((entry) =>
+      entry.lastRunId === run.id || (entry.lastSliceId != null && sliceIds.has(entry.lastSliceId))
+    ).length;
     setPendingParallelQueueDeleteAction({
       runId: run.id,
       datasetName: run.datasetName,
-      totalBoards: run.report.totalBoards
+      totalBoards: run.report.totalBoards,
+      kind: run.status === "queued" ? "queue" : "history",
+      linkedFailureCount
     });
   };
 
@@ -1196,7 +1207,9 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
       setParallelRuns(response.runs);
       setFailurePool(response.failurePool);
       setPendingParallelQueueDeleteAction(null);
-      setActiveParallelRunId((current) => current === runId ? parallelQueueRuns(response.runs)[0]?.id ?? null : current);
+      setActiveParallelRunId((current) => current === runId
+        ? parallelQueueRuns(response.runs)[0]?.id ?? parallelHistoryRuns(response.runs)[0]?.id ?? null
+        : current);
     } catch (caught) {
       setJobError(caught instanceof Error ? caught.message : String(caught));
       await loadJobContext();
@@ -1251,8 +1264,16 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
   };
 
   const requestClearFailurePool = () => {
-    if (failurePool.length === 0) return;
-    setPendingFailurePoolClearAction({ entryCount: failurePool.length });
+    const activeRun = parallelRuns.find((run) => run.id === activeParallelRunId) ?? null;
+    const rangePath = activeRun?.rangePath ?? selectedRangePathForJob;
+    const datasetName = activeRun?.datasetName ?? parallelPreview?.datasetName ?? jobDatasetName.trim();
+    const entryCount = failurePool.filter((entry) =>
+      entry.rangePath === rangePath &&
+      entry.datasetName === datasetName &&
+      (entry.status === "pending" || entry.status === "failed")
+    ).length;
+    if (!rangePath || !datasetName || entryCount === 0) return;
+    setPendingFailurePoolClearAction({ entryCount, rangePath, datasetName });
   };
 
   const confirmClearFailurePool = async () => {
@@ -1260,7 +1281,11 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
     setJobBusy("parallel-clear-failure-pool");
     setJobError(null);
     try {
-      const response = await fetchPreflopJson<ParallelFailurePoolClearResponse>("/api/parallel-jobs/failure-pool", {
+      const query = new URLSearchParams({
+        rangePath: pendingFailurePoolClearAction.rangePath,
+        datasetName: pendingFailurePoolClearAction.datasetName
+      });
+      const response = await fetchPreflopJson<ParallelFailurePoolClearResponse>(`/api/parallel-jobs/failure-pool?${query}`, {
         method: "DELETE"
       });
       setParallelRuns(response.runs);
@@ -1274,10 +1299,33 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
     }
   };
 
-  const applyServerOperationsResponse = (response: ServerOperationsResponse) => {
+  const applyServerOperationsResponse = useCallback((response: ServerOperationsResponse) => {
     setServerOperations(response.operations);
     setNetworkSyncConfigured(Boolean(response.capabilities?.networkSyncConfigured));
-  };
+  }, []);
+
+  const loadServerOperations = useCallback(async (reconcile = false) => {
+    try {
+      const response = await fetchPreflopJson<ServerOperationsResponse>(
+        `/api/server-operations${reconcile ? "?reconcile=1" : ""}`
+      );
+      applyServerOperationsResponse(response);
+    } catch (caught) {
+      setJobError(caught instanceof Error ? caught.message : String(caught));
+    }
+  }, [applyServerOperationsResponse]);
+
+  const hasActiveServerOperation = serverOperations.some((operation) => !serverOperationIsTerminal(operation));
+
+  useEffect(() => {
+    if (activeSolverJobTab !== "operations") return;
+    void loadServerOperations(true);
+    if (!hasActiveServerOperation) return;
+    const interval = window.setInterval(() => {
+      void loadServerOperations(true);
+    }, 10_000);
+    return () => window.clearInterval(interval);
+  }, [activeSolverJobTab, hasActiveServerOperation, loadServerOperations]);
 
   const scanUploadCandidates = async () => {
     setJobBusy("operation-scan");
@@ -2544,7 +2592,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
           onParallelStart={() => void createParallelJob("start_now")}
           onParallelQueueNext={() => void createParallelJob("queue_next")}
           onParallelRunSelect={selectParallelRun}
-          onParallelQueueDelete={requestDeleteParallelQueueRun}
+          onParallelQueueDelete={requestDeleteParallelRun}
           onFailurePoolSubmit={() => void submitFailurePool("queue_next")}
           onFailurePoolClear={requestClearFailurePool}
           onParallelCancel={(run) => void cancelParallelRun(run)}
@@ -2756,7 +2804,8 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
               <h3 id="failure-pool-clear-confirm-title">Clear failure pool?</h3>
               <p>
                 This will remove <strong>{pendingFailurePoolClearAction.entryCount}</strong> failure pool
-                entr{pendingFailurePoolClearAction.entryCount === 1 ? "y" : "ies"}. Parallel runs and active solver jobs will not be stopped.
+                entr{pendingFailurePoolClearAction.entryCount === 1 ? "y" : "ies"} for
+                {" "}<strong>{displayDatasetName(pendingFailurePoolClearAction.datasetName)}</strong>. Other ranges remain unchanged.
               </p>
             </div>
             <div className="preflop-confirm-actions">
@@ -2793,12 +2842,22 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
               <Trash2 size={18} />
             </div>
             <div>
-              <h3 id="parallel-queue-delete-confirm-title">Delete queued parallel run?</h3>
-              <p>
-                This will remove <strong>{displayDatasetName(pendingParallelQueueDeleteAction.datasetName)}</strong> from the parallel queue
-                with <strong>{pendingParallelQueueDeleteAction.totalBoards}</strong> board
-                {pendingParallelQueueDeleteAction.totalBoards === 1 ? "" : "s"}. Active or locked runs cannot be deleted here.
-              </p>
+              <h3 id="parallel-queue-delete-confirm-title">
+                {pendingParallelQueueDeleteAction.kind === "history" ? "Delete parallel history?" : "Delete queued parallel run?"}
+              </h3>
+              {pendingParallelQueueDeleteAction.kind === "history" ? (
+                <p>
+                  This permanently removes <strong>{displayDatasetName(pendingParallelQueueDeleteAction.datasetName)}</strong>, its Parallel Report,
+                  Solver Jobs, Slices, events, and <strong>{pendingParallelQueueDeleteAction.linkedFailureCount}</strong> linked Failure Pool entr
+                  {pendingParallelQueueDeleteAction.linkedFailureCount === 1 ? "y" : "ies"}. This cannot be undone.
+                </p>
+              ) : (
+                <p>
+                  This will remove <strong>{displayDatasetName(pendingParallelQueueDeleteAction.datasetName)}</strong> from the parallel queue
+                  with <strong>{pendingParallelQueueDeleteAction.totalBoards}</strong> board
+                  {pendingParallelQueueDeleteAction.totalBoards === 1 ? "" : "s"}. Active or locked runs cannot be deleted here.
+                </p>
+              )}
             </div>
             <div className="preflop-confirm-actions">
               <button
@@ -3843,7 +3902,7 @@ function ParallelSolverJobPanel({
   const visibleFailurePool = failurePool.filter((entry) =>
     entry.rangePath === activeFailurePoolRangePath &&
     (!activeFailurePoolDatasetName || entry.datasetName === activeFailurePoolDatasetName) &&
-    (entry.status === "pending" || entry.status === "failed")
+    entry.status !== "solved"
   );
   const baseSubmitDisabled = !selectedRangePath || !selectedRangeLearned || busy != null;
   const submitDisabled = baseSubmitDisabled || !hasTargetServers;
@@ -3857,8 +3916,12 @@ function ParallelSolverJobPanel({
   const clearableRuns = terminalParallelReportRuns(runs);
   const failurePoolDatasets = summarizeFailurePoolDatasets(visibleFailurePool);
   const failurePoolReasons = summarizeFailurePoolReasons(visibleFailurePool);
-  const retryableFailurePoolCount = visibleFailurePool.filter((entry) => failurePoolEntryIsRetryable(entry)).length;
-  const skippedFailurePoolCount = visibleFailurePool.filter((entry) => entry.failureReason === "skipped").length;
+  const retryableFailurePool = visibleFailurePool.filter((entry) => failurePoolEntryIsRetryable(entry));
+  const retryableFailurePoolCount = retryableFailurePool.length;
+  const clearableFailurePoolCount = visibleFailurePool.filter((entry) =>
+    entry.status === "pending" || entry.status === "failed"
+  ).length;
+  const skippedFailurePoolCount = retryableFailurePool.filter((entry) => entry.failureReason === "skipped").length;
   const failurePoolPreviewDisabled =
     baseSubmitDisabled ||
     !hasTargetServers ||
@@ -3885,7 +3948,9 @@ function ParallelSolverJobPanel({
       <ParallelHistoryBoard
         runs={runs}
         activeRunId={activeInspectionRun?.id ?? null}
+        busy={busy}
         onRunSelect={onRunSelect}
+        onRunDelete={onRunDelete}
       />
 
     <div className="parallel-job-grid">
@@ -4089,13 +4154,13 @@ function ParallelSolverJobPanel({
           <div className="parallel-section-title parallel-section-title-with-actions">
             <div>
               <strong>Failure Pool</strong>
-              <span>{inspectionContextLabel} · {retryableFailurePoolCount}/{visibleFailurePool.length} retryable · {failurePool.length} total</span>
+              <span>{inspectionContextLabel} · {visibleFailurePool.length} failure{visibleFailurePool.length === 1 ? "" : "s"} for this range · {retryableFailurePoolCount} retryable</span>
             </div>
             <button
               className="icon-button compact danger"
               type="button"
               onClick={onFailurePoolClear}
-              disabled={failurePool.length === 0 || busy != null}
+              disabled={clearableFailurePoolCount === 0 || busy != null}
             >
               <Trash2 size={14} />
               Clear
@@ -4355,11 +4420,15 @@ function ParallelQueueBoard({
 function ParallelHistoryBoard({
   runs,
   activeRunId,
-  onRunSelect
+  busy,
+  onRunSelect,
+  onRunDelete
 }: {
   runs: ParallelSolverRun[];
   activeRunId: string | null;
+  busy: string | null;
   onRunSelect: (runId: string) => void;
+  onRunDelete: (run: ParallelSolverRun) => void;
 }) {
   const historyRuns = parallelHistoryRuns(runs);
   const [filter, setFilter] = useState<ParallelHistoryFilter>("all");
@@ -4443,6 +4512,21 @@ function ParallelHistoryBoard({
                     {failureCount > 0 ? ` · ${failureCount} unresolved board${failureCount === 1 ? "" : "s"}` : ""}
                   </p>
                 </div>
+                <div className="parallel-queue-actions">
+                  <button
+                    className="parallel-queue-delete"
+                    type="button"
+                    title={`Delete history for ${displayDatasetName(run.datasetName)}`}
+                    aria-label={`Delete history for ${displayDatasetName(run.datasetName)}`}
+                    disabled={busy != null}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      onRunDelete(run);
+                    }}
+                  >
+                    <Trash2 size={12} />
+                  </button>
+                </div>
               </article>
             );
           })}
@@ -4506,6 +4590,7 @@ export function ServerOperationsPanel({
   const activeUploadServerIds = new Set(
     activeOperations.filter((operation) => operation.type === "upload").map((operation) => operation.serverId)
   );
+  const uploadOperations = operations.filter((operation) => operation.type === "upload");
   const operationsByServer = new Map<string, Map<ServerOperation["type"], ServerOperation>>();
   for (const operation of operations) {
     const byType = operationsByServer.get(operation.serverId) ?? new Map<ServerOperation["type"], ServerOperation>();
@@ -4668,6 +4753,10 @@ export function ServerOperationsPanel({
               Scan + Upload All
             </button>
           </div>
+
+          {uploadOperations.length > 0 ? (
+            <UploadProgressOverview operations={uploadOperations} />
+          ) : null}
 
           <div className="server-ops-upload-controls auto">
             <button className="icon-button compact" type="button" onClick={onScanUploads} disabled={operationBusy || onlineServers.length === 0}>
@@ -4983,11 +5072,58 @@ function ServerOperationState({ operation }: { operation: ServerOperation | null
   if (!operation) return <span className="server-ops-never">Not run</span>;
   const result = serverOperationCompactResult(operation);
   const detail = serverOperationResultDetail(operation);
+  const uploadProgress = operation.type === "upload" ? serverUploadOperationProgress(operation) : null;
   return (
     <div className="server-ops-result-cell" title={detail ?? undefined}>
       <span className={`server-ops-result-pill ${result.tone}`}>{result.label}</span>
-      <small>{detail ?? formatServerOperationStatus(operation.status)}</small>
+      <div className="server-ops-result-detail">
+        <small>{detail ?? formatServerOperationStatus(operation.status)}</small>
+        {uploadProgress && !serverOperationIsTerminal(operation) ? (
+          <span className="server-ops-inline-progress" aria-hidden="true">
+            <i style={{ width: `${uploadProgress.percent}%` }} />
+          </span>
+        ) : null}
+      </div>
     </div>
+  );
+}
+
+function UploadProgressOverview({ operations }: { operations: ServerOperation[] }) {
+  const progress = summarizeServerUploadOperations(operations);
+  const active = progress.runningServers + progress.deployingServers;
+  const title = active > 0 ? "Upload in progress" : "Latest upload snapshot";
+  const currentDatasets = progress.currentDatasets.map((dataset) => displayDatasetName(dataset)).join(", ");
+  return (
+    <section className="server-upload-progress" aria-label="Upload progress">
+      <div className="server-upload-progress-head">
+        <div>
+          <strong>{title}</strong>
+          <span>
+            {active > 0 ? "Live status refreshes every 10 seconds" : "Most recent operation on each server"}
+          </span>
+        </div>
+        <b>{progress.percent}%</b>
+      </div>
+      <div
+        className="server-upload-progress-track"
+        role="progressbar"
+        aria-label="Overall upload progress"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={progress.percent}
+      >
+        <span style={{ width: `${progress.percent}%` }} />
+      </div>
+      <div className="server-upload-progress-metrics">
+        <div><span>Folders</span><strong>{progress.completedFolders} / {progress.totalFolders}</strong></div>
+        <div><span>Files Cleaned</span><strong>{progress.filesCompleted} / {progress.totalFiles}</strong></div>
+        <div><span>Servers</span><strong>{progress.completedServers} done · {active} active</strong></div>
+        <div><span>Failures</span><strong>{progress.failedServers} servers · {progress.failedAttempts} folders</strong></div>
+      </div>
+      {currentDatasets ? (
+        <p><span>Now uploading</span><strong>{currentDatasets}</strong></p>
+      ) : null}
+    </section>
   );
 }
 
@@ -5003,8 +5139,11 @@ function UploadOperationDetailDialog({
   const compact = serverOperationCompactResult(operation);
   const plannedItems = operation.items.filter((item): item is ServerUploadItem => "resultsDir" in item);
   const hasResult = operation.result != null;
-  const plannedFolderCount = new Set(plannedItems.map((item) => item.resultsDir)).size;
-  const plannedFileCount = plannedItems.reduce((total, item) => total + (item.fileCount ?? 0), 0);
+  const progress = serverUploadOperationProgress(operation);
+  const detailKeys = new Set(details.map((detail) => uploadResultItemKey(detail)));
+  const pendingItems = plannedItems.filter((item) => !detailKeys.has(uploadPlanItemKey(item)));
+  const currentResultsDir = stringResult(summary.current_results_dir);
+  const currentFileFormat = stringResult(summary.current_file_format);
   return (
     <div className="modal-backdrop preflop-confirm-backdrop" role="presentation" onClick={onClose}>
       <section
@@ -5017,7 +5156,7 @@ function UploadOperationDetailDialog({
         <header className="server-upload-detail-head">
           <div>
             <span>Server {operation.serverId}</span>
-            <h3 id="server-upload-detail-title">Upload Result</h3>
+            <h3 id="server-upload-detail-title">{serverOperationIsTerminal(operation) ? "Upload Result" : "Upload Progress"}</h3>
           </div>
           <div>
             <span className={`server-ops-result-pill ${compact.tone}`}>{compact.label}</span>
@@ -5027,9 +5166,19 @@ function UploadOperationDetailDialog({
           </div>
         </header>
 
+        <div className="server-upload-detail-progress">
+          <div>
+            <span>{progress.completedFolders} of {progress.totalFolders} folders processed</span>
+            <strong>{progress.percent}%</strong>
+          </div>
+          <span className="server-upload-progress-track" aria-hidden="true">
+            <i style={{ width: `${progress.percent}%` }} />
+          </span>
+        </div>
+
         <div className="server-upload-detail-metrics">
-          <div><span>Folders</span><strong>{hasResult ? numericResult(summary.folders) : plannedFolderCount}</strong></div>
-          <div><span>Files Found</span><strong>{hasResult ? numericResult(summary.files_found) : plannedFileCount}</strong></div>
+          <div><span>Folders</span><strong>{progress.completedFolders} / {progress.totalFolders}</strong></div>
+          <div><span>Files Found</span><strong>{progress.totalFiles}</strong></div>
           <div><span>Uploaded</span><strong>{numericResult(summary.files_uploaded)}</strong></div>
           <div><span>Deleted Local</span><strong>{numericResult(summary.files_deleted)}</strong></div>
           <div><span>Remaining</span><strong>{numericResult(summary.files_remaining)}</strong></div>
@@ -5037,15 +5186,7 @@ function UploadOperationDetailDialog({
         </div>
 
         <div className="server-upload-detail-list">
-          {details.length === 0 ? (
-            plannedItems.length > 0 ? plannedItems.map((item) => (
-              <article key={`${item.repoId}:${item.resultsDir}:${item.fileFormat}`} className="server-upload-detail-item pending">
-                <div><strong>{displayDatasetName(item.datasetName)}</strong><span>Pending result</span></div>
-                <code>{item.resultsDir}</code>
-                <p>{item.fileCount ?? 0} {item.fileFormat} files planned</p>
-              </article>
-            )) : <p className="solver-job-empty">No retained result folders were found for this server.</p>
-          ) : details.map((detail, index) => {
+          {details.map((detail, index) => {
             const success = detail.success === true;
             const datasetName = typeof detail.dataset_name === "string" ? detail.dataset_name : `Folder ${index + 1}`;
             const resultDir = typeof detail.results_dir === "string" ? detail.results_dir : "";
@@ -5068,6 +5209,25 @@ function UploadOperationDetailDialog({
               </article>
             );
           })}
+          {pendingItems.map((item) => {
+            const uploading = item.resultsDir === currentResultsDir && item.fileFormat === currentFileFormat;
+            return (
+              <article
+                key={`${item.repoId}:${item.resultsDir}:${item.fileFormat}`}
+                className={`server-upload-detail-item ${uploading ? "uploading" : "pending"}`}
+              >
+                <div>
+                  <strong>{displayDatasetName(item.datasetName)}</strong>
+                  <span>{uploading ? "Uploading now" : "Pending"}</span>
+                </div>
+                <code>{item.resultsDir}</code>
+                <p>{item.fileCount ?? 0} {item.fileFormat} files planned</p>
+              </article>
+            );
+          })}
+          {details.length === 0 && pendingItems.length === 0 ? (
+            <p className="solver-job-empty">No retained result folders were found for this server.</p>
+          ) : null}
         </div>
       </section>
     </div>
@@ -5536,6 +5696,85 @@ function summarizeUploadCandidates(candidates: ServerUploadCandidate[]): { folde
   };
 }
 
+type ServerUploadOperationProgress = {
+  totalFolders: number;
+  completedFolders: number;
+  totalFiles: number;
+  filesCompleted: number;
+  filesRemaining: number;
+  failedAttempts: number;
+  currentDataset: string;
+  percent: number;
+};
+
+function serverUploadOperationProgress(operation: ServerOperation): ServerUploadOperationProgress {
+  const summary = operation.result?.summary ?? {};
+  const plannedItems = operation.items.filter((item): item is ServerUploadItem => "resultsDir" in item);
+  const plannedFolders = new Set(plannedItems.map((item) => item.resultsDir)).size;
+  const plannedFiles = plannedItems.reduce((total, item) => total + (item.fileCount ?? 0), 0);
+  const totalFolders = Math.max(0, numericResult(summary.folders) || plannedFolders);
+  const detailFolders = new Set(
+    (operation.result?.details ?? [])
+      .map((detail) => stringResult(detail.results_dir))
+      .filter(Boolean)
+  ).size;
+  let completedFolders = Math.max(0, numericResult(summary.folders_completed) || detailFolders);
+  if (operation.status === "completed" && numericResult(summary.upload_failed) === 0) {
+    completedFolders = totalFolders;
+  }
+  completedFolders = Math.min(totalFolders, completedFolders);
+  const filesFound = numericResult(summary.files_found);
+  const totalFiles = Math.max(0, filesFound || plannedFiles);
+  const filesCompleted = Math.min(totalFiles, Math.max(0, numericResult(summary.files_deleted)));
+  const filesRemaining = operation.result
+    ? Math.max(0, numericResult(summary.files_remaining))
+    : totalFiles;
+  const percent = totalFolders > 0
+    ? Math.round((completedFolders / totalFolders) * 100)
+    : totalFiles > 0
+      ? Math.round((filesCompleted / totalFiles) * 100)
+      : operation.status === "completed" ? 100 : 0;
+  return {
+    totalFolders,
+    completedFolders,
+    totalFiles,
+    filesCompleted,
+    filesRemaining,
+    failedAttempts: Math.max(0, numericResult(summary.upload_failed)),
+    currentDataset: stringResult(summary.current_dataset),
+    percent: Math.max(0, Math.min(100, percent))
+  };
+}
+
+function summarizeServerUploadOperations(operations: ServerOperation[]) {
+  const progress = operations.map(serverUploadOperationProgress);
+  const totalFolders = progress.reduce((total, item) => total + item.totalFolders, 0);
+  const completedFolders = progress.reduce((total, item) => total + item.completedFolders, 0);
+  const totalFiles = progress.reduce((total, item) => total + item.totalFiles, 0);
+  const filesCompleted = progress.reduce((total, item) => total + item.filesCompleted, 0);
+  return {
+    totalFolders,
+    completedFolders,
+    totalFiles,
+    filesCompleted,
+    percent: totalFolders > 0 ? Math.round((completedFolders / totalFolders) * 100) : 0,
+    completedServers: operations.filter((operation) => operation.status === "completed").length,
+    failedServers: operations.filter((operation) => operation.status === "failed" || operation.status === "canceled").length,
+    runningServers: operations.filter((operation) => operation.status === "running").length,
+    deployingServers: operations.filter((operation) => operation.status === "queued" || operation.status === "deploying").length,
+    failedAttempts: progress.reduce((total, item) => total + item.failedAttempts, 0),
+    currentDatasets: [...new Set(progress.map((item) => item.currentDataset).filter(Boolean))].slice(0, 4)
+  };
+}
+
+function uploadPlanItemKey(item: ServerUploadItem): string {
+  return `${item.resultsDir}:${item.fileFormat}`;
+}
+
+function uploadResultItemKey(detail: Record<string, number | string | boolean | null>): string {
+  return `${stringResult(detail.results_dir)}:${stringResult(detail.file_format)}`;
+}
+
 function uploadItemsFromCandidate(candidate: ServerUploadCandidate): ServerUploadItem[] {
   return ([
     ["parquet", candidate.parquetCount],
@@ -5584,6 +5823,15 @@ function serverOperationCompactResult(operation: ServerOperation): { label: stri
   const success = numericResult(summary.upload_success);
   const failed = numericResult(summary.upload_failed);
   const uploadedFiles = numericResult(summary.files_uploaded);
+  if (!serverOperationIsTerminal(operation)) {
+    const progress = serverUploadOperationProgress(operation);
+    return {
+      label: progress.totalFolders > 0
+        ? `${progress.completedFolders}/${progress.totalFolders} folders`
+        : "starting",
+      tone: "active"
+    };
+  }
   if (operation.status === "failed" || failed > 0) {
     return { label: success > 0 ? `${success} ok / ${failed || 1} failed` : "failed", tone: "danger" };
   }
@@ -5605,6 +5853,12 @@ function serverOperationResultDetail(operation: ServerOperation): string | null 
     const uploaded = numericResult(operation.result.summary.files_uploaded);
     const deleted = numericResult(operation.result.summary.files_deleted);
     const remaining = numericResult(operation.result.summary.files_remaining);
+    const currentDataset = stringResult(operation.result.summary.current_dataset);
+    if (!serverOperationIsTerminal(operation)) {
+      return currentDataset
+        ? `${deleted} cleaned · ${displayDatasetName(currentDataset)} uploading`
+        : `${deleted} cleaned · ${remaining} remaining`;
+    }
     if (operation.status !== "failed") {
       return `${uploaded} uploaded · ${deleted} deleted locally · ${remaining} remaining`;
     }
@@ -5654,6 +5908,10 @@ function serverOperationResultDetail(operation: ServerOperation): string | null 
 
 function numericResult(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function stringResult(value: unknown): string {
+  return typeof value === "string" ? value : "";
 }
 
 function serverOperationConfirmTitle(action: PendingServerOperationAction["action"]): string {
@@ -5827,7 +6085,10 @@ function summarizeFailurePoolReasons(entries: ParallelFailurePoolEntry[]): Array
 }
 
 function failurePoolEntryIsRetryable(entry: ParallelFailurePoolEntry): boolean {
-  return entry.failureReason !== "best_server_skipped";
+  return (
+    (entry.status === "pending" || entry.status === "failed") &&
+    entry.failureReason !== "best_server_skipped"
+  );
 }
 
 function failureReasonLabel(reason: ParallelFailureReason): string {

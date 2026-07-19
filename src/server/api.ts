@@ -739,7 +739,16 @@ export function createApp({
 
   app.delete("/api/parallel-jobs/failure-pool", (_request, response) => {
     try {
-      const cleared = solverJobService.clearFailurePool();
+      const rangePath = typeof _request.query.rangePath === "string" ? _request.query.rangePath.trim() : "";
+      const datasetName = typeof _request.query.datasetName === "string" ? _request.query.datasetName.trim() : "";
+      if (!rangePath || !datasetName) {
+        response.status(400).json({
+          error: "parallel_failure_pool_scope_required",
+          message: "rangePath and datasetName are required to clear a failure pool."
+        });
+        return;
+      }
+      const cleared = solverJobService.clearFailurePool(rangePath, datasetName);
       response.json({ ...cleared, ...solverJobService.listParallelJobs() });
     } catch (error) {
       respondSolverJobError(response, error, "parallel_failure_pool_clear_failed");
@@ -764,7 +773,7 @@ export function createApp({
 
   app.delete("/api/parallel-jobs/:id", (request, response) => {
     try {
-      response.json({ ...solverJobService.deleteQueuedParallelRun(request.params.id), ...solverJobService.listParallelJobs() });
+      response.json({ ...solverJobService.deleteParallelRun(request.params.id), ...solverJobService.listParallelJobs() });
     } catch (error) {
       respondSolverJobError(response, error, "parallel_solver_job_delete_failed");
     }
@@ -797,9 +806,13 @@ export function createApp({
     }
   });
 
-  app.get("/api/server-operations", async (_request, response) => {
+  app.get("/api/server-operations", async (request, response) => {
     try {
-      response.json(await solverJobService.listServerOperations());
+      const shouldReconcile = request.query.reconcile === "1" || request.query.reconcile === "true";
+      response.json(shouldReconcile
+        ? await solverJobService.refreshServerOperations()
+        : await solverJobService.listServerOperations()
+      );
     } catch (error) {
       respondSolverJobError(response, error, "server_operations_list_failed");
     }
@@ -1879,7 +1892,7 @@ function respondSolverJobError(
   const message = error instanceof Error ? error.message : String(error);
   const status = /not found|does not exist/i.test(message)
     ? 404
-      : /already has active|must be stopped|must be canceled|confirmation is required|must be approved|dataset repo is missing|online server|is offline|is unknown|only queued/i.test(message)
+      : /already has active|active solver task|must be stopped|must be canceled|confirmation is required|must be approved|dataset repo is missing|online server|is offline|is unknown|only queued/i.test(message)
       ? 409
       : /missing|must have|required|invalid|outside|not marked studied/i.test(message)
         ? 400
