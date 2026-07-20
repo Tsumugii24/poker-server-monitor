@@ -22,6 +22,17 @@ describe("preflop range helpers", () => {
     expect(document.A.call).toBe("AQs:0.250");
   });
 
+  it("keeps explicit player positions when the upload filename suggests the opposite order", () => {
+    const document = normalizePreflopRangeDocument({
+      player_names: { A: "HERO", B: "VILLIAN" },
+      player_positions: { A: "OOP", B: "IP" },
+      A: { raise: "", call: "AQs:0.250" },
+      B: { raise: "AA", call: "" }
+    }, "SIA-30 vs SOD-28.json");
+
+    expect(document.player_positions).toEqual({ A: "OOP", B: "IP" });
+  });
+
   it("maps legacy run statuses into review and run layers", () => {
     const document = normalizePreflopRangeDocument({
       status: "running",

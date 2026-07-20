@@ -362,6 +362,31 @@ describe("preflop range API", () => {
     });
   });
 
+  it("preserves explicit OOP and IP assignments during upload", async () => {
+    const app = createApp({ db, refreshService: service, preflopRangesPath });
+
+    const response = await request(app)
+      .post("/api/preflop-ranges/upload-many")
+      .send({
+        folder: "3OD-EP",
+        files: [{
+          filename: "SIA-30 vs SOD-28.json",
+          relativePath: "SIA-30 vs SOD-28.json",
+          content: JSON.stringify({
+            player_names: { A: "HERO", B: "VILLIAN" },
+            player_positions: { A: "OOP", B: "IP" },
+            A: { raise: "", call: "AQs:0.250" },
+            B: { raise: "AA", call: "" }
+          })
+        }]
+      });
+
+    expect(response.status).toBe(201);
+    const savedPath = path.join(preflopRangesPath, "3OD-EP", "SIA-30 vs SOD-28.json");
+    const saved = JSON.parse(fs.readFileSync(savedPath, "utf8"));
+    expect(saved.player_positions).toEqual({ A: "OOP", B: "IP" });
+  });
+
   it("renames folders and moves nested range metadata", async () => {
     fs.mkdirSync(path.join(preflopRangesPath, "3OD-EP", "Nested"), { recursive: true });
     fs.writeFileSync(

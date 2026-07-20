@@ -508,6 +508,7 @@ function inferPlayerPositions(
   const positions = { ...document.player_positions };
 
   for (const player of PREFLOP_PLAYERS) {
+    if (positions[player] !== "Unknown") continue;
     const namePosition = classifyPositionLabel(document.player_names[player]);
     if (namePosition !== "Unknown") positions[player] = namePosition;
   }
@@ -517,11 +518,11 @@ function inferPlayerPositions(
   if (left && right) {
     const leftPosition = classifyPositionLabel(left);
     const rightPosition = classifyPositionLabel(right);
-    if (leftPosition !== "Unknown") positions.A = leftPosition;
-    if (rightPosition !== "Unknown") positions.B = rightPosition;
+    if (positions.A === "Unknown" && leftPosition !== "Unknown") positions.A = leftPosition;
+    if (positions.B === "Unknown" && rightPosition !== "Unknown") positions.B = rightPosition;
   } else if (stem) {
     const filePosition = classifyPositionLabel(stem);
-    if (filePosition !== "Unknown") positions.A = filePosition;
+    if (positions.A === "Unknown" && filePosition !== "Unknown") positions.A = filePosition;
   }
 
   if (positions.A !== "Unknown" && positions.B === "Unknown") positions.B = oppositePosition(positions.A);
