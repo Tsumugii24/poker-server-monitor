@@ -103,8 +103,15 @@ if [[ "$BACKGROUND" -eq 0 ]]; then
 fi
 
 echo "Starting dashboard in the background on $APP_URL ..."
-npm start > server-monitor.log 2>&1 &
-SERVER_PID=$!
+if command -v setsid >/dev/null 2>&1; then
+  # Detach from the launcher's session so the server survives SSH logout,
+  # terminal closure, and non-interactive process supervisors.
+  setsid -f npm start > server-monitor.log 2>&1 < /dev/null
+  SERVER_PID="detached"
+else
+  nohup npm start > server-monitor.log 2>&1 < /dev/null &
+  SERVER_PID=$!
+fi
 
 READY=0
 for _ in {1..20}; do

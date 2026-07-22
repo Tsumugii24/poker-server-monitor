@@ -1502,6 +1502,68 @@ describe("solver job API", () => {
     )).toBe(true);
   });
 
+  it("follows a fresh completion snapshot instead of pinning the state from before dispatch", async () => {
+    const executor: SshExecutor = {
+      run: vi.fn(async (_server, _credentials, command) => {
+        if (isCodeReadyCommand(command)) return codeReadyOutput();
+        return "ok";
+      })
+    };
+    const solverJobService = new SolverJobService({
+      db,
+      preflopRangesPath,
+      credentials: { username: "root", password: "secret" },
+      executor,
+      defaultPipelineStatusFilePath: "~/run/solver_running_status.json",
+      repoNamespace: "Tsumugii",
+      hfToken: "hf_test_token"
+    });
+    const app = createApp({ db, refreshService, preflopRangesPath, solverJobService });
+    const rangePath = "3OD-EP/3OD-4.3 vs 3IA-4.2.json";
+    const previousCollectedAt = new Date(Date.now() - 60_000).toISOString();
+    db.insertPipelineSnapshot(idlePipelineSnapshot("solver-01", previousCollectedAt));
+    await approveRange(app, rangePath);
+
+    const created = await request(app)
+      .post("/api/jobs")
+      .send({ serverId: "solver-01", rangePath, settings: { uploadEnabled: false } });
+    const started = await request(app).post(`/api/jobs/${created.body.job.id}/start`);
+    expect(started.status).toBe(200);
+
+    const completedAt = new Date(Date.parse(started.body.job.startedAt) + 20_000).toISOString();
+    const completedSnapshot: PipelineStatusSnapshot = {
+      ...failedPipelineSnapshot({
+        serverId: "solver-01",
+        repoId: started.body.job.repoId,
+        datasetName: started.body.job.datasetName,
+        assignedIndices: [],
+        completedIndices: [],
+        failedIndices: []
+      }),
+      id: "fresh-completion-after-dispatch",
+      collectedAt: completedAt,
+      fileStatus: "completed",
+      displayStatus: "completed",
+      resultPath: started.body.job.remoteResultPath,
+      startedAt: started.body.job.startedAt,
+      updatedAt: completedAt,
+      finishedAt: completedAt,
+      error: null,
+      errorCode: null,
+      errorMessage: null
+    };
+    db.insertPipelineSnapshot(completedSnapshot);
+
+    const list = await request(app).get("/api/jobs");
+
+    expect(list.status).toBe(200);
+    expect(list.body.jobs[0]).toMatchObject({
+      id: created.body.job.id,
+      status: "completed",
+      pipeline: { id: completedSnapshot.id }
+    });
+  });
+
   it("fails an active job without attaching a newer unrelated pipeline snapshot", async () => {
     const executor: SshExecutor = {
       run: vi.fn(async (_server, _credentials, command) => {
@@ -2879,6 +2941,19 @@ describe("solver job API", () => {
       successRate: 1
     });
     expect(afterLaterTask?.slices[0]?.job?.pipeline?.id).toBe(completedSnapshot.id);
+
+    const afterRetentionWindow = new Date(Date.parse(completedSnapshot.collectedAt) + 48 * 60 * 60_000).toISOString();
+    db.pruneSnapshots(24, afterRetentionWindow);
+
+    const afterPruning = solverJobService.listParallelJobs().runs.find((run) => run.id === created.body.run.id);
+    expect(afterPruning?.report).toMatchObject({
+      totalBoards: 1755,
+      completedBoards: 1755,
+      failedBoards: 0,
+      successRate: 1
+    });
+    expect(afterPruning?.slices[0]?.job?.pipeline?.id).toBe(completedSnapshot.id);
+    expect(db.getPipelineSnapshot("later-unrelated-snapshot")).toBeNull();
   });
 
   it("deletes terminal parallel history with its jobs, slices, events, and linked failure pool", async () => {

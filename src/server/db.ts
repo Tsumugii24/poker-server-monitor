@@ -247,7 +247,17 @@ export class MonitorDatabase {
   pruneSnapshots(hours: number, now = new Date().toISOString()): void {
     const cutoff = new Date(new Date(now).getTime() - hours * 60 * 60 * 1000).toISOString();
     this.database.run("DELETE FROM metric_snapshots WHERE collected_at < ?", [cutoff]);
-    this.database.run("DELETE FROM pipeline_status_snapshots WHERE collected_at < ?", [cutoff]);
+    this.database.run(
+      `DELETE FROM pipeline_status_snapshots
+       WHERE collected_at < ?
+         AND id NOT IN (
+           SELECT pipeline_snapshot_id
+           FROM solver_jobs
+           WHERE pipeline_snapshot_id IS NOT NULL
+             AND status IN ('completed', 'failed', 'canceled', 'interrupted')
+         )`,
+      [cutoff]
+    );
     this.persist();
   }
 
@@ -423,7 +433,7 @@ export class MonitorDatabase {
         job.parallelSliceId,
         JSON.stringify(job.assignedIndices),
         job.sourceType,
-        job.pipeline?.id ?? null,
+        solverJobStatusIsTerminal(job.status) ? job.pipeline?.id ?? null : null,
         job.createdAt,
         job.updatedAt,
         job.startedAt,
@@ -444,12 +454,14 @@ export class MonitorDatabase {
     }
 
     const updatedAt = patch.updatedAt ?? new Date().toISOString();
-    const enteringTerminal = patch.status !== undefined && solverJobStatusIsTerminal(patch.status);
-    const pipelineSnapshotId = patch.pipeline !== undefined
-      ? patch.pipeline?.id ?? null
-      : enteringTerminal && current.pipeline && pipelineSnapshotBelongsToJobIdentity(current.pipeline, current)
-        ? current.pipeline.id
-        : this.getSolverJobPipelineSnapshotId(id);
+    const nextStatus = patch.status ?? current.status;
+    const pipelineSnapshotId = solverJobStatusIsTerminal(nextStatus)
+      ? patch.pipeline !== undefined
+        ? patch.pipeline?.id ?? null
+        : current.pipeline && pipelineSnapshotBelongsToJobIdentity(current.pipeline, current)
+          ? current.pipeline.id
+          : this.getSolverJobPipelineSnapshotId(id)
+      : null;
     this.database.run(
       `UPDATE solver_jobs
        SET status = ?, started_at = ?, finished_at = ?, last_error = ?, updated_at = ?, pipeline_snapshot_id = ?
@@ -532,11 +544,15 @@ export class MonitorDatabase {
   }
 
   private getPipelineSnapshotForSolverJob(row: Record<string, SqlValue>): PipelineStatusSnapshot | null {
-    const storedSnapshotId = row.pipeline_snapshot_id == null ? "" : String(row.pipeline_snapshot_id).trim();
-    if (storedSnapshotId) return this.getPipelineSnapshot(storedSnapshotId);
-
     const status = String(row.status) as SolverJobStatus;
-    if (solverJobStatusIsTerminal(status)) return null;
+    const storedSnapshotId = row.pipeline_snapshot_id == null ? "" : String(row.pipeline_snapshot_id).trim();
+    // Active jobs must follow the newest server state. Older versions pinned the
+    // snapshot that existed before dispatch, which could permanently hide the
+    // job's eventual completion (and became a dangling reference after pruning).
+    // A stored snapshot is meaningful only after a job reaches a terminal state.
+    if (solverJobStatusIsTerminal(status)) {
+      return storedSnapshotId ? this.getPipelineSnapshot(storedSnapshotId) : null;
+    }
     const latest = this.getLatestPipelineSnapshot(String(row.server_id));
     return latest && pipelineSnapshotCanReconcileSolverJob(latest, row) ? latest : null;
   }
@@ -1666,11 +1682,8 @@ function pipelineSnapshotCanReconcileSolverJob(
   snapshot: PipelineStatusSnapshot,
   row: Record<string, SqlValue>
 ): boolean {
-  if (pipelineSnapshotBelongsToJobIdentity(snapshot, {
-    id: String(row.id),
-    repoId: String(row.repo_id),
-    datasetName: String(row.dataset_name)
-  })) return true;
+  const jobId = String(row.id);
+  if (snapshot.resultPath?.includes(jobId) || snapshot.command?.includes(jobId)) return true;
 
   const jobReference = Date.parse(
     row.started_at == null ? String(row.created_at) : String(row.started_at)

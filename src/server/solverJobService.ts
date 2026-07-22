@@ -466,7 +466,9 @@ export class SolverJobService {
       startedAt: null,
       finishedAt: null,
       lastError: null,
-      pipeline: preview.server.pipeline
+      // A queued job has not produced a pipeline snapshot yet. Keeping the
+      // server's previous snapshot here would pin unrelated pre-dispatch state.
+      pipeline: null
     };
 
     if (job.queueMode === "queue_next") {
@@ -2139,7 +2141,9 @@ export class SolverJobService {
       startedAt: null,
       finishedAt: null,
       lastError: null,
-      pipeline: server.pipeline
+      // The current server snapshot predates this job. Active jobs resolve their
+      // pipeline dynamically from snapshots collected after dispatch.
+      pipeline: null
     };
     this.options.db.insertSolverJob(job);
     this.options.db.updateParallelSolverSlice(slice.id, {
