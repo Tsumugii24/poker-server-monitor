@@ -2726,6 +2726,73 @@ describe("solver job API", () => {
     expect(db.getActiveSolverJobForServer("solver-02")?.datasetName).toBe("parallel-b");
   });
 
+  it("assigns queued chunks to online idle servers added after an auto-scaling run was created", async () => {
+    const executor: SshExecutor = {
+      run: vi.fn(async (_server, _credentials, command) => {
+        if (command.includes("cards/cards.txt")) return solverCardsText();
+        if (command.includes("DISPATCH_READY")) return "DISPATCH_READY=1\n";
+        if (isCodeReadyCommand(command)) return codeReadyOutput();
+        commands.push(command);
+        return "ok";
+      })
+    };
+    const solverJobService = new SolverJobService({
+      db,
+      preflopRangesPath,
+      credentials: { username: "root", password: "secret" },
+      executor,
+      defaultPipelineStatusFilePath: "~/run/solver_running_status.json",
+      repoNamespace: "Tsumugii",
+      hfToken: "hf_test_token"
+    });
+    const app = createApp({ db, refreshService, preflopRangesPath, solverJobService });
+    const rangePath = "3OD-EP/3OD-4.3 vs 3IA-4.2.json";
+    await approveRange(app, rangePath);
+
+    const created = await request(app)
+      .post("/api/parallel-jobs")
+      .send({
+        rangePath,
+        datasetName: "parallel-auto-scale",
+        serverIds: ["solver-01"],
+        autoIncludeNewServers: true,
+        chunkCount: 2,
+        settings: { uploadEnabled: false },
+        confirmDatasetName: true,
+        queueMode: "queue_next"
+      });
+
+    expect(created.status).toBe(201);
+    expect(created.body.run.autoIncludeNewServers).toBe(true);
+    expect(created.body.run.slices).toHaveLength(2);
+    expect(created.body.run.slices.every((slice: { candidateServerIds: string[] }) =>
+      JSON.stringify(slice.candidateServerIds) === JSON.stringify(["solver-01"])
+    )).toBe(true);
+
+    db.syncServers([
+      ...servers,
+      {
+        id: "solver-02",
+        name: "Solver 02",
+        host: "10.0.0.2",
+        port: 22,
+        enabled: true,
+        note: "TBD",
+        solverRoot: "/srv/solver",
+        tmuxSession: "solver",
+        pipelineStatusFilePath: "~/run/status.json"
+      }
+    ]);
+    db.insertSnapshot(metricSnapshot("solver-02", "online"));
+
+    await solverJobService.reconcileAndStartQueuedJobs();
+
+    const run = solverJobService.listParallelJobs().runs.find((candidate) => candidate.id === created.body.run.id);
+    expect(run?.slices.map((slice) => slice.serverId).sort()).toEqual(["solver-01", "solver-02"]);
+    expect(run?.slices.every((slice) => slice.status === "running")).toBe(true);
+    expect(commands.filter((command) => command.includes("run_pipeline.py"))).toHaveLength(2);
+  });
+
   it("keeps running parallel runs locked while reordering later queued runs", async () => {
     const executor: SshExecutor = {
       run: vi.fn(async (_server, _credentials, command) => {

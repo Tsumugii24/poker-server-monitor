@@ -5667,6 +5667,69 @@ td .port-value {
   background: var(--bg-elevated);
 }
 
+.parallel-queue-title {
+  align-items: center;
+}
+
+.parallel-queue-move-controls {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.parallel-queue-selection {
+  margin-right: 2px;
+  color: var(--text-tertiary);
+  font-size: 11px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.parallel-queue-move-button {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0;
+  color: var(--accent);
+  background: var(--bg-base);
+  cursor: pointer;
+  transition: border-color 0.16s ease, background 0.16s ease, color 0.16s ease;
+}
+
+.parallel-queue-move-button:hover:not(:disabled),
+.parallel-queue-move-button:focus-visible {
+  border-color: color-mix(in srgb, var(--accent) 52%, var(--border));
+  color: var(--accent-strong);
+  background: var(--accent-subtle);
+}
+
+.parallel-queue-move-button:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 50%, transparent);
+  outline-offset: 2px;
+}
+
+.parallel-queue-move-button:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+
+.parallel-queue-notice {
+  margin: 0;
+  border: 1px solid color-mix(in srgb, var(--yellow) 34%, var(--border));
+  border-radius: var(--radius-sm);
+  padding: 7px 9px;
+  color: var(--yellow-text);
+  background: var(--yellow-bg);
+  font-size: 11px;
+  font-weight: 750;
+  line-height: 1.4;
+}
+
 .parallel-history-board {
   display: grid;
   gap: 10px;
@@ -5822,7 +5885,7 @@ td .port-value {
   padding: 12px;
   background: var(--bg-base);
   cursor: pointer;
-  transition: border-color 0.16s ease, box-shadow 0.16s ease, transform 0.16s ease, opacity 0.16s ease;
+  transition: border-color 0.16s ease, box-shadow 0.16s ease, background 0.16s ease;
 }
 
 .parallel-queue-item.parallel-history-item {
@@ -5870,18 +5933,12 @@ td .port-value {
 }
 
 .parallel-queue-item.movable {
-  cursor: grab;
+  cursor: pointer;
 }
 
 .parallel-queue-item.movable:hover {
   border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
   box-shadow: 0 10px 24px color-mix(in srgb, var(--accent) 9%, transparent);
-}
-
-.parallel-queue-item.dragging {
-  cursor: grabbing;
-  opacity: 0.56;
-  transform: scale(0.99);
 }
 
 .parallel-queue-item.locked {
@@ -5975,7 +6032,6 @@ td .port-value {
 }
 
 .parallel-queue-lock,
-.parallel-queue-grip,
 .parallel-queue-delete {
   width: 24px;
   height: 24px;
@@ -5996,10 +6052,6 @@ td .port-value {
 .parallel-queue-delete:hover:not(:disabled) {
   border-color: color-mix(in srgb, var(--red) 42%, var(--border));
   background: var(--red-bg);
-}
-
-.parallel-queue-grip {
-  color: var(--accent);
 }
 
 .parallel-job-grid {

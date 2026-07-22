@@ -1092,6 +1092,7 @@ export class SolverJobService {
       solverRangeText: basePreview.solverRangeText,
       settings: basePreview.settings,
       selectedServerIds,
+      autoIncludeNewServers: input.autoIncludeNewServers === true,
       availableServers,
       totalBoards: allBoards.length,
       missingIndices: indices,
@@ -1248,6 +1249,7 @@ export class SolverJobService {
       solverRangeText: basePreview.solverRangeText,
       settings: basePreview.settings,
       selectedServerIds: selectedIds,
+      autoIncludeNewServers: false,
       availableServers,
       totalBoards: allBoards.length,
       missingIndices: indices,
@@ -1286,6 +1288,7 @@ export class SolverJobService {
       reportCleared: false,
       queueOrder: this.options.db.getNextParallelSolverQueueOrder(),
       serverIds: preview.selectedServerIds,
+      autoIncludeNewServers: sourceType === "parallel" && preview.autoIncludeNewServers,
       totalIndices: preview.missingIndices,
       missingIndices: preview.missingIndices,
       createdAt: now,
@@ -2079,7 +2082,7 @@ export class SolverJobService {
       const slices = [...run.slices].sort(compareParallelSliceQueue);
       for (const slice of slices) {
         if (slice.status !== "queued") continue;
-        if (!slice.candidateServerIds.includes(serverId)) continue;
+        if (!slice.candidateServerIds.includes(serverId) && !run.autoIncludeNewServers) continue;
         if (!slice.job) return { run, slice, job: null };
         if (parallelSliceJobCanBeReassigned(slice)) return { run, slice, job: slice.job };
       }

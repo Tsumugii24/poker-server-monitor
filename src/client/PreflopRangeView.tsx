@@ -1,5 +1,6 @@
 import {
   ArrowLeft,
+  ChevronLeft,
   ChevronDown,
   ChevronRight,
   Check,
@@ -9,7 +10,6 @@ import {
   FileJson,
   Folder,
   FolderPlus,
-  GripVertical,
   Lock,
   Pencil,
   Play,
@@ -242,7 +242,6 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
   const [parallelChunkCount, setParallelChunkCount] = useState(1);
   const [parallelChunkCountTouched, setParallelChunkCountTouched] = useState(false);
   const [activeParallelRunId, setActiveParallelRunId] = useState<string | null>(null);
-  const [parallelQueueDragId, setParallelQueueDragId] = useState<string | null>(null);
   const [parallelServerTab, setParallelServerTab] = useState<ParallelServerStatusTab>("all");
   const [parallelBestServerId, setParallelBestServerId] = useState(() => localStorage.getItem(PARALLEL_BEST_SERVER_ID_KEY) ?? "");
   const [activeSolverJobTab, setActiveSolverJobTab] = useState<"single" | "parallel" | "operations">("single");
@@ -339,15 +338,11 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
     if (!parallelChunkCountTouched) {
       setParallelChunkCount(Math.max(1, enabledParallelServerCount));
     }
-    setSelectedParallelServerIds((current) => {
-      const enabledIds = overviewResponse.servers
-        .slice()
-        .sort(compareServersByNaturalId)
-        .filter((server) => server.enabled)
-        .map((server) => server.id);
-      const retained = current.filter((id) => enabledIds.includes(id));
-      return retained.length > 0 ? retained : enabledIds;
-    });
+    setSelectedParallelServerIds(overviewResponse.servers
+      .slice()
+      .sort(compareServersByNaturalId)
+      .filter((server) => server.enabled)
+      .map((server) => server.id));
     setSelectedServerId((current) =>
       current && overviewResponse.servers.some((server) => server.id === current)
         ? current
@@ -966,6 +961,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
       scenario: scenarioOverride || undefined,
       datasetName: jobDatasetNameTouched ? jobDatasetName.trim() || undefined : undefined,
       serverIds: selectedParallelServerIds,
+      autoIncludeNewServers: true,
       chunkCount,
       settings: jobSettings,
       confirmUnstudied
@@ -1131,19 +1127,14 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
     }
   };
 
-  const reorderParallelQueue = async (targetRunId: string) => {
-    const draggedRunId = parallelQueueDragId;
-    setParallelQueueDragId(null);
-    if (!draggedRunId || draggedRunId === targetRunId) return;
+  const moveParallelQueue = async (runId: string, direction: "left" | "right") => {
     const movableRunIds = parallelQueueRuns(parallelRuns)
       .filter((run) => run.status === "queued" && !parallelRunIsLocked(run))
       .map((run) => run.id);
-    const fromIndex = movableRunIds.indexOf(draggedRunId);
-    const toIndex = movableRunIds.indexOf(targetRunId);
-    if (fromIndex < 0 || toIndex < 0) return;
-    const [moved] = movableRunIds.splice(fromIndex, 1);
-    if (!moved) return;
-    movableRunIds.splice(toIndex, 0, moved);
+    const fromIndex = movableRunIds.indexOf(runId);
+    const toIndex = fromIndex + (direction === "left" ? -1 : 1);
+    if (fromIndex < 0 || toIndex < 0 || toIndex >= movableRunIds.length) return;
+    [movableRunIds[fromIndex], movableRunIds[toIndex]] = [movableRunIds[toIndex]!, movableRunIds[fromIndex]!];
     setJobBusy("parallel-reorder");
     setJobError(null);
     try {
@@ -2598,10 +2589,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
           onParallelCancel={(run) => void cancelParallelRun(run)}
           onParallelReportsDownload={requestDownloadParallelReports}
           onParallelReportsClear={requestClearParallelReports}
-          parallelQueueDragId={parallelQueueDragId}
-          onParallelQueueDragStart={setParallelQueueDragId}
-          onParallelQueueDragEnd={() => setParallelQueueDragId(null)}
-          onParallelQueueDrop={(runId) => void reorderParallelQueue(runId)}
+          onParallelQueueMove={(runId, direction) => void moveParallelQueue(runId, direction)}
           onJobAction={(job, action) => void runJobAction(job, action)}
         />
       </section>
@@ -3174,10 +3162,7 @@ function SolverJobPanel({
   onParallelCancel,
   onParallelReportsDownload,
   onParallelReportsClear,
-  parallelQueueDragId,
-  onParallelQueueDragStart,
-  onParallelQueueDragEnd,
-  onParallelQueueDrop,
+  onParallelQueueMove,
   onJobAction
 }: {
   servers: ServerRow[];
@@ -3259,10 +3244,7 @@ function SolverJobPanel({
   onParallelCancel: (run: ParallelSolverRun) => void;
   onParallelReportsDownload: () => void;
   onParallelReportsClear: () => void;
-  parallelQueueDragId: string | null;
-  onParallelQueueDragStart: (runId: string) => void;
-  onParallelQueueDragEnd: () => void;
-  onParallelQueueDrop: (runId: string) => void;
+  onParallelQueueMove: (runId: string, direction: "left" | "right") => void;
   onJobAction: (job: SolverJob, action: SolverJobAction) => void;
 }) {
   const selectedServer = servers.find((server) => server.id === selectedServerId) ?? null;
@@ -3625,10 +3607,7 @@ function SolverJobPanel({
           onCancelRun={onParallelCancel}
           onReportsDownload={onParallelReportsDownload}
           onReportsClear={onParallelReportsClear}
-          queueDragId={parallelQueueDragId}
-          onQueueDragStart={onParallelQueueDragStart}
-          onQueueDragEnd={onParallelQueueDragEnd}
-          onQueueDrop={onParallelQueueDrop}
+          onQueueMove={onParallelQueueMove}
         />
       ) : (
         <ServerOperationsPanel
@@ -3840,10 +3819,7 @@ function ParallelSolverJobPanel({
   onCancelRun,
   onReportsDownload,
   onReportsClear,
-  queueDragId,
-  onQueueDragStart,
-  onQueueDragEnd,
-  onQueueDrop
+  onQueueMove
 }: {
   servers: ServerRow[];
   selectedServerIds: string[];
@@ -3878,10 +3854,7 @@ function ParallelSolverJobPanel({
   onCancelRun: (run: ParallelSolverRun) => void;
   onReportsDownload: () => void;
   onReportsClear: () => void;
-  queueDragId: string | null;
-  onQueueDragStart: (runId: string) => void;
-  onQueueDragEnd: () => void;
-  onQueueDrop: (runId: string) => void;
+  onQueueMove: (runId: string, direction: "left" | "right") => void;
 }) {
   const orderedServers = servers.slice().sort(compareServersByNaturalId);
   const enabledServers = orderedServers.filter((server) => server.enabled);
@@ -3938,12 +3911,9 @@ function ParallelSolverJobPanel({
         runs={runs}
         activeRunId={activeInspectionRun?.id ?? null}
         busy={busy}
-        dragId={queueDragId}
         onRunSelect={onRunSelect}
         onRunDelete={onRunDelete}
-        onDragStart={onQueueDragStart}
-        onDragEnd={onQueueDragEnd}
-        onDrop={onQueueDrop}
+        onMove={onQueueMove}
       />
       <ParallelHistoryBoard
         runs={runs}
@@ -4285,36 +4255,83 @@ function ParallelSolverJobPanel({
   );
 }
 
-function ParallelQueueBoard({
+export function ParallelQueueBoard({
   runs,
   activeRunId,
   busy,
-  dragId,
   onRunSelect,
   onRunDelete,
-  onDragStart,
-  onDragEnd,
-  onDrop
+  onMove
 }: {
   runs: ParallelSolverRun[];
   activeRunId: string | null;
   busy: string | null;
-  dragId: string | null;
   onRunSelect: (runId: string) => void;
   onRunDelete: (run: ParallelSolverRun) => void;
-  onDragStart: (runId: string) => void;
-  onDragEnd: () => void;
-  onDrop: (runId: string) => void;
+  onMove: (runId: string, direction: "left" | "right") => void;
 }) {
   const queueRuns = parallelQueueRuns(runs);
-  const movableCount = queueRuns.filter((run) => run.status === "queued" && !parallelRunIsLocked(run)).length;
+  const movableRuns = queueRuns.filter((run) => run.status === "queued" && !parallelRunIsLocked(run));
+  const movableCount = movableRuns.length;
+  const selectedMovableIndex = movableRuns.findIndex((run) => run.id === activeRunId);
+  const selectedMovableRun = selectedMovableIndex >= 0 ? movableRuns[selectedMovableIndex]! : null;
+  const [moveNotice, setMoveNotice] = useState<string | null>(null);
+
+  const selectRun = (runId: string) => {
+    setMoveNotice(null);
+    onRunSelect(runId);
+  };
+
+  const moveSelected = (direction: "left" | "right") => {
+    if (!selectedMovableRun || busy != null) return;
+    if (direction === "left" && selectedMovableIndex === 0) {
+      setMoveNotice("This run is already first in the movable queue.");
+      return;
+    }
+    if (direction === "right" && selectedMovableIndex === movableRuns.length - 1) {
+      setMoveNotice("This run is already last in the movable queue.");
+      return;
+    }
+    setMoveNotice(null);
+    onMove(selectedMovableRun.id, direction);
+  };
 
   return (
     <section className="parallel-queue-board">
-      <div className="parallel-section-title">
-        <strong>Parallel Queue</strong>
-        <span>{queueRuns.length} active / queued · {movableCount} movable</span>
+      <div className="parallel-section-title parallel-section-title-with-actions parallel-queue-title">
+        <div>
+          <strong>Parallel Queue</strong>
+          <span>{queueRuns.length} active / queued · {movableCount} movable</span>
+        </div>
+        <div className="parallel-queue-move-controls">
+          <span className="parallel-queue-selection">
+            {selectedMovableRun ? `Selected ${selectedMovableIndex + 1} / ${movableCount}` : "Select a movable run"}
+          </span>
+          <button
+            className="parallel-queue-move-button"
+            type="button"
+            aria-label="Move selected run left"
+            aria-keyshortcuts="ArrowLeft"
+            title={selectedMovableIndex === 0 ? "Already first in the movable queue" : "Move selected run left"}
+            disabled={!selectedMovableRun || busy != null}
+            onClick={() => moveSelected("left")}
+          >
+            <ChevronLeft size={15} />
+          </button>
+          <button
+            className="parallel-queue-move-button"
+            type="button"
+            aria-label="Move selected run right"
+            aria-keyshortcuts="ArrowRight"
+            title={selectedMovableIndex === movableRuns.length - 1 ? "Already last in the movable queue" : "Move selected run right"}
+            disabled={!selectedMovableRun || busy != null}
+            onClick={() => moveSelected("right")}
+          >
+            <ChevronRight size={15} />
+          </button>
+        </div>
       </div>
+      {moveNotice ? <p className="parallel-queue-notice" role="status">{moveNotice}</p> : null}
       {queueRuns.length === 0 ? (
         <p className="solver-job-empty">No active or queued parallel run.</p>
       ) : (
@@ -4323,8 +4340,6 @@ function ParallelQueueBoard({
             const locked = parallelRunIsLocked(run);
             const movable = run.status === "queued" && !locked && busy == null;
             const active = activeRunId === run.id;
-            const isDragging = dragId === run.id;
-            const canDrop = movable && dragId != null && dragId !== run.id;
             const dispatch = parallelDispatchState(run);
             const runningServers = run.slices.filter((slice) => slice.status === "running").map((slice) => formatSliceServerId(slice));
             const serverText = runningServers.length > 0
@@ -4339,36 +4354,22 @@ function ParallelQueueBoard({
                   run.sourceType,
                   locked ? "locked" : "",
                   movable ? "movable" : "",
-                  active ? "active" : "",
-                  isDragging ? "dragging" : ""
+                  active ? "active" : ""
                 ].filter(Boolean).join(" ")}
                 role="button"
                 tabIndex={0}
                 aria-pressed={active}
-                draggable={movable}
-                onClick={() => onRunSelect(run.id)}
+                onClick={() => selectRun(run.id)}
                 onKeyDown={(event) => {
-                  if (event.key !== "Enter" && event.key !== " ") return;
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    selectRun(run.id);
+                    return;
+                  }
+                  if (!active || !movable || (event.key !== "ArrowLeft" && event.key !== "ArrowRight")) return;
                   event.preventDefault();
-                  onRunSelect(run.id);
+                  moveSelected(event.key === "ArrowLeft" ? "left" : "right");
                 }}
-                onDragStart={(event) => {
-                  if (!movable) return;
-                  event.dataTransfer.effectAllowed = "move";
-                  event.dataTransfer.setData("text/plain", run.id);
-                  onDragStart(run.id);
-                }}
-                onDragOver={(event) => {
-                  if (!canDrop) return;
-                  event.preventDefault();
-                  event.dataTransfer.dropEffect = "move";
-                }}
-                onDrop={(event) => {
-                  if (!canDrop) return;
-                  event.preventDefault();
-                  onDrop(run.id);
-                }}
-                onDragEnd={onDragEnd}
               >
                 <div className="parallel-queue-rank">{index + 1}</div>
                 <div className="parallel-queue-marker" aria-hidden="true" />
@@ -4387,25 +4388,20 @@ function ParallelQueueBoard({
                       <Lock size={12} />
                     </span>
                   ) : (
-                    <>
-                      {movable ? (
-                        <button
-                          className="parallel-queue-delete"
-                          type="button"
-                          title="Delete queued run"
-                          disabled={busy === `parallel-delete:${run.id}`}
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            onRunDelete(run);
-                          }}
-                        >
-                          <Trash2 size={12} />
-                        </button>
-                      ) : null}
-                      <span className="parallel-queue-grip" title={movable ? "Drag to reorder" : "Queued run can be moved after refresh"}>
-                        <GripVertical size={14} />
-                      </span>
-                    </>
+                    movable ? (
+                      <button
+                        className="parallel-queue-delete"
+                        type="button"
+                        title="Delete queued run"
+                        disabled={busy === `parallel-delete:${run.id}`}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          onRunDelete(run);
+                        }}
+                      >
+                        <Trash2 size={12} />
+                      </button>
+                    ) : null
                   )}
                 </div>
               </article>

@@ -561,9 +561,9 @@ export class MonitorDatabase {
     this.database.run(
       `INSERT INTO parallel_solver_runs (
         id, source_type, range_path, range_name, dataset_name, scenario, repo_id,
-        settings_json, solver_range_text, status, report_cleared, server_ids_json, total_indices_json,
+        settings_json, solver_range_text, status, report_cleared, server_ids_json, auto_include_new_servers, total_indices_json,
         missing_indices_json, queue_order, created_at, updated_at, started_at, finished_at, last_error
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         run.id,
         run.sourceType,
@@ -577,6 +577,7 @@ export class MonitorDatabase {
         run.status,
         run.reportCleared ? 1 : 0,
         JSON.stringify(run.serverIds),
+        run.autoIncludeNewServers ? 1 : 0,
         JSON.stringify(run.totalIndices),
         JSON.stringify(run.missingIndices),
         run.queueOrder,
@@ -1348,6 +1349,7 @@ export class MonitorDatabase {
         status TEXT NOT NULL,
         report_cleared INTEGER NOT NULL DEFAULT 0,
         server_ids_json TEXT NOT NULL,
+        auto_include_new_servers INTEGER NOT NULL DEFAULT 0,
         total_indices_json TEXT NOT NULL,
         missing_indices_json TEXT NOT NULL,
         queue_order INTEGER NOT NULL DEFAULT 0,
@@ -1411,6 +1413,7 @@ export class MonitorDatabase {
     this.ensureSolverJobPipelineSnapshotColumn();
     this.ensureParallelSolverRunQueueOrderColumn();
     this.ensureParallelSolverRunReportClearedColumn();
+    this.ensureParallelSolverRunAutoIncludeNewServersColumn();
     this.ensureParallelSolverSliceCandidateServerColumn();
     this.ensureParallelFailurePoolReasonColumn();
     this.ensureSolverJobResultPathColumn();
@@ -1537,6 +1540,18 @@ export class MonitorDatabase {
     );
     if (!columns.some((column) => column.name === "report_cleared")) {
       this.database.run("ALTER TABLE parallel_solver_runs ADD COLUMN report_cleared INTEGER NOT NULL DEFAULT 0");
+    }
+  }
+
+  private ensureParallelSolverRunAutoIncludeNewServersColumn(): void {
+    const columns = this.query<{ name: string }>(
+      "PRAGMA table_info(parallel_solver_runs)",
+      [],
+      (row) => ({ name: String(row.name) })
+    );
+    if (!columns.some((column) => column.name === "auto_include_new_servers")) {
+      this.database.run("ALTER TABLE parallel_solver_runs ADD COLUMN auto_include_new_servers INTEGER NOT NULL DEFAULT 0");
+      this.database.run("UPDATE parallel_solver_runs SET auto_include_new_servers = 1 WHERE source_type = 'parallel'");
     }
   }
 
@@ -1742,6 +1757,7 @@ function mapParallelSolverRun(row: Record<string, SqlValue>, slices: ParallelSol
     reportCleared: Number(row.report_cleared ?? 0) === 1,
     queueOrder: Number(row.queue_order ?? 0),
     serverIds: parseStringArray(row.server_ids_json),
+    autoIncludeNewServers: Number(row.auto_include_new_servers ?? 0) === 1,
     totalIndices: parseNumberArray(row.total_indices_json),
     missingIndices: parseNumberArray(row.missing_indices_json),
     createdAt: String(row.created_at),

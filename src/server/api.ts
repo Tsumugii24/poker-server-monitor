@@ -1642,6 +1642,9 @@ function isParallelSolverJobPreviewRequest(value: unknown): value is ParallelSol
   if (value.serverIds != null && (!Array.isArray(value.serverIds) || value.serverIds.some((id) => typeof id !== "string"))) {
     return false;
   }
+  if (value.autoIncludeNewServers != null && typeof value.autoIncludeNewServers !== "boolean") {
+    return false;
+  }
   return true;
 }
 

@@ -267,6 +267,7 @@ export type ParallelSolverJobPreviewRequest = {
   scenario?: SolverScenario;
   datasetName?: string;
   serverIds?: string[];
+  autoIncludeNewServers?: boolean;
   chunkCount?: number;
   settings?: Partial<SolverJobSettings>;
   confirmUnstudied?: boolean;
@@ -308,6 +309,7 @@ export type ParallelSolverJobPreview = {
   solverRangeText: string;
   settings: SolverJobSettings;
   selectedServerIds: string[];
+  autoIncludeNewServers: boolean;
   availableServers: ServerRow[];
   totalBoards: number;
   missingIndices: number[];
@@ -354,6 +356,7 @@ export type ParallelSolverRun = {
   reportCleared: boolean;
   queueOrder: number;
   serverIds: string[];
+  autoIncludeNewServers: boolean;
   totalIndices: number[];
   missingIndices: number[];
   createdAt: string;
