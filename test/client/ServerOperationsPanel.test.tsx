@@ -17,6 +17,29 @@ const servers = [{
   latest: { connectionStatus: "online" }
 }] as ServerRow[];
 
+const networkServers = [
+  ...servers,
+  {
+    ...servers[0],
+    id: "21",
+    name: "Solver 21",
+    host: "solver-21.example"
+  },
+  {
+    ...servers[0],
+    id: "22",
+    name: "Solver 22",
+    host: "solver-22.example"
+  },
+  {
+    ...servers[0],
+    id: "23",
+    name: "Solver 23",
+    host: "solver-23.example",
+    latest: { connectionStatus: "offline" }
+  }
+] as ServerRow[];
+
 const candidates: ServerUploadCandidate[] = [{
   id: "1:/home/jane/solver/results/sia-30-sod-13.5/job-1",
   serverId: "1",
@@ -136,6 +159,22 @@ const runningUploadOperation: ServerOperation = {
 };
 
 describe("ServerOperationsPanel", () => {
+  it("starts network sync only on the individually selected servers", async () => {
+    const user = userEvent.setup();
+    const onNetworkSync = vi.fn();
+    renderPanel({ servers: networkServers, onNetworkSync });
+
+    expect(screen.getByRole("button", { name: "Sync Selected" })).toBeDisabled();
+    expect(screen.getByRole("checkbox", { name: "Select server 23 for network sync" })).toBeDisabled();
+
+    await user.click(screen.getByRole("checkbox", { name: "Select server 22 for network sync" }));
+    expect(screen.getByText("1 selected · 3 available")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Sync Selected" }));
+
+    expect(onNetworkSync).toHaveBeenCalledTimes(1);
+    expect(onNetworkSync).toHaveBeenCalledWith(["22"]);
+  });
+
   it("filters retained results and exposes row upload and delete actions", async () => {
     const user = userEvent.setup();
     const onUploadCandidate = vi.fn();

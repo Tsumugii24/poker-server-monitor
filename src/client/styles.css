@@ -862,7 +862,8 @@ td .port-value {
   color: var(--accent);
 }
 
-.inventory-action-button.primary {
+.inventory-action-button.primary,
+.inventory-confirm-button.primary {
   border-color: var(--accent);
   color: var(--accent);
   background: var(--accent-subtle);
@@ -7070,6 +7071,42 @@ td .port-value {
   color: var(--accent);
 }
 
+.server-ops-inventory-selectionbar {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  border-bottom: 1px solid var(--border);
+  padding: 9px 12px;
+  background: color-mix(in srgb, var(--accent-subtle) 38%, var(--bg-base));
+}
+
+.server-ops-inventory-selectionbar .server-ops-muted {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.server-ops-inventory-server-select {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.server-ops-inventory-server-select input {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.server-ops-inventory-server-select input:disabled {
+  cursor: not-allowed;
+}
+
 .server-ops-inventory-card .server-ops-history-table-wrap {
   border-right: 0;
   border-bottom: 0;
@@ -7091,6 +7128,10 @@ td .port-value {
 
 .server-ops-inventory-table th:first-child {
   background: var(--bg-elevated);
+}
+
+.server-ops-inventory-row.selected td {
+  background: color-mix(in srgb, var(--accent-subtle) 62%, var(--bg-base));
 }
 
 .server-ops-history-table th,
@@ -7823,6 +7864,10 @@ td .port-value {
     grid-template-columns: auto minmax(0, 1fr);
   }
 
+  .server-ops-inventory-selectionbar {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
   .server-ops-selection-actions {
     grid-column: 1 / -1;
     justify-content: flex-start;
@@ -7877,6 +7922,7 @@ td .port-value {
 	  .server-ops-upload-row,
 	  .server-ops-upload-filterbar,
 	  .server-ops-upload-selectionbar,
+	  .server-ops-inventory-selectionbar,
 	  .server-ops-network-flow,
 	  .solver-job-preview dl,
 	  .solver-job-card dl {

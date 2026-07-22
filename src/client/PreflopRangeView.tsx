@@ -1350,11 +1350,29 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
     });
   };
 
-  const requestNetworkSyncOperations = () => {
+  const requestNetworkSyncOperations = (serverIds?: string[]) => {
+    const requestedServerIds = serverIds
+      ? [...new Set(serverIds.map((serverId) => serverId.trim()).filter(Boolean))]
+      : null;
+    if (requestedServerIds && requestedServerIds.length === 0) {
+      setJobError("Select at least one online enabled server for network sync.");
+      return;
+    }
+    const requestedServerIdSet = requestedServerIds ? new Set(requestedServerIds) : null;
     const targetServers = servers
       .slice()
       .sort(compareServersByNaturalId)
-      .filter((server) => server.enabled && serverIsOnlineForJob(server));
+      .filter((server) => (
+        server.enabled &&
+        serverIsOnlineForJob(server) &&
+        (!requestedServerIdSet || requestedServerIdSet.has(server.id))
+      ));
+    if (requestedServerIds && targetServers.length !== requestedServerIds.length) {
+      const targetServerIds = new Set(targetServers.map((server) => server.id));
+      const unavailableServerIds = requestedServerIds.filter((serverId) => !targetServerIds.has(serverId));
+      setJobError(`Server ${unavailableServerIds.join(", ")} ${unavailableServerIds.length === 1 ? "is" : "are"} not online and enabled.`);
+      return;
+    }
     if (targetServers.length === 0) {
       setJobError("No online enabled servers are available for network sync.");
       return;
@@ -2871,7 +2889,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
       {pendingServerOperationAction ? (
         <div className="modal-backdrop preflop-confirm-backdrop" role="presentation" onClick={() => setPendingServerOperationAction(null)}>
           <section
-            className={`preflop-confirm-dialog ${pendingServerOperationAction.candidate || pendingServerOperationAction.candidates ? "server-operation-confirm-dialog" : ""}`}
+            className={`preflop-confirm-dialog ${pendingServerOperationAction.candidate || pendingServerOperationAction.candidates || pendingServerOperationAction.action === "network_sync" ? "server-operation-confirm-dialog" : ""}`}
             role="dialog"
             aria-modal="true"
             aria-labelledby="server-operation-confirm-title"
@@ -2891,6 +2909,14 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
                 {serverOperationConfirmTitle(pendingServerOperationAction.action)}
               </h3>
               <p>{serverOperationConfirmCopy(pendingServerOperationAction)}</p>
+              {pendingServerOperationAction.action === "network_sync" && pendingServerOperationAction.serverIds?.length ? (
+                <dl className="server-operation-confirm-details">
+                  <div className="wide">
+                    <dt>Target servers</dt>
+                    <dd className="server-operation-confirm-range-list">{pendingServerOperationAction.serverIds.join(", ")}</dd>
+                  </div>
+                </dl>
+              ) : null}
               {pendingServerOperationAction.candidate ? (
                 <dl className="server-operation-confirm-details">
                   <div><dt>Server</dt><dd>{pendingServerOperationAction.candidate.serverId}</dd></div>
@@ -3205,7 +3231,7 @@ function SolverJobPanel({
   onServerChange: (serverId: string) => void;
   onOperationScanUploads: () => void;
   onOperationSync: () => void;
-  onOperationNetworkSync: () => void;
+  onOperationNetworkSync: (serverIds?: string[]) => void;
   onOperationNetworkCheck: () => void;
   onOperationUpload: () => void;
   onOperationUploadCandidate: (candidate: ServerUploadCandidate) => void;
@@ -4562,7 +4588,7 @@ export function ServerOperationsPanel({
   inventoryLoaded: boolean;
   onScanUploads: () => void;
   onSync: () => void;
-  onNetworkSync: () => void;
+  onNetworkSync: (serverIds?: string[]) => void;
   onNetworkCheck: () => void;
   onUpload: () => void;
   onUploadCandidate: (candidate: ServerUploadCandidate) => void;
@@ -4586,6 +4612,9 @@ export function ServerOperationsPanel({
   const activeUploadServerIds = new Set(
     activeOperations.filter((operation) => operation.type === "upload").map((operation) => operation.serverId)
   );
+  const activeNetworkSyncServerIds = new Set(
+    activeOperations.filter((operation) => operation.type === "network_sync").map((operation) => operation.serverId)
+  );
   const uploadOperations = operations.filter((operation) => operation.type === "upload");
   const operationsByServer = new Map<string, Map<ServerOperation["type"], ServerOperation>>();
   for (const operation of operations) {
@@ -4599,6 +4628,7 @@ export function ServerOperationsPanel({
   const [uploadQuery, setUploadQuery] = useState("");
   const [uploadServerFilter, setUploadServerFilter] = useState("all");
   const [uploadFormatFilter, setUploadFormatFilter] = useState<"all" | SolverUploadFormat>("all");
+  const [selectedNetworkServerIds, setSelectedNetworkServerIds] = useState<Set<string>>(() => new Set());
   const [selectedUploadCandidateIds, setSelectedUploadCandidateIds] = useState<Set<string>>(() => new Set());
   const [uploadDetailOperationId, setUploadDetailOperationId] = useState<string | null>(null);
   const candidateServerIds = useMemo(
@@ -4637,6 +4667,19 @@ export function ServerOperationsPanel({
   const allFilteredCandidatesSelected = filteredCandidateIds.length > 0 &&
     filteredCandidateIds.every((id) => selectedUploadCandidateIds.has(id));
   const someFilteredCandidatesSelected = filteredCandidateIds.some((id) => selectedUploadCandidateIds.has(id));
+  const networkSyncSelectableServers = enabledServers.filter((server) => (
+    serverIsOnlineForJob(server) && !activeNetworkSyncServerIds.has(server.id)
+  ));
+  const networkSyncSelectableServerIds = networkSyncSelectableServers.map((server) => server.id);
+  const networkSyncSelectableServerIdSet = new Set(networkSyncSelectableServerIds);
+  const selectedNetworkServers = enabledServers.filter((server) => selectedNetworkServerIds.has(server.id));
+  const selectedBlockedNetworkServerIds = selectedNetworkServers
+    .filter((server) => !networkSyncSelectableServerIdSet.has(server.id))
+    .map((server) => server.id);
+  const allNetworkSyncServersSelected = networkSyncSelectableServerIds.length > 0 &&
+    networkSyncSelectableServerIds.every((serverId) => selectedNetworkServerIds.has(serverId));
+  const someNetworkSyncServersSelected = networkSyncSelectableServerIds
+    .some((serverId) => selectedNetworkServerIds.has(serverId));
   const uploadDetailOperation = uploadDetailOperationId
     ? operations.find((operation) => operation.id === uploadDetailOperationId) ?? null
     : null;
@@ -4648,6 +4691,42 @@ export function ServerOperationsPanel({
       return new Set([...selected].filter((id) => currentIds.has(id)));
     });
   }, [uploadCandidates]);
+
+  useEffect(() => {
+    const activeServerIds = new Set(
+      operations
+        .filter((operation) => operation.type === "network_sync" && !serverOperationIsTerminal(operation))
+        .map((operation) => operation.serverId)
+    );
+    const currentIds = new Set(
+      servers
+        .filter((server) => server.enabled && serverIsOnlineForJob(server) && !activeServerIds.has(server.id))
+        .map((server) => server.id)
+    );
+    setSelectedNetworkServerIds((selected) => {
+      if ([...selected].every((serverId) => currentIds.has(serverId))) return selected;
+      return new Set([...selected].filter((serverId) => currentIds.has(serverId)));
+    });
+  }, [operations, servers]);
+
+  const toggleNetworkServer = (serverId: string) => {
+    if (!networkSyncSelectableServerIdSet.has(serverId)) return;
+    setSelectedNetworkServerIds((selected) => {
+      const next = new Set(selected);
+      if (next.has(serverId)) next.delete(serverId);
+      else next.add(serverId);
+      return next;
+    });
+  };
+
+  const toggleAllNetworkServers = () => {
+    setSelectedNetworkServerIds((selected) => {
+      const next = new Set(selected);
+      if (allNetworkSyncServersSelected) networkSyncSelectableServerIds.forEach((serverId) => next.delete(serverId));
+      else networkSyncSelectableServerIds.forEach((serverId) => next.add(serverId));
+      return next;
+    });
+  };
 
   const toggleUploadCandidate = (candidateId: string) => {
     setSelectedUploadCandidateIds((selected) => {
@@ -4724,9 +4803,9 @@ export function ServerOperationsPanel({
                 {` · ${onlineServers.length} target${onlineServers.length === 1 ? "" : "s"}`}
               </span>
             </div>
-            <button className="icon-button compact primary" type="button" onClick={onNetworkSync} disabled={operationBusy || onlineServers.length === 0 || !networkSyncConfigured}>
+            <button className="icon-button compact primary" type="button" onClick={() => onNetworkSync()} disabled={operationBusy || onlineServers.length === 0 || !networkSyncConfigured}>
               <Wifi size={14} />
-              New Network Tmux
+              Sync All Online
             </button>
           </div>
           <div className="server-ops-network-flow" aria-label="Network sync workflow">
@@ -4918,7 +4997,7 @@ export function ServerOperationsPanel({
           {inventoryTab === "network" ? (
             <button className="icon-button compact primary" type="button" onClick={onNetworkCheck} disabled={operationBusy || onlineServers.length === 0}>
               <Search size={14} />
-              Check Network
+              Check All Online
             </button>
           ) : null}
         </div>
@@ -4940,12 +5019,62 @@ export function ServerOperationsPanel({
             </button>
           ))}
         </div>
+        {inventoryTab === "network" ? (
+          <div className="server-ops-inventory-selectionbar" role="region" aria-label="Network sync server selection">
+            <span className="server-ops-selection-summary">
+              {selectedNetworkServers.length} selected · {networkSyncSelectableServers.length} available
+            </span>
+            <span className="server-ops-muted">Select only the servers that need Mihomo setup or repair.</span>
+            <div className="server-ops-selection-actions">
+              <button
+                className="inventory-confirm-button"
+                type="button"
+                onClick={() => setSelectedNetworkServerIds(new Set())}
+                disabled={selectedNetworkServers.length === 0}
+              >
+                <X size={13} />
+                Clear
+              </button>
+              <button
+                className="inventory-confirm-button primary"
+                type="button"
+                onClick={() => onNetworkSync(selectedNetworkServers.map((server) => server.id))}
+                disabled={
+                  operationBusy ||
+                  !networkSyncConfigured ||
+                  selectedNetworkServers.length === 0 ||
+                  selectedBlockedNetworkServerIds.length > 0
+                }
+                title={!networkSyncConfigured ? "SUBSCRIPTION_URL is required for network sync" : "Sync Mihomo only on the selected servers"}
+              >
+                <Wifi size={13} />
+                Sync Selected
+              </button>
+            </div>
+          </div>
+        ) : null}
         {enabledServers.length > 0 ? (
           <div className="server-ops-history-table-wrap">
             <table className="server-ops-history-table server-ops-inventory-table">
               <thead>
                 <tr>
-                  <th>Server ID</th>
+                  <th>
+                    {inventoryTab === "network" ? (
+                      <label className="server-ops-inventory-server-select">
+                        <input
+                          type="checkbox"
+                          checked={allNetworkSyncServersSelected}
+                          ref={(input) => {
+                            if (input) input.indeterminate = someNetworkSyncServersSelected && !allNetworkSyncServersSelected;
+                          }}
+                          onChange={toggleAllNetworkServers}
+                          disabled={operationBusy || !networkSyncConfigured || networkSyncSelectableServers.length === 0}
+                          aria-label="Select all available network servers"
+                        />
+                        <span>Server ID</span>
+                      </label>
+                    ) : "Server ID"}
+                  </th>
                   <th>SSH</th>
                   {inventoryTab === "sync" ? <th>Code Sync</th> : null}
                   {inventoryTab === "network" ? <><th>Network Sync</th><th>Network Check</th></> : null}
@@ -4962,6 +5091,19 @@ export function ServerOperationsPanel({
                     operations={operationsByServer.get(server.id) ?? new Map()}
                     inventoryTab={inventoryTab}
                     busy={busy}
+                    networkSelected={selectedNetworkServerIds.has(server.id)}
+                    networkSelectionDisabledReason={
+                      !networkSyncConfigured
+                        ? "SUBSCRIPTION_URL is required for network sync"
+                        : operationBusy
+                          ? "Another server operation request is being processed"
+                          : !serverIsOnlineForJob(server)
+                            ? `Server ${server.id} is unavailable`
+                            : activeNetworkSyncServerIds.has(server.id)
+                              ? `A network sync is already active on server ${server.id}`
+                              : null
+                    }
+                    onNetworkSelect={toggleNetworkServer}
                     onStop={onStop}
                     onRetry={onRetry}
                     onDetails={setUploadDetailOperationId}
@@ -4987,6 +5129,9 @@ function ServerOperationRow({
   operations,
   inventoryTab,
   busy,
+  networkSelected,
+  networkSelectionDisabledReason,
+  onNetworkSelect,
   onStop,
   onRetry,
   onDetails
@@ -4995,6 +5140,9 @@ function ServerOperationRow({
   operations: Map<ServerOperation["type"], ServerOperation>;
   inventoryTab: ServerOperationInventoryTab;
   busy: string | null;
+  networkSelected: boolean;
+  networkSelectionDisabledReason: string | null;
+  onNetworkSelect: (serverId: string) => void;
   onStop: (operation: ServerOperation) => void;
   onRetry: (operation: ServerOperation) => void;
   onDetails: (operationId: string) => void;
@@ -5017,9 +5165,20 @@ function ServerOperationRow({
       ? networkCheck
       : operations.get("upload") ?? null;
   return (
-    <tr className="server-ops-history-row server-ops-inventory-row">
+    <tr className={`server-ops-history-row server-ops-inventory-row ${inventoryTab === "network" && networkSelected ? "selected" : ""}`}>
       <td>
-        <strong>{server.id}</strong>
+        {inventoryTab === "network" ? (
+          <label className="server-ops-inventory-server-select" title={networkSelectionDisabledReason ?? `Select server ${server.id} for network sync`}>
+            <input
+              type="checkbox"
+              checked={networkSelected}
+              onChange={() => onNetworkSelect(server.id)}
+              disabled={Boolean(networkSelectionDisabledReason)}
+              aria-label={`Select server ${server.id} for network sync`}
+            />
+            <strong>{server.id}</strong>
+          </label>
+        ) : <strong>{server.id}</strong>}
       </td>
       <td>
         <ConnectionBadge status={server.latest?.connectionStatus ?? "unknown"} />
