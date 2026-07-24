@@ -6,6 +6,7 @@
     "port": 22,
     "group": "[GROUP_NAME]",
     "enabled": true,
+    "tier": "standard",
     "note": "TBD"
   }
 ]

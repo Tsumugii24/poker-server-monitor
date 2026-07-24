@@ -88,11 +88,11 @@ export class MonitorDatabase {
 
     const stmt = this.database.prepare(`
       INSERT INTO servers (
-        id, name, host, port, group_name, enabled, note,
+        id, name, host, port, group_name, enabled, note, tier,
         solver_root, tmux_session, pipeline_status_file_path,
         created_at, updated_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM servers WHERE id = ?), ?), ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM servers WHERE id = ?), ?), ?)
       ON CONFLICT(id) DO UPDATE SET
         name = excluded.name,
         host = excluded.host,
@@ -100,6 +100,7 @@ export class MonitorDatabase {
         group_name = excluded.group_name,
         enabled = excluded.enabled,
         note = excluded.note,
+        tier = excluded.tier,
         solver_root = excluded.solver_root,
         tmux_session = excluded.tmux_session,
         pipeline_status_file_path = excluded.pipeline_status_file_path,
@@ -116,6 +117,7 @@ export class MonitorDatabase {
           server.group ?? null,
           server.enabled ? 1 : 0,
           server.note,
+          server.tier ?? "standard",
           server.solverRoot ?? null,
           server.tmuxSession ?? null,
           server.pipelineStatusFilePath ?? null,
@@ -143,7 +145,7 @@ export class MonitorDatabase {
   getServers(): ServerConfig[] {
     return this.query<ServerConfig>(
       `SELECT
-        id, name, host, port, group_name, enabled, note,
+        id, name, host, port, group_name, enabled, note, tier,
         solver_root, tmux_session, pipeline_status_file_path
       FROM servers ORDER BY name ASC`,
       [],
@@ -155,7 +157,7 @@ export class MonitorDatabase {
     return (
       this.query<ServerConfig>(
         `SELECT
-          id, name, host, port, group_name, enabled, note,
+          id, name, host, port, group_name, enabled, note, tier,
           solver_root, tmux_session, pipeline_status_file_path
         FROM servers WHERE id = ?`,
         [id],
@@ -1177,6 +1179,7 @@ export class MonitorDatabase {
         group_name TEXT,
         enabled INTEGER NOT NULL,
         note TEXT NOT NULL DEFAULT 'TBD',
+        tier TEXT NOT NULL DEFAULT 'standard',
         solver_root TEXT,
         tmux_session TEXT,
         pipeline_status_file_path TEXT,
@@ -1406,6 +1409,7 @@ export class MonitorDatabase {
         ON parallel_failure_pool_entries(range_path, dataset_name, board_index);
     `);
     this.ensureServerNoteColumn();
+    this.ensureServerTierColumn();
     this.ensureLastDatasetNameColumn();
     this.ensureServerSolverColumns();
     this.ensurePipelineDetailColumns();
@@ -1595,6 +1599,17 @@ export class MonitorDatabase {
     }
   }
 
+  private ensureServerTierColumn(): void {
+    const columns = this.query<{ name: string }>(
+      "PRAGMA table_info(servers)",
+      [],
+      (row) => ({ name: String(row.name) })
+    );
+    if (!columns.some((column) => column.name === "tier")) {
+      this.database.run("ALTER TABLE servers ADD COLUMN tier TEXT NOT NULL DEFAULT 'standard'");
+    }
+  }
+
   private query<T>(
     sql: string,
     params: SqlValue[],
@@ -1638,7 +1653,8 @@ function mapServerConfig(row: Record<string, SqlValue>): ServerConfig {
     port: Number(row.port),
     group: row.group_name == null ? undefined : String(row.group_name),
     enabled: Number(row.enabled) === 1,
-    note: row.note == null ? "TBD" : String(row.note)
+    note: row.note == null ? "TBD" : String(row.note),
+    tier: row.tier === "performance" ? "performance" : "standard"
   };
   if (row.solver_root != null) {
     server.solverRoot = String(row.solver_root);

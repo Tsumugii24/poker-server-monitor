@@ -11,7 +11,8 @@ import {
   saveAlertSettings,
   updateServerInventoryEntry,
   updateServerInventoryNote,
-  updateServerInventoryName
+  updateServerInventoryName,
+  updateServerInventoryTiers
 } from "../../src/server/config";
 
 let tempDir: string;
@@ -39,9 +40,51 @@ describe("server inventory loading", () => {
         host: "10.0.0.1",
         port: 22,
         enabled: true,
-        note: "TBD"
+        note: "TBD",
+        tier: "standard"
       }
     ]);
+  });
+
+  it("loads an explicit Performance Tier and rejects unknown tiers", () => {
+    const file = path.join(tempDir, "servers.json");
+    fs.writeFileSync(
+      file,
+      JSON.stringify([{ id: "prod-01", name: "Production 01", host: "10.0.0.1", tier: "performance" }])
+    );
+
+    expect(loadServerInventory(file)[0]?.tier).toBe("performance");
+
+    fs.writeFileSync(
+      file,
+      JSON.stringify([{ id: "prod-01", name: "Production 01", host: "10.0.0.1", tier: "turbo" }])
+    );
+    expect(() => loadServerInventory(file)).toThrow("servers[0].tier must be performance or standard");
+  });
+
+  it("persists the complete Performance Tier selection", () => {
+    const file = path.join(tempDir, "servers.json");
+    fs.writeFileSync(
+      file,
+      JSON.stringify([
+        { id: "prod-01", name: "Production 01", host: "10.0.0.1", tier: "performance" },
+        { id: "prod-02", name: "Production 02", host: "10.0.0.2" }
+      ])
+    );
+
+    const updated = updateServerInventoryTiers(file, ["prod-02"]);
+
+    expect(updated.map((server) => [server.id, server.tier])).toEqual([
+      ["prod-01", "standard"],
+      ["prod-02", "performance"]
+    ]);
+    expect(JSON.parse(fs.readFileSync(file, "utf8")).map((server: { id: string; tier: string }) => (
+      [server.id, server.tier]
+    ))).toEqual([
+      ["prod-01", "standard"],
+      ["prod-02", "performance"]
+    ]);
+    expect(() => updateServerInventoryTiers(file, ["missing"])).toThrow("Server missing not found");
   });
 
   it("rejects duplicate server ids", () => {
@@ -157,7 +200,8 @@ describe("server inventory loading", () => {
       host: "10.0.0.8",
       port: 2222,
       enabled: false,
-      note: "Updated solver"
+      note: "Updated solver",
+      tier: "standard"
     });
     expect(JSON.parse(fs.readFileSync(file, "utf8"))).toEqual([
       { id: "prod-01", name: "Production 01", host: "10.0.0.8", port: 2222, enabled: false, note: "Updated solver" }

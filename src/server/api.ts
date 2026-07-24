@@ -21,6 +21,7 @@ import {
   loadServerInventory,
   saveAlertSettings,
   updateServerInventoryEntry,
+  updateServerInventoryTiers,
   type ServerInventoryCreateInput,
   type ServerInventoryUpdateInput
 } from "./config";
@@ -189,6 +190,26 @@ export function createApp({
 
   app.get("/api/servers", (_request, response) => {
     response.json(db.getServers());
+  });
+
+  app.put("/api/servers/tiers", (request, response) => {
+    if (
+      !isRecord(request.body) ||
+      !Array.isArray(request.body.performanceServerIds) ||
+      request.body.performanceServerIds.some((serverId) => typeof serverId !== "string")
+    ) {
+      response.status(400).json({ error: "invalid_server_tiers" });
+      return;
+    }
+
+    try {
+      updateServerInventoryTiers(inventoryPath, request.body.performanceServerIds);
+      syncServerInventory(db, refreshService, inventoryPath);
+      response.json({ servers: db.getServerRows() });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      response.status(400).json({ error: "invalid_server_tiers", message });
+    }
   });
 
   app.post("/api/servers", (request, response) => {
@@ -1666,9 +1687,6 @@ function isParallelFailurePoolPreviewRequest(value: unknown): value is ParallelF
   if (!isParallelSolverJobPreviewRequest(value)) return false;
   const candidate = value as Record<string, unknown>;
   if (candidate.indices != null && (!Array.isArray(candidate.indices) || candidate.indices.some((index) => typeof index !== "number"))) {
-    return false;
-  }
-  if (candidate.bestServerId != null && typeof candidate.bestServerId !== "string") {
     return false;
   }
   return true;

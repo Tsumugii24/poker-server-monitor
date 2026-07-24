@@ -15,6 +15,9 @@ export type ConnectionStatus = (typeof CONNECTION_STATUSES)[number];
 export const HEALTH_LEVELS = ["healthy", "warning", "dangerous"] as const;
 export type HealthLevel = (typeof HEALTH_LEVELS)[number];
 
+export const SERVER_TIERS = ["performance", "standard"] as const;
+export type ServerTier = (typeof SERVER_TIERS)[number];
+
 export type RefreshTrigger = "manual" | "scheduled" | "startup";
 
 export type RefreshRunStatus = "running" | "completed" | "failed";
@@ -27,6 +30,7 @@ export type ServerConfig = {
   group?: string;
   enabled: boolean;
   note: string;
+  tier?: ServerTier;
   solverRoot?: string;
   tmuxSession?: string;
   pipelineStatusFilePath?: string;
@@ -234,6 +238,14 @@ export type ServerRow = ServerConfig & {
   latest: MetricSnapshot | null;
   pipeline: PipelineStatusSnapshot | null;
   lastDatasetName: string | null;
+};
+
+export type ServerTierUpdateRequest = {
+  performanceServerIds: string[];
+};
+
+export type ServerTierUpdateResponse = {
+  servers: ServerRow[];
 };
 
 export type RefreshRun = {

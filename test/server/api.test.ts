@@ -135,6 +135,42 @@ describe("monitor API", () => {
     expect(JSON.parse(fs.readFileSync(inventoryPath, "utf8"))[0].note).toBe("Primary solver");
   });
 
+  it("updates server tiers in the inventory file and database", async () => {
+    fs.writeFileSync(inventoryPath, JSON.stringify([
+      ...servers,
+      { id: "prod-02", name: "Production 02", host: "10.0.0.2", port: 22, enabled: true, note: "TBD" }
+    ]));
+
+    const response = await request(createApp({ db, refreshService: service, inventoryPath }))
+      .put("/api/servers/tiers")
+      .send({ performanceServerIds: ["prod-02"] });
+
+    expect(response.status).toBe(200);
+    expect(response.body.servers.map((server: ServerConfig) => [server.id, server.tier])).toEqual([
+      ["prod-01", "standard"],
+      ["prod-02", "performance"]
+    ]);
+    expect(db.getServers().map((server) => [server.id, server.tier])).toEqual([
+      ["prod-01", "standard"],
+      ["prod-02", "performance"]
+    ]);
+    expect(JSON.parse(fs.readFileSync(inventoryPath, "utf8")).map((server: ServerConfig) => (
+      [server.id, server.tier]
+    ))).toEqual([
+      ["prod-01", "standard"],
+      ["prod-02", "performance"]
+    ]);
+  });
+
+  it("rejects an unknown Performance Tier server", async () => {
+    const response = await request(createApp({ db, refreshService: service, inventoryPath }))
+      .put("/api/servers/tiers")
+      .send({ performanceServerIds: ["missing"] });
+
+    expect(response.status).toBe(400);
+    expect(response.body.error).toBe("invalid_server_tiers");
+  });
+
   it("creates a server in the inventory file and database", async () => {
     const response = await request(createApp({ db, refreshService: service, inventoryPath }))
       .post("/api/servers")

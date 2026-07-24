@@ -47,8 +47,11 @@ type ServerConfig = {
   port: number;
   group?: string;
   enabled: boolean;
+  tier: "performance" | "standard";
 };
 ```
+
+Inventory entries without `tier` remain backward compatible and load as `standard`.
 
 ## Data Flow
 
@@ -208,11 +211,12 @@ Context refresh reminder behavior:
 The current implementation also includes solver job orchestration for the shared `~/solver` deployment on each server:
 
 - Single solver jobs submit one reviewed range to one selected server.
-- Parallel solver jobs split remaining board indices across available servers and keep a queue for follow-up chunks. Runs submitted from the inventory-backed UI use a dynamic server pool: newly added enabled servers can claim still-queued chunks after they have an online, idle snapshot; already-running chunks are never split or moved. Explicit API submissions can keep a fixed server pool by omitting `autoIncludeNewServers`.
+- Parallel solver jobs split remaining board indices across available servers and keep a queue for follow-up chunks. The default `All Servers` mode uses the dynamic enabled-server pool: newly added enabled servers can claim still-queued chunks after they have an online, idle snapshot; already-running chunks are never split or moved. `Performance Tier` and `Standard Tier` modes submit the enabled servers in that tier as a fixed pool. Changing mode resets Chunk Number to the selected pool size; an operator can still override that value afterward.
 - The Failure Pool is scoped to the currently inspected Range and Dataset. Its count includes unresolved pending, queued, running, and failed entries; solved entries are omitted. Confirmed Clear removes only pending/failed entries in that exact scope and never removes queued/running retries.
 - Terminal Parallel History records have a separate confirmed Delete action. It permanently removes the selected run, its report, slices, solver jobs, events, and failure-pool entries linked to that run. Active or locked runs cannot be deleted.
 - A solver job stores the pipeline snapshot that settled it. Terminal slices are immutable during later reconciliation, so a newer task on the same server cannot overwrite historical Done, Failed, or Success Rate statistics.
-- `Best Server` is treated as an operations-level setting. It is configured from the `Server Operations` tab and used by failure-pool retries that require the strongest fallback server.
+- Every inventory server belongs to either `Performance Tier` or `Standard Tier`. Server Operations provides a two-column checkbox editor with an explicit Save action, and Performance servers carry a distinct badge in Parallel Server Status Preview. The former single `Best Server` setting is removed.
+- Skipped failure-pool boards use the complete enabled Performance Tier as their retry candidate pool. Other failure reasons continue to use the server pool selected for the retry request.
 - `Server Operations` is a manual maintenance center with explicit all-online actions plus inventory-scoped maintenance for selected servers.
 - `Sync Code` starts a sync tmux session on each online enabled server. The remote command exports the solver proxy variables, runs `git stash`, then `git pull --rebase`.
 - `Sync Network` clones or updates `~/mihomo-release`, expands the Mihomo binary, downloads `config.yaml` from the backend-only `SUBSCRIPTION_URL`, validates it, and restarts a persistent tmux session named `mihomo`. The command card can target every online server, while the Network inventory supports selecting one or more available servers and syncing only that exact selection, so newly provisioned nodes do not force repeat work on the existing fleet. HTTPS Git authentication uses backend-only `GITEE_USERNAME` and `GITEE_TOKEN` through a temporary remote AskPass file; secrets are not retained in operation commands or reports.
@@ -239,6 +243,7 @@ Representative backend endpoints:
 
 - `GET /api/overview`: latest aggregate status, overall description, latest server rows.
 - `GET /api/servers`: server inventory.
+- `PUT /api/servers/tiers`: replace the saved Performance Tier membership; all other inventory servers become Standard Tier.
 - `GET /api/servers/:id`: server metadata and latest snapshot.
 - `GET /api/servers/:id/history?hours=24`: per-server historical series.
 - `POST /api/refresh`: trigger all-server refresh.

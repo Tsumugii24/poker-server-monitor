@@ -7,7 +7,7 @@ import {
   DEFAULT_SSH_COMMAND_TIMEOUT_SECONDS,
   DEFAULT_SSH_CONNECT_TIMEOUT_SECONDS
 } from "../shared/sshSettings";
-import type { AlertSettings, ServerConfig, WeChatAccount, WeChatRecipient } from "../shared/types";
+import type { AlertSettings, ServerConfig, ServerTier, WeChatAccount, WeChatRecipient } from "../shared/types";
 
 export type RuntimeConfig = {
   host: string;
@@ -133,7 +133,8 @@ export function loadServerInventory(filename = "config/servers.json"): ServerCon
       host: requiredString(item.host, `servers[${index}].host`),
       port: item.port == null ? 22 : requiredPort(item.port, `servers[${index}].port`),
       enabled: item.enabled == null ? true : requiredBoolean(item.enabled, `servers[${index}].enabled`),
-      note: item.note == null ? "TBD" : requiredString(item.note, `servers[${index}].note`)
+      note: item.note == null ? "TBD" : requiredString(item.note, `servers[${index}].note`),
+      tier: item.tier == null ? "standard" : requiredServerTier(item.tier, `servers[${index}].tier`)
     };
 
     if (item.group != null) {
@@ -275,6 +276,28 @@ export function deleteServerInventoryEntry(filename: string, serverId: string): 
   }
 
   raw.splice(index, 1);
+  writeServerInventoryRaw(fullPath, raw);
+  return loadServerInventory(fullPath);
+}
+
+export function updateServerInventoryTiers(
+  filename: string,
+  performanceServerIds: string[]
+): ServerConfig[] {
+  const { fullPath, raw } = readServerInventoryRaw(filename);
+  const requestedIds = new Set(performanceServerIds.map((serverId) => serverId.trim()).filter(Boolean));
+  const inventoryIds = new Set(
+    raw.flatMap((item) => isRecord(item) && typeof item.id === "string" ? [item.id] : [])
+  );
+  const unknownIds = [...requestedIds].filter((serverId) => !inventoryIds.has(serverId));
+  if (unknownIds.length > 0) {
+    throw new Error(`Server ${unknownIds.join(", ")} not found`);
+  }
+
+  for (const item of raw) {
+    if (!isRecord(item) || typeof item.id !== "string") continue;
+    item.tier = requestedIds.has(item.id) ? "performance" : "standard";
+  }
   writeServerInventoryRaw(fullPath, raw);
   return loadServerInventory(fullPath);
 }
@@ -581,6 +604,13 @@ function requiredPositiveNumber(value: unknown, name: string): number {
 function requiredAlertLanguage(value: unknown): AlertSettings["language"] {
   if (value !== "en" && value !== "zh") {
     throw new Error("alerts.language must be en or zh");
+  }
+  return value;
+}
+
+function requiredServerTier(value: unknown, name: string): ServerTier {
+  if (value !== "performance" && value !== "standard") {
+    throw new Error(`${name} must be performance or standard`);
   }
   return value;
 }

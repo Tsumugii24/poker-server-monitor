@@ -4,7 +4,12 @@ import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { DEFAULT_SOLVER_JOB_SETTINGS, type ParallelSolverRun } from "../../src/shared/solverJobs";
-import { ParallelQueueBoard, ParallelRunProgress } from "../../src/client/PreflopRangeView";
+import {
+  ParallelQueueBoard,
+  ParallelRunProgress,
+  parallelServersForTier
+} from "../../src/client/PreflopRangeView";
+import type { ServerRow } from "../../src/shared/types";
 
 function queuedRun(id: string, datasetName: string, queueOrder: number): ParallelSolverRun {
   return {
@@ -95,5 +100,21 @@ describe("ParallelRunProgress", () => {
     progress = screen.getByRole("progressbar", { name: "Parallel run completion" });
     expect(progress).toHaveAttribute("aria-valuenow", "0");
     expect(progress.firstElementChild).toHaveStyle({ width: "0%" });
+  });
+});
+
+describe("parallelServersForTier", () => {
+  it("selects all, Performance, or Standard enabled servers in natural id order", () => {
+    const servers = [
+      { id: "22", enabled: true, tier: "standard" },
+      { id: "3", enabled: true, tier: "performance" },
+      { id: "21", enabled: true, tier: "performance" },
+      { id: "1", enabled: true },
+      { id: "4", enabled: false, tier: "performance" }
+    ] as ServerRow[];
+
+    expect(parallelServersForTier(servers, "all").map((server) => server.id)).toEqual(["1", "3", "21", "22"]);
+    expect(parallelServersForTier(servers, "performance").map((server) => server.id)).toEqual(["3", "21"]);
+    expect(parallelServersForTier(servers, "standard").map((server) => server.id)).toEqual(["1", "22"]);
   });
 });

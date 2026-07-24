@@ -86,7 +86,8 @@ import type {
   PipelineDisplayStatus,
   PipelineStatusSnapshot,
   RefreshState,
-  ServerRow
+  ServerRow,
+  ServerTierUpdateResponse
 } from "../shared/types";
 import { displayDatasetName } from "./datasetDisplay";
 
@@ -115,6 +116,7 @@ type PendingStatusChange = {
 
 type RangeStatusView = "labeling" | "already";
 type ParallelServerStatusTab = "all" | "available" | "unavailable";
+export type ParallelServerTierMode = "all" | "performance" | "standard";
 type ParallelHistoryFilter = "all" | "completed" | "completed_with_failures";
 
 type OfflineServerNotice = {
@@ -129,7 +131,6 @@ type PendingDatasetRepoAction = {
   request: SolverJobPreviewRequest;
   parallelRequest?: ParallelSolverJobPreviewRequest;
   parallelQueueMode?: "start_now" | "queue_next";
-  parallelBestServerId?: string;
 };
 
 type PendingScenarioLibraryAction = {
@@ -186,7 +187,6 @@ type RangeProgressRefreshSummary = {
 };
 
 const EXPANDED_FOLDERS_KEY = "preflop-range-expanded-folders";
-const PARALLEL_BEST_SERVER_ID_KEY = "preflop-range-parallel-best-server-id";
 const DEFAULT_SELECTED_HAND = "AA";
 const REVIEW_STATUS_LABELS: Record<PreflopReviewStatus, string> = {
   under_review: "Under review",
@@ -243,7 +243,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
   const [parallelChunkCountTouched, setParallelChunkCountTouched] = useState(false);
   const [activeParallelRunId, setActiveParallelRunId] = useState<string | null>(null);
   const [parallelServerTab, setParallelServerTab] = useState<ParallelServerStatusTab>("all");
-  const [parallelBestServerId, setParallelBestServerId] = useState(() => localStorage.getItem(PARALLEL_BEST_SERVER_ID_KEY) ?? "");
+  const [parallelServerTierMode, setParallelServerTierMode] = useState<ParallelServerTierMode>("all");
   const [activeSolverJobTab, setActiveSolverJobTab] = useState<"single" | "parallel" | "operations">("single");
   const [selectedServerId, setSelectedServerId] = useState("");
   const [serverOperations, setServerOperations] = useState<ServerOperation[]>([]);
@@ -334,21 +334,17 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
   const applyOverviewResponse = useCallback((overviewResponse: OverviewResponse) => {
     setServers(overviewResponse.servers);
     setJobContextLoaded(true);
-    const enabledParallelServerCount = overviewResponse.servers.filter((server) => server.enabled).length;
+    const targetServers = parallelServersForTier(overviewResponse.servers, parallelServerTierMode);
     if (!parallelChunkCountTouched) {
-      setParallelChunkCount(Math.max(1, enabledParallelServerCount));
+      setParallelChunkCount(Math.max(1, targetServers.length));
     }
-    setSelectedParallelServerIds(overviewResponse.servers
-      .slice()
-      .sort(compareServersByNaturalId)
-      .filter((server) => server.enabled)
-      .map((server) => server.id));
+    setSelectedParallelServerIds(targetServers.map((server) => server.id));
     setSelectedServerId((current) =>
       current && overviewResponse.servers.some((server) => server.id === current)
         ? current
         : defaultSolverServerId(overviewResponse.servers)
     );
-  }, [parallelChunkCountTouched]);
+  }, [parallelChunkCountTouched, parallelServerTierMode]);
 
   const loadJobContext = useCallback(async (options: { reconcileParallel?: boolean } = {}) => {
     setJobError(null);
@@ -462,19 +458,6 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
       // ignore storage failures
     }
   }, [expandedFolders]);
-
-  useEffect(() => {
-    try {
-      const trimmed = parallelBestServerId.trim();
-      if (trimmed) {
-        localStorage.setItem(PARALLEL_BEST_SERVER_ID_KEY, trimmed);
-      } else {
-        localStorage.removeItem(PARALLEL_BEST_SERVER_ID_KEY);
-      }
-    } catch {
-      // ignore storage failures
-    }
-  }, [parallelBestServerId]);
 
   useEffect(() => {
     setJobPreview(null);
@@ -940,6 +923,42 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
     setPendingDatasetRepoAction(null);
   };
 
+  const changeParallelServerTierMode = (mode: ParallelServerTierMode) => {
+    const targetServers = parallelServersForTier(servers, mode);
+    setParallelServerTierMode(mode);
+    setSelectedParallelServerIds(targetServers.map((server) => server.id));
+    setParallelChunkCount(Math.max(1, targetServers.length));
+    setParallelChunkCountTouched(false);
+    setParallelServerTab("all");
+    setParallelPreview(null);
+    clearDatasetRepoGate();
+  };
+
+  const savePerformanceTierServers = async (performanceServerIds: string[]) => {
+    setJobBusy("server-tier-save");
+    setJobError(null);
+    try {
+      const response = await fetchPreflopJson<ServerTierUpdateResponse>("/api/servers/tiers", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ performanceServerIds })
+      });
+      setServers(response.servers);
+      const targetServers = parallelServersForTier(response.servers, parallelServerTierMode);
+      setSelectedParallelServerIds(targetServers.map((server) => server.id));
+      if (!parallelChunkCountTouched) {
+        setParallelChunkCount(Math.max(1, targetServers.length));
+      }
+      setParallelPreview(null);
+      clearDatasetRepoGate();
+    } catch (caught) {
+      setJobError(caught instanceof Error ? caught.message : String(caught));
+      await loadJobContext();
+    } finally {
+      setJobBusy(null);
+    }
+  };
+
   const solverJobRequest = (scenarioOverride = selectedJobScenario): SolverJobPreviewRequest | null => {
     if (!selectedRangePathForJob || !selectedServerId) return null;
     return {
@@ -953,15 +972,17 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
   };
 
   const parallelJobRequest = (scenarioOverride = selectedJobScenario): ParallelSolverJobPreviewRequest | null => {
-    if (!selectedRangePathForJob) return null;
-    const enabledServerCount = servers.filter((server) => server.enabled).length;
-    const chunkCount = Math.max(1, Math.trunc(parallelChunkCountTouched ? parallelChunkCount : enabledServerCount || parallelChunkCount));
+    if (!selectedRangePathForJob || selectedParallelServerIds.length === 0) return null;
+    const chunkCount = Math.max(
+      1,
+      Math.trunc(parallelChunkCountTouched ? parallelChunkCount : selectedParallelServerIds.length)
+    );
     return {
       rangePath: selectedRangePathForJob,
       scenario: scenarioOverride || undefined,
       datasetName: jobDatasetNameTouched ? jobDatasetName.trim() || undefined : undefined,
       serverIds: selectedParallelServerIds,
-      autoIncludeNewServers: true,
+      autoIncludeNewServers: parallelServerTierMode === "all",
       chunkCount,
       settings: jobSettings,
       confirmUnstudied
@@ -1021,10 +1042,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
       const preview = await fetchPreflopJson<ParallelSolverJobPreview>("/api/parallel-jobs/failure-pool/preview", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          ...requestPayload,
-          bestServerId: parallelBestServerId.trim() || undefined
-        })
+        body: JSON.stringify(requestPayload)
       });
       setParallelPreview(preview);
       setJobDatasetName(preview.datasetName);
@@ -1100,8 +1118,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
           action: "pool-submit",
           request: gateRequest,
           parallelRequest: requestPayload,
-          parallelQueueMode: queueMode,
-          parallelBestServerId
+          parallelQueueMode: queueMode
         });
         return;
       }
@@ -1112,8 +1129,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
           ...requestPayload,
           datasetName: repoStatus.datasetName,
           confirmDatasetName: true,
-          queueMode,
-          bestServerId: parallelBestServerId.trim() || undefined
+          queueMode
         })
       });
       await loadJobContext();
@@ -1748,8 +1764,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
             ...pending.parallelRequest,
             datasetName: ensured.datasetName,
             confirmDatasetName: true,
-            queueMode: pending.parallelQueueMode ?? "queue_next",
-            bestServerId: pending.parallelBestServerId?.trim() || undefined
+            queueMode: pending.parallelQueueMode ?? "queue_next"
           })
         });
         await loadJobContext();
@@ -2507,7 +2522,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
           parallelChunkCount={parallelChunkCount}
           activeParallelRunId={activeParallelRunId}
           parallelServerTab={parallelServerTab}
-          parallelBestServerId={parallelBestServerId}
+          parallelServerTierMode={parallelServerTierMode}
           activeTab={activeSolverJobTab}
           selectedServerId={selectedServerId}
           selectedRangePath={selectedRangePathForJob}
@@ -2552,17 +2567,14 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
           onOperationRetry={requestRetryServerOperation}
           onOperationClear={requestClearServerOperations}
           onParallelServerTabChange={setParallelServerTab}
+          onParallelServerTierModeChange={changeParallelServerTierMode}
           onParallelChunkCountChange={(chunkCount) => {
             setParallelChunkCount(chunkCount);
             setParallelChunkCountTouched(true);
             setParallelPreview(null);
             clearDatasetRepoGate();
           }}
-          onParallelBestServerChange={(serverId) => {
-            setParallelBestServerId(serverId);
-            setParallelPreview(null);
-            clearDatasetRepoGate();
-          }}
+          onServerTiersSave={(performanceServerIds) => void savePerformanceTierServers(performanceServerIds)}
           onTabChange={changeSolverJobTab}
           onDatasetNameChange={(datasetName) => {
             setJobDatasetName(datasetName);
@@ -3085,6 +3097,30 @@ function compareServersByNaturalId(left: ServerRow, right: ServerRow): number {
   return left.id.localeCompare(right.id, undefined, { numeric: true, sensitivity: "base" });
 }
 
+function serverIsPerformanceTier(server: Pick<ServerRow, "tier">): boolean {
+  return server.tier === "performance";
+}
+
+export function parallelServersForTier(
+  servers: ServerRow[],
+  mode: ParallelServerTierMode
+): ServerRow[] {
+  return servers
+    .filter((server) => {
+      if (!server.enabled) return false;
+      if (mode === "performance") return serverIsPerformanceTier(server);
+      if (mode === "standard") return !serverIsPerformanceTier(server);
+      return true;
+    })
+    .sort(compareServersByNaturalId);
+}
+
+function parallelServerTierLabel(mode: ParallelServerTierMode): string {
+  if (mode === "performance") return "Performance Tier";
+  if (mode === "standard") return "Standard Tier";
+  return "All Servers";
+}
+
 function parallelServerIsAvailable(server: ServerRow): boolean {
   return server.enabled && serverIsOnlineForJob(server) && !pipelineIsActiveForClient(server.pipeline);
 }
@@ -3119,7 +3155,7 @@ function SolverJobPanel({
   parallelChunkCount,
   activeParallelRunId,
   parallelServerTab,
-  parallelBestServerId,
+  parallelServerTierMode,
   activeTab,
   selectedServerId,
   selectedRangePath,
@@ -3160,8 +3196,9 @@ function SolverJobPanel({
   onOperationRetry,
   onOperationClear,
   onParallelServerTabChange,
+  onParallelServerTierModeChange,
   onParallelChunkCountChange,
-  onParallelBestServerChange,
+  onServerTiersSave,
   onTabChange,
   onDatasetNameChange,
   onSettingsChange,
@@ -3201,7 +3238,7 @@ function SolverJobPanel({
   parallelChunkCount: number;
   activeParallelRunId: string | null;
   parallelServerTab: ParallelServerStatusTab;
-  parallelBestServerId: string;
+  parallelServerTierMode: ParallelServerTierMode;
   activeTab: "single" | "parallel" | "operations";
   selectedServerId: string;
   selectedRangePath: string;
@@ -3242,8 +3279,9 @@ function SolverJobPanel({
   onOperationRetry: (operation: ServerOperation) => void;
   onOperationClear: () => void;
   onParallelServerTabChange: (tab: ParallelServerStatusTab) => void;
+  onParallelServerTierModeChange: (mode: ParallelServerTierMode) => void;
   onParallelChunkCountChange: (chunkCount: number) => void;
-  onParallelBestServerChange: (serverId: string) => void;
+  onServerTiersSave: (performanceServerIds: string[]) => void;
   onTabChange: (tab: "single" | "parallel" | "operations") => void;
   onDatasetNameChange: (datasetName: string) => void;
   onSettingsChange: (patch: Partial<SolverJobSettings>) => void;
@@ -3604,7 +3642,7 @@ function SolverJobPanel({
           selectedServerIds={selectedParallelServerIds}
           chunkCount={parallelChunkCount}
           serverTab={parallelServerTab}
-          bestServerId={parallelBestServerId}
+          tierMode={parallelServerTierMode}
           selectedRangePath={selectedRangePath}
           selectedRangeName={selectedRangeName}
           selectedRangeLearned={selectedRangeLearned}
@@ -3618,6 +3656,7 @@ function SolverJobPanel({
           activeRunId={activeParallelRunId}
           busy={busy}
           onServerTabChange={onParallelServerTabChange}
+          onTierModeChange={onParallelServerTierModeChange}
           onChunkCountChange={onParallelChunkCountChange}
           onDatasetNameChange={onDatasetNameChange}
           onSettingsChange={onSettingsChange}
@@ -3638,7 +3677,6 @@ function SolverJobPanel({
       ) : (
         <ServerOperationsPanel
           servers={servers}
-          bestServerId={parallelBestServerId}
           operations={serverOperations}
           networkSyncConfigured={networkSyncConfigured}
           uploadCandidates={uploadCandidates}
@@ -3656,7 +3694,7 @@ function SolverJobPanel({
           onStop={onOperationStop}
           onRetry={onOperationRetry}
           onClear={onOperationClear}
-          onBestServerChange={onParallelBestServerChange}
+          onPerformanceTierSave={onServerTiersSave}
         />
       )}
     </section>
@@ -3816,7 +3854,7 @@ function ParallelSolverJobPanel({
   selectedServerIds,
   chunkCount,
   serverTab,
-  bestServerId,
+  tierMode,
   selectedRangePath,
   selectedRangeName,
   selectedRangeLearned,
@@ -3830,6 +3868,7 @@ function ParallelSolverJobPanel({
   activeRunId,
   busy,
   onServerTabChange,
+  onTierModeChange,
   onChunkCountChange,
   onDatasetNameChange,
   onSettingsChange,
@@ -3851,7 +3890,7 @@ function ParallelSolverJobPanel({
   selectedServerIds: string[];
   chunkCount: number;
   serverTab: ParallelServerStatusTab;
-  bestServerId: string;
+  tierMode: ParallelServerTierMode;
   selectedRangePath: string;
   selectedRangeName: string;
   selectedRangeLearned: boolean;
@@ -3865,6 +3904,7 @@ function ParallelSolverJobPanel({
   activeRunId: string | null;
   busy: string | null;
   onServerTabChange: (tab: ParallelServerStatusTab) => void;
+  onTierModeChange: (mode: ParallelServerTierMode) => void;
   onChunkCountChange: (chunkCount: number) => void;
   onDatasetNameChange: (datasetName: string) => void;
   onSettingsChange: (patch: Partial<SolverJobSettings>) => void;
@@ -3884,11 +3924,13 @@ function ParallelSolverJobPanel({
 }) {
   const orderedServers = servers.slice().sort(compareServersByNaturalId);
   const enabledServers = orderedServers.filter((server) => server.enabled);
-  const availableServers = enabledServers.filter(parallelServerIsAvailable);
-  const unavailableServers = enabledServers.filter((server) => !parallelServerIsAvailable(server));
-  const visibleServers = serverTab === "all" ? enabledServers : serverTab === "available" ? availableServers : unavailableServers;
-  const selectedServers = enabledServers.filter((server) => selectedServerIds.includes(server.id));
-  const targetServerCount = selectedServers.length > 0 ? selectedServers.length : enabledServers.length;
+  const performanceServers = enabledServers.filter(serverIsPerformanceTier);
+  const standardServers = enabledServers.filter((server) => !serverIsPerformanceTier(server));
+  const targetServers = enabledServers.filter((server) => selectedServerIds.includes(server.id));
+  const availableServers = targetServers.filter(parallelServerIsAvailable);
+  const unavailableServers = targetServers.filter((server) => !parallelServerIsAvailable(server));
+  const visibleServers = serverTab === "all" ? targetServers : serverTab === "available" ? availableServers : unavailableServers;
+  const targetServerCount = targetServers.length;
   const hasTargetServers = targetServerCount > 0;
   const queueRuns = parallelQueueRuns(runs);
   const historyRuns = parallelHistoryRuns(runs);
@@ -3925,7 +3967,7 @@ function ParallelSolverJobPanel({
     baseSubmitDisabled ||
     !hasTargetServers ||
     retryableFailurePoolCount === 0 ||
-    (skippedFailurePoolCount > 0 && !bestServerId.trim());
+    (skippedFailurePoolCount > 0 && performanceServers.length === 0);
   const failurePoolSubmitDisabled =
     failurePoolPreviewDisabled ||
     !failurePoolPreviewReady ||
@@ -3962,7 +4004,36 @@ function ParallelSolverJobPanel({
         <div className="parallel-server-strip">
           <div className="parallel-section-title">
             <strong>Server Status Preview</strong>
-            <span>{enabledServers.length} enabled · {availableServers.length} available · {unavailableServers.length} unavailable</span>
+            <span>{parallelServerTierLabel(tierMode)} · {targetServerCount} target · {availableServers.length} available · {unavailableServers.length} unavailable</span>
+          </div>
+          <div className="parallel-tier-selector" role="group" aria-label="Parallel server tier">
+            <button
+              type="button"
+              className={tierMode === "all" ? "active" : ""}
+              aria-pressed={tierMode === "all"}
+              onClick={() => onTierModeChange("all")}
+            >
+              <span>All Servers</span>
+              <em>{enabledServers.length}</em>
+            </button>
+            <button
+              type="button"
+              className={`performance ${tierMode === "performance" ? "active" : ""}`}
+              aria-pressed={tierMode === "performance"}
+              onClick={() => onTierModeChange("performance")}
+            >
+              <span>Performance</span>
+              <em>{performanceServers.length}</em>
+            </button>
+            <button
+              type="button"
+              className={tierMode === "standard" ? "active" : ""}
+              aria-pressed={tierMode === "standard"}
+              onClick={() => onTierModeChange("standard")}
+            >
+              <span>Standard</span>
+              <em>{standardServers.length}</em>
+            </button>
           </div>
           <div className="parallel-server-tabs" role="tablist" aria-label="Parallel server availability">
             <button
@@ -3971,7 +4042,7 @@ function ParallelSolverJobPanel({
               onClick={() => onServerTabChange("all")}
             >
               All
-              <em>{enabledServers.length}</em>
+              <em>{targetServerCount}</em>
             </button>
             <button
               type="button"
@@ -3993,12 +4064,12 @@ function ParallelSolverJobPanel({
           <div className="parallel-server-tags">
             {visibleServers.length === 0 ? (
               <span className="text-muted">
-                {serverTab === "all" ? "No enabled servers." : serverTab === "available" ? "No online idle enabled servers." : "No unavailable servers."}
+                {serverTab === "all" ? `No enabled ${parallelServerTierLabel(tierMode).toLowerCase()} servers.` : serverTab === "available" ? "No online idle target servers." : "No unavailable target servers."}
               </span>
             ) : null}
             {visibleServers.map((server) => {
               const available = parallelServerIsAvailable(server);
-              const isBestServer = server.id === bestServerId;
+              const performance = serverIsPerformanceTier(server);
               return (
                 <div
                   key={server.id}
@@ -4009,7 +4080,7 @@ function ParallelSolverJobPanel({
                 >
                   <strong className="parallel-server-id">{server.id}</strong>
                   <ConnectionBadge status={server.latest?.connectionStatus ?? "unknown"} />
-                  {isBestServer ? <small className="parallel-server-best-badge">Best</small> : null}
+                  {performance ? <small className="parallel-server-tier-badge">Performance</small> : null}
                   <em>{available ? "Idle" : parallelServerUnavailableReason(server)}</em>
                 </div>
               );
@@ -4102,8 +4173,18 @@ function ParallelSolverJobPanel({
         {!selectedRangeLearned && selectedRangePath ? (
           <div className="notice warning compact-notice">Approve this range before creating parallel jobs.</div>
         ) : null}
+        {!hasTargetServers ? (
+          <div className="notice warning compact-notice">
+            No enabled server belongs to {parallelServerTierLabel(tierMode)}. Choose another tier or update Server Tiers.
+          </div>
+        ) : null}
         {previewRequired && selectedRangePath && selectedRangeLearned && hasTargetServers ? (
           <div className="notice warning compact-notice">Preview distribution before queuing a parallel run.</div>
+        ) : null}
+        {skippedFailurePoolCount > 0 && performanceServers.length === 0 ? (
+          <div className="notice warning compact-notice">
+            Skipped-board retries require at least one enabled Performance Tier server.
+          </div>
         ) : null}
         {retryableFailurePoolCount > 0 && !failurePoolPreviewReady ? (
           <div className="notice warning compact-notice">Preview the failure pool separately before adding retry boards to the queue.</div>
@@ -4595,7 +4676,6 @@ function ParallelHistoryBoard({
 
 export function ServerOperationsPanel({
   servers,
-  bestServerId,
   operations,
   networkSyncConfigured,
   uploadCandidates,
@@ -4612,10 +4692,10 @@ export function ServerOperationsPanel({
   onDeleteCandidates,
   onStop,
   onRetry,
-  onBestServerChange
+  onClear,
+  onPerformanceTierSave
 }: {
   servers: ServerRow[];
-  bestServerId: string;
   operations: ServerOperation[];
   networkSyncConfigured: boolean;
   uploadCandidates: ServerUploadCandidate[];
@@ -4633,13 +4713,20 @@ export function ServerOperationsPanel({
   onStop: (operation: ServerOperation) => void;
   onRetry: (operation: ServerOperation) => void;
   onClear: () => void;
-  onBestServerChange: (serverId: string) => void;
+  onPerformanceTierSave: (serverIds: string[]) => void;
 }) {
   const orderedServers = servers.slice().sort(compareServersByNaturalId);
   const enabledServers = orderedServers.filter((server) => server.enabled);
   const onlineServers = enabledServers.filter((server) => serverIsOnlineForJob(server));
   const offlineServers = enabledServers.filter((server) => !serverIsOnlineForJob(server));
-  const bestServer = orderedServers.find((server) => server.id === bestServerId) ?? null;
+  const persistedPerformanceServerIds = useMemo(
+    () => servers
+      .filter(serverIsPerformanceTier)
+      .sort(compareServersByNaturalId)
+      .map((server) => server.id),
+    [servers]
+  );
+  const persistedPerformanceServerKey = JSON.stringify(persistedPerformanceServerIds);
   const candidateSummary = summarizeUploadCandidates(uploadCandidates);
   const activeOperations = operations
     .filter((operation) => !serverOperationIsTerminal(operation))
@@ -4666,6 +4753,15 @@ export function ServerOperationsPanel({
   const [selectedNetworkServerIds, setSelectedNetworkServerIds] = useState<Set<string>>(() => new Set());
   const [selectedUploadCandidateIds, setSelectedUploadCandidateIds] = useState<Set<string>>(() => new Set());
   const [uploadDetailOperationId, setUploadDetailOperationId] = useState<string | null>(null);
+  const [draftPerformanceServerIds, setDraftPerformanceServerIds] = useState<Set<string>>(
+    () => new Set(persistedPerformanceServerIds)
+  );
+  const performanceServers = orderedServers.filter((server) => draftPerformanceServerIds.has(server.id));
+  const standardServers = orderedServers.filter((server) => !draftPerformanceServerIds.has(server.id));
+  const performanceTierDirty =
+    draftPerformanceServerIds.size !== persistedPerformanceServerIds.length ||
+    persistedPerformanceServerIds.some((serverId) => !draftPerformanceServerIds.has(serverId));
+  const tierSaveBusy = busy === "server-tier-save";
   const candidateServerIds = useMemo(
     () => [...new Set(uploadCandidates.map((candidate) => candidate.serverId))].sort((left, right) =>
       left.localeCompare(right, undefined, { numeric: true, sensitivity: "base" })
@@ -4728,6 +4824,10 @@ export function ServerOperationsPanel({
   }, [uploadCandidates]);
 
   useEffect(() => {
+    setDraftPerformanceServerIds(new Set(JSON.parse(persistedPerformanceServerKey) as string[]));
+  }, [persistedPerformanceServerKey]);
+
+  useEffect(() => {
     const activeServerIds = new Set(
       operations
         .filter((operation) => operation.type === "network_sync" && !serverOperationIsTerminal(operation))
@@ -4781,6 +4881,15 @@ export function ServerOperationsPanel({
     });
   };
 
+  const togglePerformanceServer = (serverId: string) => {
+    setDraftPerformanceServerIds((selected) => {
+      const next = new Set(selected);
+      if (next.has(serverId)) next.delete(serverId);
+      else next.add(serverId);
+      return next;
+    });
+  };
+
   return (
     <div className="server-ops-shell">
       <section className="server-ops-command-center">
@@ -4788,21 +4897,107 @@ export function ServerOperationsPanel({
           <strong>Server Operations</strong>
           <span>{enabledServers.length} enabled · {onlineServers.length} SSH-ready · {offlineServers.length} unavailable · {activeOperations.length} active</span>
         </div>
-        <label className="solver-job-field best-server-field">
-          <span>Best Server</span>
-          <select value={bestServerId} onChange={(event) => onBestServerChange(event.target.value)} disabled={operationBusy}>
-            <option value="">Select</option>
-            {orderedServers.map((server) => (
-              <option key={server.id} value={server.id}>
-                {server.id}{server.latest?.connectionStatus ? ` · ${server.latest.connectionStatus}` : ""}
-              </option>
-            ))}
-          </select>
-        </label>
+        <div className="server-tier-summary" aria-label="Saved server tier summary">
+          <span className="performance">
+            <strong>{persistedPerformanceServerIds.length}</strong>
+            Performance
+          </span>
+          <span>
+            <strong>{orderedServers.length - persistedPerformanceServerIds.length}</strong>
+            Standard
+          </span>
+        </div>
       </section>
-      {inventoryLoaded && bestServerId && !bestServer ? (
-        <div className="notice warning compact-notice">Best Server ID is not in the current server inventory.</div>
-      ) : null}
+
+      <section className="server-tier-manager">
+        <div className="parallel-section-title parallel-section-title-with-actions">
+          <div>
+            <strong>Server Tiers</strong>
+            <span>Classify inventory servers for coarse-grained Parallel Job scheduling.</span>
+          </div>
+          <div className="server-tier-save-actions">
+            {performanceTierDirty ? <em>Unsaved changes</em> : <em>Saved</em>}
+            <button
+              className="icon-button compact primary"
+              type="button"
+              onClick={() => onPerformanceTierSave(performanceServers.map((server) => server.id))}
+              disabled={!inventoryLoaded || !performanceTierDirty || tierSaveBusy}
+            >
+              <Check size={14} />
+              {tierSaveBusy ? "Saving…" : "Save Tiers"}
+            </button>
+          </div>
+        </div>
+        <div className="server-tier-grid">
+          <div className="server-tier-group performance">
+            <div className="server-tier-group-head">
+              <div>
+                <strong>Performance Tier</strong>
+                <span>Preferred compute pool and fallback pool for skipped boards.</span>
+              </div>
+              <em>{performanceServers.length}</em>
+            </div>
+            <div className="server-tier-server-list">
+              {performanceServers.length === 0 ? (
+                <p className="server-tier-empty">No server assigned. Select a Standard server to promote it.</p>
+              ) : null}
+              {performanceServers.map((server) => (
+                <label key={server.id} className="server-tier-server-row performance">
+                  <input
+                    type="checkbox"
+                    checked
+                    aria-label={`Remove server ${server.id} from Performance Tier`}
+                    onChange={() => togglePerformanceServer(server.id)}
+                    disabled={tierSaveBusy}
+                  />
+                  <span className="server-tier-server-copy">
+                    <strong>{server.id}</strong>
+                    <small>{server.name || server.host || "Unnamed server"}</small>
+                  </span>
+                  <ConnectionBadge status={server.latest?.connectionStatus ?? "unknown"} />
+                  {!server.enabled ? <em className="server-tier-disabled">Disabled</em> : null}
+                </label>
+              ))}
+            </div>
+          </div>
+          <div className="server-tier-group">
+            <div className="server-tier-group-head">
+              <div>
+                <strong>Standard Tier</strong>
+                <span>General-purpose pool used by the default All Servers mode.</span>
+              </div>
+              <em>{standardServers.length}</em>
+            </div>
+            <div className="server-tier-server-list">
+              {standardServers.length === 0 ? (
+                <p className="server-tier-empty">Every inventory server is in Performance Tier.</p>
+              ) : null}
+              {standardServers.map((server) => (
+                <label key={server.id} className="server-tier-server-row">
+                  <input
+                    type="checkbox"
+                    checked={false}
+                    aria-label={`Assign server ${server.id} to Performance Tier`}
+                    onChange={() => togglePerformanceServer(server.id)}
+                    disabled={tierSaveBusy}
+                  />
+                  <span className="server-tier-server-copy">
+                    <strong>{server.id}</strong>
+                    <small>{server.name || server.host || "Unnamed server"}</small>
+                  </span>
+                  <ConnectionBadge status={server.latest?.connectionStatus ?? "unknown"} />
+                  {!server.enabled ? <em className="server-tier-disabled">Disabled</em> : null}
+                </label>
+              ))}
+            </div>
+          </div>
+        </div>
+        {performanceServers.length === 0 ? (
+          <div className="notice warning compact-notice">
+            Skipped-board retries need at least one Performance Tier server.
+          </div>
+        ) : null}
+      </section>
 
       <div className="server-ops-grid">
         <section className="server-ops-card">

@@ -23,7 +23,8 @@ const networkServers = [
     ...servers[0],
     id: "21",
     name: "Solver 21",
-    host: "solver-21.example"
+    host: "solver-21.example",
+    tier: "performance"
   },
   {
     ...servers[0],
@@ -159,6 +160,23 @@ const runningUploadOperation: ServerOperation = {
 };
 
 describe("ServerOperationsPanel", () => {
+  it("moves servers between tiers and saves the Performance Tier list", async () => {
+    const user = userEvent.setup();
+    const onPerformanceTierSave = vi.fn();
+    renderPanel({ servers: networkServers, onPerformanceTierSave });
+
+    expect(screen.getByRole("checkbox", { name: "Remove server 21 from Performance Tier" })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "Assign server 22 to Performance Tier" })).not.toBeChecked();
+    expect(screen.getByRole("button", { name: "Save Tiers" })).toBeDisabled();
+
+    await user.click(screen.getByRole("checkbox", { name: "Assign server 22 to Performance Tier" }));
+    expect(screen.getByText("Unsaved changes")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Save Tiers" }));
+
+    expect(onPerformanceTierSave).toHaveBeenCalledTimes(1);
+    expect(onPerformanceTierSave).toHaveBeenCalledWith(["21", "22"]);
+  });
+
   it("starts network sync only on the individually selected servers", async () => {
     const user = userEvent.setup();
     const onNetworkSync = vi.fn();
@@ -243,7 +261,6 @@ describe("ServerOperationsPanel", () => {
 function renderPanel(overrides: Partial<Parameters<typeof ServerOperationsPanel>[0]> = {}) {
   return render(<ServerOperationsPanel
     servers={servers}
-    bestServerId="1"
     operations={[]}
     networkSyncConfigured
     uploadCandidates={candidates}
@@ -261,7 +278,7 @@ function renderPanel(overrides: Partial<Parameters<typeof ServerOperationsPanel>
     onStop={vi.fn()}
     onRetry={vi.fn()}
     onClear={vi.fn()}
-    onBestServerChange={vi.fn()}
+    onPerformanceTierSave={vi.fn()}
     {...overrides}
   />);
 }

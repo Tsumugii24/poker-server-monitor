@@ -10,7 +10,8 @@ const servers: ServerConfig[] = [
     port: 22,
     group: "production",
     enabled: true,
-    note: "TBD"
+    note: "TBD",
+    tier: "performance"
   },
   {
     id: "prod-02",
@@ -74,6 +75,7 @@ describe("MonitorDatabase", () => {
     expect(rows).toHaveLength(2);
     expect(rows[0]?.latest?.connectionStatus).toBe("online");
     expect(rows[0]?.latest?.healthLevel).toBe("healthy");
+    expect(rows.map((row) => row.tier)).toEqual(["performance", "standard"]);
     expect(rows[1]?.latest?.errorCode).toBe("connect_failed");
   });
 

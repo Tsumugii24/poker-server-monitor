@@ -1144,11 +1144,8 @@ export class SolverJobService {
       if (!server) throw new Error(`Server ${serverId} is not enabled or does not exist.`);
       return server;
     });
-    const bestServerId = input.bestServerId?.trim();
-    const bestServer = bestServerId
-      ? enabledServers.find((server) => server.id === bestServerId) ?? null
-      : null;
-    const baseServer = selectedServers[0] ?? bestServer;
+    const performanceServers = enabledServers.filter((server) => server.tier === "performance");
+    const baseServer = selectedServers[0] ?? performanceServers[0];
     if (!baseServer) {
       throw new Error("Failure pool has no retryable boards for this range.");
     }
@@ -1176,7 +1173,7 @@ export class SolverJobService {
 
     const allBoards = await this.readSolverCardsForServers(uniqueServersById([
       ...selectedServers,
-      ...(bestServer ? [bestServer] : []),
+      ...performanceServers,
       ...availableServers,
       ...enabledServers
     ]));
@@ -1192,20 +1189,23 @@ export class SolverJobService {
     }
     const skippedEntries = entries.filter((entry) => entry.failureReason === "skipped");
     const normalEntries = entries.filter((entry) => entry.failureReason !== "skipped");
-    if (skippedEntries.length > 0 && !bestServer) {
-      throw new Error("Best Server ID is required to retry skipped failure-pool boards.");
+    if (skippedEntries.length > 0 && performanceServers.length === 0) {
+      throw new Error("At least one Performance Tier server is required to retry skipped failure-pool boards.");
     }
     if (normalEntries.length > 0 && selectedServers.length === 0) {
       throw new Error("At least one enabled server is required to retry abnormal failure-pool boards.");
     }
-    const allocationServerCount = normalizedParallelChunkCount(input.chunkCount, enabledServers.length);
+    const allocationServerCount = normalizedParallelChunkCount(
+      input.chunkCount,
+      selectedServers.length || performanceServers.length
+    );
     const normalIndices = normalizeBoardIndices(normalEntries.map((entry) => entry.boardIndex), allBoards.length);
     const skippedIndices = normalizeBoardIndices(skippedEntries.map((entry) => entry.boardIndex), allBoards.length);
     const rawAllocations = allocateFailurePoolChunks({
       normalIndices,
       skippedIndices,
       normalServers: selectedServers,
-      bestServer,
+      performanceServers,
       chunkCount: allocationServerCount
     });
     const allocations: ParallelSolverServerAllocation[] = rawAllocations.map((allocation) => {
@@ -1235,7 +1235,7 @@ export class SolverJobService {
     const indices = normalizeBoardIndices(entries.map((entry) => entry.boardIndex), allBoards.length);
     const selectedIds = uniqueStringList([
       ...selectedServerIds,
-      ...(bestServer && skippedIndices.length > 0 ? [bestServer.id] : [])
+      ...(skippedIndices.length > 0 ? performanceServers.map((server) => server.id) : [])
     ]);
 
     return {
@@ -4081,13 +4081,13 @@ function allocateFailurePoolChunks({
   normalIndices,
   skippedIndices,
   normalServers,
-  bestServer,
+  performanceServers,
   chunkCount
 }: {
   normalIndices: number[];
   skippedIndices: number[];
   normalServers: ServerRow[];
-  bestServer: ServerRow | null;
+  performanceServers: ServerRow[];
   chunkCount: number;
 }): Array<{ server: ServerRow; candidateServerIds: string[]; indices: number[]; rangeExpr: string }> {
   const totalBoards = normalIndices.length + skippedIndices.length;
@@ -4095,8 +4095,7 @@ function allocateFailurePoolChunks({
   const totalChunkCount = Math.min(totalBoards, Math.max(1, chunkCount));
 
   if (normalIndices.length > 0 && skippedIndices.length > 0 && totalChunkCount === 1) {
-    if (!bestServer) return [];
-    return allocateRoundRobinChunks([...normalIndices, ...skippedIndices], [bestServer], 1);
+    return allocateRoundRobinChunks([...normalIndices, ...skippedIndices], performanceServers, 1);
   }
 
   const [normalChunkCount, skippedChunkCount] = proportionalChunkBudget(
@@ -4105,7 +4104,7 @@ function allocateFailurePoolChunks({
   );
   return [
     ...allocateRoundRobinChunks(normalIndices, normalServers, normalChunkCount),
-    ...(bestServer ? allocateRoundRobinChunks(skippedIndices, [bestServer], skippedChunkCount) : [])
+    ...allocateRoundRobinChunks(skippedIndices, performanceServers, skippedChunkCount)
   ];
 }
 

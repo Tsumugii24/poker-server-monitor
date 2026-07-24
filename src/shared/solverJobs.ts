@@ -280,7 +280,6 @@ export type ParallelSolverJobCreateRequest = ParallelSolverJobPreviewRequest & {
 
 export type ParallelFailurePoolPreviewRequest = ParallelSolverJobPreviewRequest & {
   indices?: number[];
-  bestServerId?: string;
 };
 
 export type ParallelFailurePoolSubmitRequest = ParallelFailurePoolPreviewRequest & {

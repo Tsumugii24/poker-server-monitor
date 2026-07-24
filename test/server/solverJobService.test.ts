@@ -1874,6 +1874,7 @@ describe("solver job API", () => {
         host: "10.0.0.3",
         port: 22,
         enabled: true,
+        tier: "performance",
         note: "TBD",
         solverRoot: "/srv/solver",
         tmuxSession: "solver",
@@ -1929,7 +1930,6 @@ describe("solver job API", () => {
         datasetName,
         indices,
         serverIds: ["solver-01", "solver-02"],
-        bestServerId: "solver-03",
         chunkCount: 4,
         settings: { uploadEnabled: false }
       });
@@ -2283,7 +2283,7 @@ describe("solver job API", () => {
     });
   });
 
-  it("routes skipped failure-pool boards to the configured best server", async () => {
+  it("routes skipped failure-pool boards to the Performance Tier", async () => {
     db.syncServers([
       ...servers,
       {
@@ -2292,6 +2292,7 @@ describe("solver job API", () => {
         host: "10.0.0.2",
         port: 22,
         enabled: true,
+        tier: "performance",
         note: "TBD",
         solverRoot: "/srv/solver",
         tmuxSession: "solver",
@@ -2303,6 +2304,7 @@ describe("solver job API", () => {
         host: "10.0.0.3",
         port: 22,
         enabled: true,
+        tier: "performance",
         note: "TBD",
         solverRoot: "/srv/solver",
         tmuxSession: "solver",
@@ -2372,7 +2374,6 @@ describe("solver job API", () => {
         rangePath,
         indices: [skippedIndex],
         serverIds: ["solver-01"],
-        bestServerId: "solver-03",
         settings: { uploadEnabled: false }
       });
 
@@ -2387,7 +2388,6 @@ describe("solver job API", () => {
       rangePath,
       indices: [skippedIndex],
       serverIds: ["solver-01"],
-      bestServerId: "solver-03",
       settings: { uploadEnabled: false },
       confirmDatasetName: true,
       queueMode: "queue_next"
@@ -2401,7 +2401,7 @@ describe("solver job API", () => {
     expect(firstRetry.body.run.slices).toHaveLength(1);
     expect(firstRetry.body.run.slices[0]).toMatchObject({
       serverId: "",
-      candidateServerIds: ["solver-03"],
+      candidateServerIds: ["solver-02", "solver-03"],
       rangeExpr: String(skippedIndex)
     });
     expect(firstRetry.body.failurePool.find((entry: { boardIndex: number }) => entry.boardIndex === skippedIndex).status).toBe("queued");
@@ -2420,7 +2420,7 @@ describe("solver job API", () => {
     const retryRun = afterDispatch.body.runs.find((run: { id: string }) => run.id === retry.body.run.id);
     expect(retryRun.slices[0]).toMatchObject({
       serverId: "solver-03",
-      candidateServerIds: ["solver-03"],
+      candidateServerIds: ["solver-02", "solver-03"],
       status: "running"
     });
   });
