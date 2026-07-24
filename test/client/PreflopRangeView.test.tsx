@@ -4,7 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { DEFAULT_SOLVER_JOB_SETTINGS, type ParallelSolverRun } from "../../src/shared/solverJobs";
-import { ParallelQueueBoard } from "../../src/client/PreflopRangeView";
+import { ParallelQueueBoard, ParallelRunProgress } from "../../src/client/PreflopRangeView";
 
 function queuedRun(id: string, datasetName: string, queueOrder: number): ParallelSolverRun {
   return {
@@ -73,5 +73,27 @@ describe("ParallelQueueBoard", () => {
 
     await userEvent.click(screen.getByRole("button", { name: "Move selected run left" }));
     expect(onMove).toHaveBeenCalledWith("run-b", "left");
+  });
+});
+
+describe("ParallelRunProgress", () => {
+  it("shows done versus assigned boards as a bounded accessible percentage", () => {
+    const { rerender } = render(<ParallelRunProgress assigned={20} done={7} />);
+
+    let progress = screen.getByRole("progressbar", { name: "Parallel run completion" });
+    expect(progress).toHaveAttribute("aria-valuenow", "35");
+    expect(progress).toHaveAttribute("aria-valuetext", "7 of 20 assigned boards done");
+    expect(screen.getByText("35%")).toBeInTheDocument();
+    expect(progress.firstElementChild).toHaveStyle({ width: "35%" });
+
+    rerender(<ParallelRunProgress assigned={10} done={12} />);
+    progress = screen.getByRole("progressbar", { name: "Parallel run completion" });
+    expect(progress).toHaveAttribute("aria-valuenow", "100");
+    expect(progress.firstElementChild).toHaveStyle({ width: "100%" });
+
+    rerender(<ParallelRunProgress assigned={0} done={0} />);
+    progress = screen.getByRole("progressbar", { name: "Parallel run completion" });
+    expect(progress).toHaveAttribute("aria-valuenow", "0");
+    expect(progress.firstElementChild).toHaveStyle({ width: "0%" });
   });
 });

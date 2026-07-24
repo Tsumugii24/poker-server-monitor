@@ -4247,6 +4247,10 @@ function ParallelSolverJobPanel({
                 </div>
                 <em className={`solver-job-status ${dispatch.className || run.status}`}>{dispatch.label}</em>
               </div>
+              <ParallelRunProgress
+                assigned={run.report.totalBoards}
+                done={run.report.completedBoards}
+              />
               <div className="parallel-run-metrics">
                 <div><span>Assigned</span><strong>{run.report.totalBoards}</strong></div>
                 <div><span>Dispatch</span><strong>{dispatch.metric}</strong></div>
@@ -4277,6 +4281,37 @@ function ParallelSolverJobPanel({
         </div>
       </div>
     </div>
+    </div>
+  );
+}
+
+export function ParallelRunProgress({ assigned, done }: { assigned: number; done: number }) {
+  const safeAssigned = Number.isFinite(assigned) ? Math.max(0, Math.round(assigned)) : 0;
+  const safeDone = Number.isFinite(done) ? Math.max(0, Math.round(done)) : 0;
+  const ratio = safeAssigned > 0 ? safeDone / safeAssigned : 0;
+  const progress = Math.min(100, Math.max(0, ratio * 100));
+  const percentage = Math.round(progress);
+
+  return (
+    <div className={`parallel-run-progress ${percentage === 100 ? "complete" : ""}`}>
+      <div className="parallel-run-progress-head">
+        <div>
+          <span>Completion</span>
+          <strong>{safeDone} done <small>/ {safeAssigned} assigned</small></strong>
+        </div>
+        <em>{percentage}%</em>
+      </div>
+      <div
+        className="parallel-run-progress-track"
+        role="progressbar"
+        aria-label="Parallel run completion"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={percentage}
+        aria-valuetext={`${safeDone} of ${safeAssigned} assigned boards done`}
+      >
+        <span className="parallel-run-progress-fill" style={{ width: `${progress}%` }} />
+      </div>
     </div>
   );
 }

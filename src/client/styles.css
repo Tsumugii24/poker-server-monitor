@@ -6518,6 +6518,79 @@ td .port-value {
   font-size: 11px;
 }
 
+.parallel-run-progress {
+  --parallel-progress-color: var(--accent);
+  display: grid;
+  gap: 7px;
+  padding: 2px 1px 0;
+}
+
+.parallel-run-progress.complete {
+  --parallel-progress-color: var(--green);
+}
+
+.parallel-run-progress-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.parallel-run-progress-head > div {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.parallel-run-progress-head span {
+  color: var(--text-tertiary);
+  font-size: 9px;
+  font-weight: 900;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.parallel-run-progress-head strong {
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.parallel-run-progress-head small {
+  color: var(--text-tertiary);
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.parallel-run-progress-head em {
+  flex: 0 0 auto;
+  color: var(--parallel-progress-color);
+  font-size: 17px;
+  font-style: normal;
+  font-variant-numeric: tabular-nums;
+  font-weight: 900;
+  line-height: 1;
+}
+
+.parallel-run-progress-track {
+  height: 9px;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--parallel-progress-color) 18%, var(--border));
+  border-radius: var(--radius-pill);
+  background: var(--neutral-bg);
+}
+
+.parallel-run-progress-fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--parallel-progress-color);
+  transition: width 320ms ease;
+}
+
 .parallel-slice-row {
   display: grid;
   grid-template-columns: minmax(72px, 0.25fr) 48px 78px minmax(0, 1fr);
@@ -6571,6 +6644,12 @@ td .port-value {
 .solver-job-status.queued {
   color: var(--yellow-text);
   background: var(--yellow-bg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .parallel-run-progress-fill {
+    transition: none;
+  }
 }
 
 .solver-job-status.canceled {
