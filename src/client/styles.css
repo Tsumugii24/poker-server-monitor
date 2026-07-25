@@ -2607,6 +2607,10 @@ td .port-value {
   gap: 14px;
 }
 
+.sw-settings-grid.connection-check-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 .sw-toggle-field {
   min-height: 76px;
   display: grid;
@@ -3043,6 +3047,10 @@ td .port-value {
   }
 
   .sw-settings-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .sw-settings-grid.connection-check-grid {
     grid-template-columns: 1fr;
   }
 

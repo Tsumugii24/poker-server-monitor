@@ -76,6 +76,8 @@ export type AlertSettings = {
   wechatAccounts: WeChatAccount[];
   cooldownMinutes: number;
   language: "en" | "zh";
+  /** How often the backend probes enabled servers whose latest status is offline. */
+  offlineRetryIntervalSeconds: number;
   /** SSH command execution timeout in seconds. */
   sshCommandTimeoutSeconds: number;
   /** SSH connection handshake timeout in seconds. */

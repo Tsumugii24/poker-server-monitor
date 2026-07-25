@@ -5,6 +5,7 @@ import { AlertService, alertRefreshIntervalMs } from "./alertService";
 import { resolveSshTimeouts } from "../shared/sshSettings";
 import { loadAlertSettings, loadRuntimeConfig, loadServerInventory } from "./config";
 import { MonitorDatabase } from "./db";
+import { OfflineRecoveryService } from "./offlineRecoveryService";
 import { RefreshService } from "./refreshService";
 import { SolverJobService } from "./solverJobService";
 import { loadSolverScenarioLibrary } from "./scenarioLibraryStore";
@@ -79,8 +80,6 @@ async function main(): Promise<void> {
     alerts: alertService,
     inventoryPath: config.inventoryPath
   });
-  refreshService.startScheduler({ runImmediately: true });
-
   const solverJobService = new SolverJobService({
     db,
     preflopRangesPath: config.preflopRangesPath,
@@ -96,6 +95,19 @@ async function main(): Promise<void> {
     getHfProxySettings: () => loadAlertSettings(config.alertSettingsPath),
     getScenarioLibrary: () => loadSolverScenarioLibrary(config.solverScenarioLibraryPath).scenarios
   });
+  const offlineRecoveryService = new OfflineRecoveryService({
+    db,
+    refreshService,
+    intervalSeconds: alertSettings.offlineRetryIntervalSeconds,
+    credentials: config.ssh,
+    getSshTimeouts: () => resolveSshTimeouts(loadAlertSettings(config.alertSettingsPath)),
+    onRecovered: async (serverIds) => {
+      console.log(`Offline servers recovered: ${serverIds.join(", ")}`);
+      await solverJobService.reconcileAndStartQueuedJobs();
+    }
+  });
+  refreshService.startScheduler({ runImmediately: true });
+  offlineRecoveryService.start();
   windowlessInterval(() => {
     void solverJobService.reconcileAndStartQueuedJobs().catch((error: unknown) => {
       console.error("Solver job queue reconciliation failed", error);
@@ -105,6 +117,7 @@ async function main(): Promise<void> {
   const app = createApp({
     db,
     refreshService,
+    offlineRecoveryService,
     inventoryPath: config.inventoryPath,
     alertSettingsPath: config.alertSettingsPath,
     preflopRangesPath: config.preflopRangesPath,

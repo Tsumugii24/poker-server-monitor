@@ -695,6 +695,30 @@ describe("App", () => {
     );
   });
 
+  it("edits the offline recovery interval from Connection Check settings", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "Open settings" }));
+    await user.click(await screen.findByRole("button", { name: "Connection Check" }));
+    const retryInterval = screen.getByRole("spinbutton", { name: "Offline Retry Interval (sec)" });
+    expect(retryInterval).toHaveValue(60);
+
+    await user.clear(retryInterval);
+    await user.type(retryInterval, "30");
+    await user.click(screen.getByRole("button", { name: "Save Settings" }));
+
+    await waitFor(() =>
+      expect(fetch).toHaveBeenCalledWith(
+        "/api/settings/alerts",
+        expect.objectContaining({
+          method: "PATCH",
+          body: expect.stringContaining('"offlineRetryIntervalSeconds":30')
+        })
+      )
+    );
+  });
+
   it("shows a waiting state before the QR URL arrives", async () => {
     const pendingAccount = weChatAccountStatus({
       connector: {

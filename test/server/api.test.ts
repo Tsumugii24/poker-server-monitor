@@ -309,6 +309,7 @@ describe("monitor API", () => {
       wechatAccounts: [],
       cooldownMinutes: 60,
       language: "en",
+      offlineRetryIntervalSeconds: 60,
       sshCommandTimeoutSeconds: 15,
       sshConnectTimeoutSeconds: 10,
       hfProxyEnabled: false,
@@ -323,9 +324,22 @@ describe("monitor API", () => {
 
   it("updates alert settings", async () => {
     const startAlertConnector = vi.fn();
-    const response = await request(createApp({ db, refreshService: service, alertSettingsPath, startAlertConnector }))
+    const offlineRecoveryService = { updateIntervalSeconds: vi.fn() };
+    const response = await request(createApp({
+      db,
+      refreshService: service,
+      offlineRecoveryService,
+      alertSettingsPath,
+      startAlertConnector
+    }))
       .patch("/api/settings/alerts")
-      .send({ enabled: true, wechatRoomId: "12345@chatroom", cooldownMinutes: 15, language: "zh" });
+      .send({
+        enabled: true,
+        wechatRoomId: "12345@chatroom",
+        cooldownMinutes: 15,
+        language: "zh",
+        offlineRetryIntervalSeconds: 45
+      });
 
     expect(response.status).toBe(200);
     expect(response.body.settings.enabled).toBe(true);
@@ -333,9 +347,11 @@ describe("monitor API", () => {
       enabled: true,
       wechatRoomId: "12345@chatroom",
       cooldownMinutes: 15,
-      language: "zh"
+      language: "zh",
+      offlineRetryIntervalSeconds: 45
     });
     expect(startAlertConnector).toHaveBeenCalledTimes(1);
+    expect(offlineRecoveryService.updateIntervalSeconds).toHaveBeenCalledWith(45);
   });
 
   it("requires configured proxy URLs and enabled settings for Hugging Face proxy", async () => {

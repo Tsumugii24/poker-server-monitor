@@ -7,6 +7,7 @@ export const defaultAlertSettingsFixture: AlertSettings = {
   wechatAccounts: [],
   cooldownMinutes: 60,
   language: "en",
+  offlineRetryIntervalSeconds: 60,
   sshCommandTimeoutSeconds: 15,
   sshConnectTimeoutSeconds: 10,
   hfProxyEnabled: false,

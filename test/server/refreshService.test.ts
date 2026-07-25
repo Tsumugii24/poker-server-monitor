@@ -99,6 +99,27 @@ describe("RefreshService", () => {
     });
   });
 
+  it("refreshes one recovered server without running a full inventory refresh", async () => {
+    const collectedServerIds: string[] = [];
+    const service = new RefreshService({
+      db,
+      servers,
+      intervalMs: 3_600_000,
+      collect: async (server) => {
+        collectedServerIds.push(server.id);
+        return metric(server.id, "online");
+      }
+    });
+
+    const refreshed = await service.refreshServer("prod-02");
+
+    expect(refreshed?.metrics.connectionStatus).toBe("online");
+    expect(collectedServerIds).toEqual(["prod-02"]);
+    expect(db.getServerRows().find((server) => server.id === "prod-02")?.latest?.connectionStatus).toBe("online");
+    expect(db.getServerRows().find((server) => server.id === "prod-01")?.latest).toBeNull();
+    expect(db.getLastRefreshRun()).toBeNull();
+  });
+
   it("syncs discovered dataset names back to the inventory file", async () => {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "server-monitor-refresh-"));
     const inventoryPath = path.join(tempDir, "servers.json");

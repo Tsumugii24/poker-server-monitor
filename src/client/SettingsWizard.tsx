@@ -144,6 +144,7 @@ export function SettingsWizard({
       await onSave({
         ...draft,
         cooldownMinutes: Math.max(1, draft.cooldownMinutes),
+        offlineRetryIntervalSeconds: Math.max(1, Math.trunc(draft.offlineRetryIntervalSeconds)),
         sshCommandTimeoutSeconds: Math.max(1, draft.sshCommandTimeoutSeconds),
         sshConnectTimeoutSeconds: Math.max(1, draft.sshConnectTimeoutSeconds)
       });
@@ -688,10 +689,29 @@ export function SettingsWizard({
             <h4>{copy.check.title}</h4>
             <p className="sw-help">{copy.check.detail}</p>
             <div className="sw-global-settings">
-              <div className="sw-settings-grid">
+              <div className="sw-settings-grid connection-check-grid">
                 <div className="sw-field">
-                  <label>{copy.check.connectTimeout}</label>
+                  <label htmlFor="offline-retry-interval">{copy.check.offlineRetryInterval}</label>
                   <input
+                    id="offline-retry-interval"
+                    type="number"
+                    min="1"
+                    step="1"
+                    value={draft.offlineRetryIntervalSeconds || ""}
+                    onChange={(event) => setDraft((current) => ({
+                      ...current,
+                      offlineRetryIntervalSeconds: event.target.value === ""
+                        ? 0
+                        : Math.max(1, Math.trunc(Number(event.target.value) || 1))
+                    }))}
+                    disabled={saving}
+                  />
+                  <span className="sw-field-hint">{copy.check.offlineRetryIntervalHelp}</span>
+                </div>
+                <div className="sw-field">
+                  <label htmlFor="ssh-connect-timeout">{copy.check.connectTimeout}</label>
+                  <input
+                    id="ssh-connect-timeout"
                     type="number"
                     min="1"
                     value={draft.sshConnectTimeoutSeconds || ""}
@@ -699,12 +719,14 @@ export function SettingsWizard({
                       ...current,
                       sshConnectTimeoutSeconds: event.target.value === "" ? 0 : Math.max(1, Number(event.target.value) || 1)
                     }))}
+                    disabled={saving}
                   />
                   <span className="sw-field-hint">{copy.check.connectTimeoutHelp}</span>
                 </div>
                 <div className="sw-field">
-                  <label>{copy.check.commandTimeout}</label>
+                  <label htmlFor="ssh-command-timeout">{copy.check.commandTimeout}</label>
                   <input
+                    id="ssh-command-timeout"
                     type="number"
                     min="1"
                     value={draft.sshCommandTimeoutSeconds || ""}
@@ -712,6 +734,7 @@ export function SettingsWizard({
                       ...current,
                       sshCommandTimeoutSeconds: event.target.value === "" ? 0 : Math.max(1, Number(event.target.value) || 1)
                     }))}
+                    disabled={saving}
                   />
                   <span className="sw-field-hint">{copy.check.commandTimeoutHelp}</span>
                 </div>
@@ -999,7 +1022,9 @@ const COPY = {
     },
     check: {
       title: "Connection Check Settings",
-      detail: "Configure SSH timeouts used when refreshing server metrics and pipeline status.",
+      detail: "Configure offline recovery frequency and SSH timeouts used for server status checks.",
+      offlineRetryInterval: "Offline Retry Interval (sec)",
+      offlineRetryIntervalHelp: "Probe only offline servers at this interval and reschedule queued work as soon as one recovers.",
       connectTimeout: "SSH Connect Timeout (sec)",
       connectTimeoutHelp: "Maximum wait for the SSH handshake. Default: 10 seconds.",
       commandTimeout: "SSH Command Timeout (sec)",
@@ -1105,7 +1130,9 @@ const COPY = {
     },
     check: {
       title: "连接检查设置",
-      detail: "配置刷新服务器指标与 Pipeline 状态时使用的 SSH 超时时间。",
+      detail: "配置离线恢复频率，以及服务器状态检查使用的 SSH 超时时间。",
+      offlineRetryInterval: "离线重试间隔（秒）",
+      offlineRetryIntervalHelp: "按此间隔仅探测离线服务器；恢复后立即重新调度队列任务。",
       connectTimeout: "SSH 连接超时（秒）",
       connectTimeoutHelp: "等待 SSH 握手的最大时间。默认 10 秒。",
       commandTimeout: "SSH 命令超时（秒）",

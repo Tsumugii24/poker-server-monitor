@@ -310,6 +310,7 @@ describe("alert settings loading", () => {
       wechatAccounts: [],
       cooldownMinutes: 60,
       language: "en",
+      offlineRetryIntervalSeconds: 60,
       sshCommandTimeoutSeconds: 15,
       sshConnectTimeoutSeconds: 10,
       hfProxyEnabled: false,
@@ -327,6 +328,7 @@ describe("alert settings loading", () => {
       wechatAccounts: [],
       cooldownMinutes: 30,
       language: "zh",
+      offlineRetryIntervalSeconds: 45,
       sshCommandTimeoutSeconds: 20,
       sshConnectTimeoutSeconds: 8,
       hfProxyEnabled: true,
@@ -339,6 +341,7 @@ describe("alert settings loading", () => {
       wechatAccounts: [],
       cooldownMinutes: 30,
       language: "zh",
+      offlineRetryIntervalSeconds: 45,
       sshCommandTimeoutSeconds: 20,
       sshConnectTimeoutSeconds: 8,
       hfProxyEnabled: true,
@@ -351,11 +354,26 @@ describe("alert settings loading", () => {
     fs.writeFileSync(file, JSON.stringify({ enabled: true, cooldownMinutes: 30, language: "en" }));
 
     expect(loadAlertSettings(file)).toMatchObject({
+      offlineRetryIntervalSeconds: 60,
       sshCommandTimeoutSeconds: 15,
       sshConnectTimeoutSeconds: 10,
       hfProxyEnabled: false,
       solverHfProxyEnabled: false
     });
+  });
+
+  it("rejects invalid offline recovery intervals", () => {
+    const file = path.join(tempDir, "alerts-invalid-offline-retry.json");
+    fs.writeFileSync(file, JSON.stringify({
+      enabled: false,
+      cooldownMinutes: 60,
+      language: "en",
+      offlineRetryIntervalSeconds: 0
+    }));
+
+    expect(() => loadAlertSettings(file)).toThrow(
+      "alerts.offlineRetryIntervalSeconds must be a positive integer"
+    );
   });
 
   it("normalizes persisted WeChat account entries", () => {

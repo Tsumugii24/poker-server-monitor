@@ -4,6 +4,7 @@ import path from "node:path";
 import process from "node:process";
 import dotenv from "dotenv";
 import {
+  DEFAULT_OFFLINE_RETRY_INTERVAL_SECONDS,
   DEFAULT_SSH_COMMAND_TIMEOUT_SECONDS,
   DEFAULT_SSH_CONNECT_TIMEOUT_SECONDS
 } from "../shared/sshSettings";
@@ -426,6 +427,7 @@ function defaultAlertSettings(): AlertSettings {
     wechatAccounts: [],
     cooldownMinutes: 60,
     language: "en",
+    offlineRetryIntervalSeconds: DEFAULT_OFFLINE_RETRY_INTERVAL_SECONDS,
     sshCommandTimeoutSeconds: DEFAULT_SSH_COMMAND_TIMEOUT_SECONDS,
     sshConnectTimeoutSeconds: DEFAULT_SSH_CONNECT_TIMEOUT_SECONDS,
     hfProxyEnabled: false,
@@ -439,6 +441,9 @@ function normalizeAlertSettings(value: Record<string, unknown>): AlertSettings {
     ? 60
     : requiredPositiveNumber(value.cooldownMinutes, "alerts.cooldownMinutes");
   const language = value.language == null ? "en" : requiredAlertLanguage(value.language);
+  const offlineRetryIntervalSeconds = value.offlineRetryIntervalSeconds == null
+    ? DEFAULT_OFFLINE_RETRY_INTERVAL_SECONDS
+    : requiredPositiveInteger(value.offlineRetryIntervalSeconds, "alerts.offlineRetryIntervalSeconds");
   const sshCommandTimeoutSeconds = value.sshCommandTimeoutSeconds == null
     ? DEFAULT_SSH_COMMAND_TIMEOUT_SECONDS
     : requiredPositiveNumber(value.sshCommandTimeoutSeconds, "alerts.sshCommandTimeoutSeconds");
@@ -500,6 +505,7 @@ function normalizeAlertSettings(value: Record<string, unknown>): AlertSettings {
     wechatAccounts: accounts,
     cooldownMinutes,
     language,
+    offlineRetryIntervalSeconds,
     sshCommandTimeoutSeconds,
     sshConnectTimeoutSeconds,
     hfProxyEnabled,
@@ -583,6 +589,14 @@ function requiredNumber(value: unknown, name: string): number {
     throw new Error(`${name} must be a number`);
   }
   return value;
+}
+
+function requiredPositiveInteger(value: unknown, name: string): number {
+  const parsed = requiredNumber(value, name);
+  if (!Number.isInteger(parsed) || parsed < 1) {
+    throw new Error(`${name} must be a positive integer`);
+  }
+  return parsed;
 }
 
 function requiredPort(value: unknown, name: string): number {

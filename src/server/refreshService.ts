@@ -28,6 +28,11 @@ export type RefreshServiceOptions = {
   inventoryPath?: string;
 };
 
+export type ServerRefreshResult = {
+  metrics: MetricSnapshot;
+  pipeline: PipelineStatusSnapshot;
+};
+
 export class RefreshService {
   private active = false;
   private nextRefreshAt: string | null = null;
@@ -35,6 +40,7 @@ export class RefreshService {
   private scheduler: NodeJS.Timeout | null = null;
   private intervalMs: number;
   private current: RefreshState["current"] = null;
+  private readonly serverRefreshTasks = new Map<string, Promise<ServerRefreshResult>>();
   private readonly collect: (server: ServerConfig) => Promise<MetricSnapshot>;
   private readonly collectPipeline: (server: ServerConfig) => Promise<PipelineStatusSnapshot>;
 
@@ -93,19 +99,7 @@ export class RefreshService {
       };
       const collected = await Promise.all(
         enabledServers.map(async (server) => {
-          const [metrics, pipeline] = await Promise.all([
-            this.collect(server),
-            this.collectPipeline(server)
-          ]);
-          const item = {
-            metrics: { ...metrics, collectedAt },
-            pipeline: { ...pipeline, collectedAt }
-          };
-          this.options.db.insertSnapshot(item.metrics);
-          this.options.db.insertPipelineSnapshot(item.pipeline);
-          if (item.pipeline.datasetName) {
-            this.options.db.updateServerLastDatasetName(item.metrics.serverId, item.pipeline.datasetName);
-          }
+          const item = await this.collectAndPersistServer(server, collectedAt);
           if (this.current?.startedAt === startedAt) {
             this.current.completedServers += 1;
           }
@@ -149,6 +143,15 @@ export class RefreshService {
       this.active = false;
       this.current = null;
     }
+  }
+
+  async refreshServer(serverId: string): Promise<ServerRefreshResult | null> {
+    const server = this.options.servers.find((candidate) => candidate.id === serverId);
+    if (!server?.enabled) return null;
+    const item = await this.collectAndPersistServer(server, new Date().toISOString());
+    this.syncDiscoveredServerNames([item]);
+    this.options.db.pruneSnapshots(24);
+    return item;
   }
 
   getState(): RefreshState {
@@ -199,6 +202,33 @@ export class RefreshService {
   private scheduleNextTime(timestampMs: number): void {
     this.nextRefreshAtMs = timestampMs;
     this.nextRefreshAt = new Date(timestampMs).toISOString();
+  }
+
+  private collectAndPersistServer(server: ServerConfig, collectedAt: string): Promise<ServerRefreshResult> {
+    const current = this.serverRefreshTasks.get(server.id);
+    if (current) return current;
+
+    const task = Promise.all([
+      this.collect(server),
+      this.collectPipeline(server)
+    ]).then(([metrics, pipeline]) => {
+      const item: ServerRefreshResult = {
+        metrics: { ...metrics, collectedAt },
+        pipeline: { ...pipeline, collectedAt }
+      };
+      this.options.db.insertSnapshot(item.metrics);
+      this.options.db.insertPipelineSnapshot(item.pipeline);
+      if (item.pipeline.datasetName) {
+        this.options.db.updateServerLastDatasetName(item.metrics.serverId, item.pipeline.datasetName);
+      }
+      return item;
+    }).finally(() => {
+      if (this.serverRefreshTasks.get(server.id) === task) {
+        this.serverRefreshTasks.delete(server.id);
+      }
+    });
+    this.serverRefreshTasks.set(server.id, task);
+    return task;
   }
 
   private syncDiscoveredServerNames(collected: Array<{

@@ -85,6 +85,9 @@ import {
 export type AppDependencies = {
   db: MonitorDatabase;
   refreshService: RefreshService;
+  offlineRecoveryService?: {
+    updateIntervalSeconds: (intervalSeconds: number) => void;
+  };
   inventoryPath?: string;
   alertSettingsPath?: string;
   preflopRangesPath?: string;
@@ -126,6 +129,7 @@ export type AppDependencies = {
 export function createApp({
   db,
   refreshService,
+  offlineRecoveryService,
   inventoryPath = "config/servers.json",
   alertSettingsPath = "config/alerts.json",
   preflopRangesPath = "config/preflop-ranges",
@@ -971,6 +975,7 @@ export function createApp({
     try {
       const settings = saveAlertSettings(alertSettingsPath, request.body);
       refreshService.updateScheduleInterval(alertRefreshIntervalMs(settings, defaultRefreshIntervalMs));
+      offlineRecoveryService?.updateIntervalSeconds(settings.offlineRetryIntervalSeconds);
       if (settings.enabled) {
         void Promise.resolve(startAlertConnector?.()).catch((error: unknown) => {
           console.error("Alert connector startup failed", error);
@@ -1580,6 +1585,15 @@ function isAlertSettingsInput(value: unknown): value is AlertSettings {
   if (typeof value.enabled !== "boolean") return false;
   if (typeof value.cooldownMinutes !== "number" || !Number.isFinite(value.cooldownMinutes)) return false;
   if (value.language !== "en" && value.language !== "zh") return false;
+  if (
+    value.offlineRetryIntervalSeconds != null &&
+    (
+      typeof value.offlineRetryIntervalSeconds !== "number" ||
+      !Number.isFinite(value.offlineRetryIntervalSeconds)
+    )
+  ) {
+    return false;
+  }
   if (
     value.sshCommandTimeoutSeconds != null &&
     (typeof value.sshCommandTimeoutSeconds !== "number" || !Number.isFinite(value.sshCommandTimeoutSeconds))
