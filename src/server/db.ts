@@ -448,7 +448,10 @@ export class MonitorDatabase {
 
   updateSolverJob(
     id: string,
-    patch: Partial<Pick<SolverJob, "status" | "startedAt" | "finishedAt" | "lastError" | "updatedAt" | "pipeline">>
+    patch: Partial<Pick<
+      SolverJob,
+      "status" | "settings" | "command" | "startedAt" | "finishedAt" | "lastError" | "updatedAt" | "pipeline"
+    >>
   ): SolverJob {
     const current = this.getSolverJob(id);
     if (!current) {
@@ -466,10 +469,13 @@ export class MonitorDatabase {
       : null;
     this.database.run(
       `UPDATE solver_jobs
-       SET status = ?, started_at = ?, finished_at = ?, last_error = ?, updated_at = ?, pipeline_snapshot_id = ?
+       SET status = ?, settings_json = ?, command_text = ?, started_at = ?, finished_at = ?,
+           last_error = ?, updated_at = ?, pipeline_snapshot_id = ?
        WHERE id = ?`,
       [
         patch.status ?? current.status,
+        JSON.stringify(patch.settings ?? current.settings),
+        patch.command ?? current.command,
         patch.startedAt !== undefined ? patch.startedAt : current.startedAt,
         patch.finishedAt !== undefined ? patch.finishedAt : current.finishedAt,
         patch.lastError !== undefined ? patch.lastError : current.lastError,
@@ -1732,7 +1738,11 @@ function pipelineSnapshotCanReconcileSolverJob(
   const jobReference = Date.parse(
     row.started_at == null ? String(row.created_at) : String(row.started_at)
   );
-  const pipelineReference = Date.parse(snapshot.startedAt ?? snapshot.collectedAt);
+  // collectedAt is when the monitor observed the remote state. An older task's
+  // embedded startedAt must not hide the fact that the server was still idle or
+  // reporting that task after this job was dispatched. The service applies the
+  // launch grace period before it is allowed to settle the active job.
+  const pipelineReference = Date.parse(snapshot.collectedAt);
   const isNewEnough = Number.isFinite(jobReference) &&
     Number.isFinite(pipelineReference) &&
     pipelineReference >= jobReference - 15_000;
@@ -1743,10 +1753,16 @@ function pipelineSnapshotCanReconcileSolverJob(
 
 function pipelineSnapshotBelongsToJobIdentity(
   snapshot: PipelineStatusSnapshot,
-  job: Pick<SolverJob, "id" | "repoId" | "datasetName">
+  job: Pick<SolverJob, "id" | "repoId" | "datasetName" | "createdAt" | "startedAt">
 ): boolean {
   if (snapshot.resultPath?.includes(job.id) || snapshot.command?.includes(job.id)) return true;
-  return snapshot.repoId === job.repoId || snapshot.datasetName === job.datasetName;
+  const identityMatches = snapshot.repoId === job.repoId || snapshot.datasetName === job.datasetName;
+  if (!identityMatches) return false;
+  const jobReference = Date.parse(job.startedAt ?? job.createdAt);
+  const pipelineStartedAt = Date.parse(snapshot.startedAt ?? "");
+  return Number.isFinite(jobReference) &&
+    Number.isFinite(pipelineStartedAt) &&
+    pipelineStartedAt >= jobReference - 15_000;
 }
 
 function mapParallelSolverRun(row: Record<string, SqlValue>, slices: ParallelSolverSlice[]): ParallelSolverRun {

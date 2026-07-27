@@ -67,6 +67,7 @@ import type {
   ServerUploadRequest
 } from "../shared/serverOperations";
 import type { MonitorDatabase } from "./db";
+import { collectServerPipelineStatus } from "./pipelineStatusCollector";
 import { readPreflopRangeFile } from "./preflopRangeStore";
 import type { SshCredentials, SshExecutor } from "./sshCollector";
 import { Ssh2Executor } from "./sshCollector";
@@ -94,6 +95,7 @@ type SolverJobServiceOptions = {
 type DispatchPreflightResult = {
   ready: boolean;
   reason: string | null;
+  reasonCode: string | null;
 };
 
 const ACTIVE_JOB_STATUSES = new Set<SolverJobStatus>(["deploying", "running", "stopping"]);
@@ -107,6 +109,7 @@ const DEFAULT_SOLVER_ROOT = "~/solver";
 const DEFAULT_REMOTE_PROXY_URL = "http://127.0.0.1:7890";
 const ACTIVE_SERVER_OPERATION_STATUSES = new Set(["queued", "deploying", "running"]);
 const ACTIVE_JOB_RECONCILE_GRACE_MS = 15_000;
+const MAX_PARALLEL_LAUNCH_ATTEMPTS = 3;
 const HUGGING_FACE_ORIGIN = "https://huggingface.co";
 const HUGGING_FACE_TREE_PAGE_LIMIT = 1000;
 const HUGGING_FACE_TREE_MAX_PAGES = 100;
@@ -978,6 +981,7 @@ export class SolverJobService {
   }
 
   private async runQueueReconciliation(): Promise<void> {
+    await this.refreshUnconfirmedActiveJobPipelines();
     this.reconcileCompletedJobs();
     this.reconcileParallelRuns();
     await this.reconcileServerOperations();
@@ -1542,13 +1546,80 @@ export class SolverJobService {
         const lastError = nextStatus === "failed" ? pipelineReconciliationError(job.pipeline, job) : null;
         this.options.db.updateSolverJob(job.id, {
           status: nextStatus,
-          finishedAt: job.pipeline?.finishedAt ?? new Date().toISOString(),
+          finishedAt: belongsToJob
+            ? job.pipeline?.finishedAt ?? new Date().toISOString()
+            : new Date().toISOString(),
           lastError,
           pipeline: belongsToJob ? job.pipeline : null
         });
         this.recordEvent(job.id, nextStatus, `Server task reconciled job as ${nextStatus}.`, null);
+        if (!belongsToJob && lastError) {
+          this.requeueParallelSliceAfterUnownedLaunch(job, lastError);
+        }
       }
     });
+  }
+
+  private requeueParallelSliceAfterUnownedLaunch(job: SolverJob, lastError: string): void {
+    if (job.queueMode !== "parallel" || !job.parallelSliceId) return;
+    const slice = this.options.db.getParallelSolverSlice(job.parallelSliceId);
+    if (!slice || slice.status === "completed" || slice.status === "failed" || slice.status === "canceled") return;
+    const attemptCount = this.options.db.getSolverJobs()
+      .filter((candidate) => candidate.parallelSliceId === slice.id)
+      .length;
+    if (attemptCount >= MAX_PARALLEL_LAUNCH_ATTEMPTS) {
+      this.recordEvent(
+        job.id,
+        "launch_retry_exhausted",
+        `Parallel chunk launch failed ${attemptCount} times; leaving the slice failed for manual review.`,
+        null
+      );
+      return;
+    }
+    const nextAttempt = attemptCount + 1;
+    this.options.db.updateParallelSolverSlice(slice.id, {
+      serverId: "",
+      jobId: null,
+      status: "queued",
+      completedCount: 0,
+      failedCount: 0,
+      startedAt: null,
+      finishedAt: null,
+      lastError: `Launch attempt ${attemptCount} did not take ownership; queued retry ${nextAttempt}/${MAX_PARALLEL_LAUNCH_ATTEMPTS}. ${lastError}`
+    });
+    this.recordEvent(
+      job.id,
+      "launch_retry_queued",
+      `Parallel chunk returned to the queue for launch attempt ${nextAttempt}/${MAX_PARALLEL_LAUNCH_ATTEMPTS}.`,
+      null
+    );
+  }
+
+  private async refreshUnconfirmedActiveJobPipelines(): Promise<void> {
+    if (!this.options.credentials) return;
+    const now = Date.now();
+    const servers = new Map(this.options.db.getServerRows().map((server) => [server.id, server]));
+    const jobs = this.options.db.getSolverJobs().filter((job) => {
+      if (!ACTIVE_JOB_STATUSES.has(job.status)) return false;
+      const reference = Date.parse(job.startedAt ?? job.updatedAt ?? job.createdAt);
+      if (!Number.isFinite(reference) || now - reference < ACTIVE_JOB_RECONCILE_GRACE_MS) return false;
+      return !job.pipeline ||
+        !pipelineIsNewEnoughForJob(job.pipeline, job) ||
+        job.pipeline.displayStatus === "unavailable";
+    });
+
+    await Promise.all(jobs.map(async (job) => {
+      const server = servers.get(job.serverId);
+      if (!server?.enabled || !serverIsOnline(server)) return;
+      const statusFilePath = server.pipelineStatusFilePath?.trim() || this.defaultPipelineStatusFilePath;
+      const snapshot = await collectServerPipelineStatus(
+        server,
+        this.options.credentials!,
+        statusFilePath,
+        this.executor
+      );
+      this.options.db.insertPipelineSnapshot(snapshot);
+    }));
   }
 
   private reconcileStartedJobsFromPipelines(): void {
@@ -1992,27 +2063,32 @@ export class SolverJobService {
     }
 
     this.ensureCredentials();
+    let dispatchJob = job;
     try {
-      const preflight = await this.runDispatchPreflight(job, server);
+      let preflight = await this.runDispatchPreflight(dispatchJob, server);
+      if (!preflight.ready && this.canFallbackToNoUpload(dispatchJob, preflight)) {
+        dispatchJob = this.fallbackJobToNoUpload(dispatchJob, server, preflight);
+        preflight = await this.runDispatchPreflight(dispatchJob, server);
+      }
       if (!preflight.ready) {
         this.markJobDispatchPending(
-          job,
+          dispatchJob,
           `Dispatch pending: server ${server.id} is not ready${preflight.reason ? ` (${preflight.reason})` : ""}.`
         );
         return false;
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      this.markJobDispatchPending(job, `Dispatch pending: SSH preflight failed for ${server.id}: ${message}`);
+      this.markJobDispatchPending(dispatchJob, `Dispatch pending: SSH preflight failed for ${server.id}: ${message}`);
       return false;
     }
 
     try {
-      const started = await this.start(job.id, { deferOnDispatchFailure: true, preflightChecked: true });
+      const started = await this.start(dispatchJob.id, { deferOnDispatchFailure: true, preflightChecked: true });
       return started.status === "running";
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      this.markJobDispatchPending(job, `Dispatch pending: ${message}`);
+      this.markJobDispatchPending(dispatchJob, `Dispatch pending: ${message}`);
       return false;
     }
   }
@@ -2029,6 +2105,45 @@ export class SolverJobService {
 
   private dispatchProxyUrl(job: SolverJob): string | null {
     return job.settings.uploadEnabled ? this.effectiveSolverHfProxyUrl() : null;
+  }
+
+  private canFallbackToNoUpload(job: SolverJob, preflight: DispatchPreflightResult): boolean {
+    if (job.queueMode !== "parallel" || !job.settings.uploadEnabled) return false;
+    if (preflight.reasonCode === "mihomo_missing" ||
+        preflight.reasonCode === "curl_missing" ||
+        preflight.reasonCode === "hugging_face_unreachable") {
+      return true;
+    }
+    return /mihomo|hugging face|proxy|curl/i.test(preflight.reason ?? "");
+  }
+
+  private fallbackJobToNoUpload(
+    job: SolverJob,
+    server: ServerRow,
+    preflight: DispatchPreflightResult
+  ): SolverJob {
+    const settings: SolverJobSettings = { ...job.settings, uploadEnabled: false };
+    const command = buildRunPipelineCommand({
+      solverRoot: effectiveSolverRoot(server),
+      repoId: job.repoId,
+      scenario: job.scenario,
+      rangePath: job.remoteRangePath,
+      resultPath: job.remoteResultPath,
+      settings,
+      statusFilePath: statusFileFromJob(job),
+      hfToken: this.hfToken,
+      hfProxyUrl: this.effectiveSolverHfProxyUrl(),
+      redactSecrets: true
+    });
+    const reason = preflight.reason ?? preflight.reasonCode ?? "upload network preflight failed";
+    const message = `Upload unavailable on ${server.id} (${reason}); dispatching solver with --no-upload.`;
+    const updated = this.options.db.updateSolverJob(job.id, {
+      settings,
+      command,
+      lastError: null
+    });
+    this.recordEvent(job.id, "upload_fallback", message, command);
+    return updated;
   }
 
   private markJobDispatchPending(job: SolverJob, message: string): SolverJob {
@@ -2640,6 +2755,11 @@ export function buildDeployRangeCommand(job: SolverJob): string {
 export function buildTmuxStartCommand(job: SolverJob, solverRoot: string, command = job.command): string {
   return [
     "set -e",
+    `STATUS_FILE=${shellQuoteRemotePath(statusFileFromJob(job))}`,
+    // Remove the previous task's terminal status immediately before dispatch.
+    // If the new command exits before writing its own status, inventory reports
+    // IDLE instead of indefinitely presenting an unrelated completed task.
+    `rm -f "$STATUS_FILE"`,
     `tmux has-session -t ${shellQuote(job.tmuxSession)} 2>/dev/null || tmux new-session -d -s ${shellQuote(job.tmuxSession)} -c ${shellQuoteRemotePath(solverRoot)}`,
     `tmux send-keys -t ${shellQuote(job.tmuxSession)} ${shellQuote(command)} C-m`
   ].join("\n");
@@ -3376,16 +3496,19 @@ export function buildDispatchPreflightCommand(statusFilePath: string, proxyUrl: 
     ? String.raw`PROXY_URL=${shellQuote(proxyUrl)}
 if ! tmux has-session -t mihomo 2>/dev/null; then
   echo "DISPATCH_READY=0"
+  echo "DISPATCH_REASON_CODE=mihomo_missing"
   echo "DISPATCH_REASON=mihomo tmux session is not running; run Sync Network first"
   exit 0
 fi
 if ! command -v curl >/dev/null 2>&1; then
   echo "DISPATCH_READY=0"
+  echo "DISPATCH_REASON_CODE=curl_missing"
   echo "DISPATCH_REASON=curl is required for proxy verification"
   exit 0
 fi
 if ! curl --silent --show-error --fail --output /dev/null --max-time 8 --proxy "$PROXY_URL" https://huggingface.co/; then
   echo "DISPATCH_READY=0"
+  echo "DISPATCH_REASON_CODE=hugging_face_unreachable"
   echo "DISPATCH_REASON=Hugging Face is unreachable through $PROXY_URL; run Sync Network first"
   exit 0
 fi
@@ -3399,6 +3522,7 @@ if [ -f "$STATUS_FILE" ]; then
 fi
 if [ -n "$PID" ] && ps -p "$PID" > /dev/null 2>&1; then
   echo "DISPATCH_READY=0"
+  echo "DISPATCH_REASON_CODE=active_pid"
   echo "DISPATCH_REASON=active pid $PID"
 else
   ${networkCheck}  echo "DISPATCH_READY=1"
@@ -3520,7 +3644,14 @@ function pipelineBoardFailureCount(pipeline: PipelineStatusSnapshot): number {
 }
 
 function pipelineBelongsToJob(pipeline: PipelineStatusSnapshot, job: SolverJob): boolean {
-  return pipeline.repoId === job.repoId || pipeline.datasetName === job.datasetName;
+  if (pipeline.resultPath?.includes(job.id) || pipeline.command?.includes(job.id)) return true;
+  const identityMatches = pipeline.repoId === job.repoId || pipeline.datasetName === job.datasetName;
+  if (!identityMatches) return false;
+  const jobReference = Date.parse(job.startedAt ?? job.createdAt);
+  const pipelineStartedAt = Date.parse(pipeline.startedAt ?? "");
+  return Number.isFinite(jobReference) &&
+    Number.isFinite(pipelineStartedAt) &&
+    pipelineStartedAt >= jobReference - ACTIVE_JOB_RECONCILE_GRACE_MS;
 }
 
 function serverIsOnline(server: ServerRow): boolean {
@@ -3534,10 +3665,14 @@ function serverIsReadyForParallelSelection(server: ServerRow, activeJob: SolverJ
 function parseDispatchPreflightOutput(output: string): DispatchPreflightResult {
   const lines = output.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   const readyLine = lines.find((line) => line.startsWith("DISPATCH_READY="));
+  const reasonCodeLine = lines.find((line) => line.startsWith("DISPATCH_REASON_CODE="));
   const reasonLine = lines.find((line) => line.startsWith("DISPATCH_REASON="));
   return {
     ready: readyLine === "DISPATCH_READY=1",
-    reason: reasonLine ? reasonLine.slice("DISPATCH_REASON=".length).trim() || null : null
+    reason: reasonLine ? reasonLine.slice("DISPATCH_REASON=".length).trim() || null : null,
+    reasonCode: reasonCodeLine
+      ? reasonCodeLine.slice("DISPATCH_REASON_CODE=".length).trim() || null
+      : null
   };
 }
 
@@ -3570,7 +3705,8 @@ function pipelineReconciliationError(pipeline: PipelineStatusSnapshot, job: Solv
   if (pipeline.errorMessage) return pipeline.errorMessage;
   if (pipeline.error) return pipeline.error;
   if (!pipelineBelongsToJob(pipeline, job) && isPipelineActive(pipeline)) {
-    return `Server is running a different task (${pipeline.datasetName ?? pipeline.repoId ?? pipeline.displayStatus}).`;
+    const task = pipeline.datasetName ?? pipeline.repoId ?? pipeline.displayStatus;
+    return `Server is running a different task (${task}).`;
   }
   if (pipeline.displayStatus === "idle") {
     return "Server reports task IDLE after job start; the pipeline command may have exited before solver status was written.";
@@ -3580,6 +3716,10 @@ function pipelineReconciliationError(pipeline: PipelineStatusSnapshot, job: Solv
   }
   if (pipeline.displayStatus === "exited") {
     return "Solver task exited before completing.";
+  }
+  if (!pipelineBelongsToJob(pipeline, job)) {
+    const task = pipeline.datasetName ?? pipeline.repoId ?? pipeline.displayStatus;
+    return `Server still reports a previous or different task (${task}) after job dispatch; the solver command did not take ownership.`;
   }
   return `Server task status is ${pipeline.displayStatus}.`;
 }

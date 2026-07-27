@@ -222,6 +222,9 @@ describe("solver job helpers", () => {
 
     expect(command).toContain("tmux has-session -t mihomo");
     expect(command).toContain("--proxy \"$PROXY_URL\" https://huggingface.co/");
+    expect(command).toContain("DISPATCH_REASON_CODE=mihomo_missing");
+    expect(command).toContain("DISPATCH_REASON_CODE=hugging_face_unreachable");
+    expect(command).toContain("DISPATCH_REASON_CODE=active_pid");
     expect(command).toContain("run Sync Network first");
   });
 
@@ -514,6 +517,8 @@ describe("solver job API", () => {
     expect(commands[0]).not.toContain(".bak.");
     expect(commands[1]).toContain("-c '/srv/solver'");
     expect(commands[1]).toContain("tmux send-keys");
+    expect(commands[1]).toContain('STATUS_FILE="$HOME/run/solver_running_status.json"');
+    expect(commands[1]).toContain('rm -f "$STATUS_FILE"');
     expect(commands[1]).toContain("run_pipeline.py");
     expect(commands[1]).toContain("--scenario");
     expect(commands[1]).toContain("3ia-3od");
@@ -1586,6 +1591,7 @@ describe("solver job API", () => {
     const created = await request(app).post("/api/jobs").send({ serverId: "solver-01", rangePath });
     const started = await request(app).post(`/api/jobs/${created.body.job.id}/start`);
     const collectedAt = new Date(Date.parse(started.body.job.startedAt) + 20_000).toISOString();
+    const previousTaskStartedAt = new Date(Date.parse(started.body.job.startedAt) - 60_000).toISOString();
     db.insertPipelineSnapshot({
       ...runningPipelineSnapshot({
         serverId: "solver-01",
@@ -1595,7 +1601,9 @@ describe("solver job API", () => {
       }),
       id: "unrelated-active-pipeline",
       collectedAt,
-      startedAt: collectedAt,
+      // This reproduces a status file left behind by an older task. Its
+      // embedded start time is old, but the monitor observed it after dispatch.
+      startedAt: previousTaskStartedAt,
       updatedAt: collectedAt
     });
 
@@ -1608,6 +1616,192 @@ describe("solver job API", () => {
       pipeline: null
     });
     expect(list.body.jobs[0].lastError).toContain("running a different task");
+  });
+
+  it("does not complete a new job from an older terminal snapshot for the same dataset", async () => {
+    const executor: SshExecutor = {
+      run: vi.fn(async (_server, _credentials, command) => {
+        if (isCodeReadyCommand(command)) return codeReadyOutput();
+        return "ok";
+      })
+    };
+    const solverJobService = new SolverJobService({
+      db,
+      preflopRangesPath,
+      credentials: { username: "root", password: "secret" },
+      executor,
+      defaultPipelineStatusFilePath: "~/run/solver_running_status.json",
+      repoNamespace: "Tsumugii",
+      hfToken: "hf_test_token"
+    });
+    const app = createApp({ db, refreshService, preflopRangesPath, solverJobService });
+    const rangePath = "3OD-EP/3OD-4.3 vs 3IA-4.2.json";
+    await approveRange(app, rangePath);
+    const created = await request(app)
+      .post("/api/jobs")
+      .send({ serverId: "solver-01", rangePath, settings: { uploadEnabled: false } });
+    const started = await request(app).post(`/api/jobs/${created.body.job.id}/start`);
+    const collectedAt = new Date(Date.parse(started.body.job.startedAt) + 20_000).toISOString();
+    const previousTaskStartedAt = new Date(Date.parse(started.body.job.startedAt) - 60_000).toISOString();
+    db.insertPipelineSnapshot({
+      ...failedPipelineSnapshot({
+        serverId: "solver-01",
+        repoId: started.body.job.repoId,
+        datasetName: started.body.job.datasetName,
+        assignedIndices: [],
+        completedIndices: [],
+        failedIndices: []
+      }),
+      id: "same-dataset-previous-completion",
+      collectedAt,
+      fileStatus: "completed",
+      displayStatus: "completed",
+      resultPath: "/srv/solver/results/3ia-4.2-3od-4.3/previous-job",
+      startedAt: previousTaskStartedAt,
+      updatedAt: collectedAt,
+      finishedAt: previousTaskStartedAt,
+      error: null,
+      errorCode: null,
+      errorMessage: null
+    });
+
+    const list = await request(app).get("/api/jobs");
+
+    expect(list.body.jobs[0]).toMatchObject({
+      id: created.body.job.id,
+      status: "failed",
+      pipeline: null
+    });
+    expect(list.body.jobs[0].lastError).toContain("previous or different task");
+  });
+
+  it("actively probes and releases an unconfirmed job without waiting for the full inventory refresh", async () => {
+    const executor: SshExecutor = {
+      run: vi.fn(async (_server, _credentials, command) => {
+        if (command.includes("PIPELINE_AVAILABLE=")) return "PIPELINE_AVAILABLE=false\n";
+        if (isCodeReadyCommand(command)) return codeReadyOutput();
+        return "ok";
+      })
+    };
+    const solverJobService = new SolverJobService({
+      db,
+      preflopRangesPath,
+      credentials: { username: "root", password: "secret" },
+      executor,
+      defaultPipelineStatusFilePath: "~/run/solver_running_status.json",
+      repoNamespace: "Tsumugii",
+      hfToken: "hf_test_token"
+    });
+    const app = createApp({ db, refreshService, preflopRangesPath, solverJobService });
+    const rangePath = "3OD-EP/3OD-4.3 vs 3IA-4.2.json";
+    await approveRange(app, rangePath);
+    const created = await request(app)
+      .post("/api/jobs")
+      .send({ serverId: "solver-01", rangePath, settings: { uploadEnabled: false } });
+    const started = await request(app).post(`/api/jobs/${created.body.job.id}/start`);
+    db.updateSolverJob(started.body.job.id, {
+      startedAt: new Date(Date.now() - 20_000).toISOString()
+    });
+
+    await solverJobService.reconcileAndStartQueuedJobs();
+
+    expect(db.getSolverJob(started.body.job.id)).toMatchObject({
+      status: "failed",
+      lastError: expect.stringContaining("Server reports task IDLE")
+    });
+    expect(executor.run).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "solver-01" }),
+      expect.anything(),
+      expect.stringContaining("PIPELINE_AVAILABLE=")
+    );
+  });
+
+  it("requeues a parallel slice when the dispatched command never takes ownership", async () => {
+    const executor: SshExecutor = {
+      run: vi.fn(async (_server, _credentials, command) => {
+        if (command.includes("cards/cards.txt")) return solverCardsText();
+        if (command.includes("DISPATCH_READY")) return "DISPATCH_READY=1\n";
+        if (isCodeReadyCommand(command)) return codeReadyOutput();
+        commands.push(command);
+        return "ok";
+      })
+    };
+    const solverJobService = new SolverJobService({
+      db,
+      preflopRangesPath,
+      credentials: { username: "root", password: "secret" },
+      executor,
+      defaultPipelineStatusFilePath: "~/run/solver_running_status.json",
+      repoNamespace: "Tsumugii",
+      hfToken: "hf_test_token"
+    });
+    const app = createApp({ db, refreshService, preflopRangesPath, solverJobService });
+    const rangePath = "3OD-EP/3OD-4.3 vs 3IA-4.2.json";
+    await approveRange(app, rangePath);
+    const created = await request(app)
+      .post("/api/parallel-jobs")
+      .send({
+        rangePath,
+        serverIds: ["solver-01"],
+        settings: { uploadEnabled: false },
+        confirmDatasetName: true
+      });
+    const oldJobId = created.body.run.slices[0].jobId as string;
+    const now = Date.now();
+    db.updateSolverJob(oldJobId, {
+      startedAt: new Date(now - 30_000).toISOString()
+    });
+    const observedAt = new Date(now).toISOString();
+    db.insertPipelineSnapshot({
+      ...failedPipelineSnapshot({
+        serverId: "solver-01",
+        repoId: "Tsumugii/previous-dataset",
+        datasetName: "previous-dataset",
+        assignedIndices: [],
+        completedIndices: [],
+        failedIndices: []
+      }),
+      id: "previous-task-after-parallel-dispatch",
+      collectedAt: observedAt,
+      fileStatus: "completed",
+      displayStatus: "completed",
+      startedAt: new Date(now - 60_000).toISOString(),
+      updatedAt: observedAt,
+      finishedAt: new Date(now - 40_000).toISOString(),
+      error: null,
+      errorCode: null,
+      errorMessage: null
+    });
+
+    const requeued = solverJobService.listParallelJobs().runs
+      .find((run) => run.id === created.body.run.id);
+
+    expect(db.getSolverJob(oldJobId)).toMatchObject({
+      status: "failed",
+      lastError: expect.stringContaining("did not take ownership")
+    });
+    expect(requeued?.slices[0]).toMatchObject({
+      serverId: "",
+      jobId: null,
+      status: "queued",
+      lastError: expect.stringContaining("queued retry 2/3")
+    });
+    expect(solverJobService.listParallelJobs().failurePool).toHaveLength(0);
+
+    await solverJobService.reconcileAndStartQueuedJobs();
+    const retried = solverJobService.listParallelJobs().runs
+      .find((run) => run.id === created.body.run.id);
+
+    expect(retried?.slices[0]).toMatchObject({
+      serverId: "solver-01",
+      status: "running",
+      job: { status: "running" }
+    });
+    expect(retried?.slices[0]?.jobId).not.toBe(oldJobId);
+    expect(commands.filter((command) => command.includes("run_pipeline.py"))).toHaveLength(2);
+    expect(db.getSolverJobEvents(oldJobId)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "launch_retry_queued" })
+    ]));
   });
 
   it("creates a parallel run, distributes boards, and records failed slices in the failure pool", async () => {
@@ -2423,6 +2617,71 @@ describe("solver job API", () => {
       candidateServerIds: ["solver-02", "solver-03"],
       status: "running"
     });
+  });
+
+  it("falls back to --no-upload when an upload preflight cannot use Mihomo", async () => {
+    let preflightCalls = 0;
+    const executor: SshExecutor = {
+      run: vi.fn(async (_server, _credentials, command) => {
+        if (command.includes("cards/cards.txt")) return solverCardsText();
+        if (command.includes("DISPATCH_READY")) {
+          preflightCalls += 1;
+          if (command.includes("tmux has-session -t mihomo")) {
+            return [
+              "DISPATCH_READY=0",
+              "DISPATCH_REASON_CODE=mihomo_missing",
+              "DISPATCH_REASON=mihomo tmux session is not running; run Sync Network first"
+            ].join("\n");
+          }
+          return "DISPATCH_READY=1\n";
+        }
+        if (isCodeReadyCommand(command)) return codeReadyOutput();
+        commands.push(command);
+        return "ok";
+      })
+    };
+    const solverJobService = new SolverJobService({
+      db,
+      preflopRangesPath,
+      credentials: { username: "root", password: "secret" },
+      executor,
+      defaultPipelineStatusFilePath: "~/run/solver_running_status.json",
+      repoNamespace: "Tsumugii",
+      hfToken: "hf_test_token",
+      solverHfProxyUrl: "http://127.0.0.1:7890",
+      getHfProxySettings: () => ({ hfProxyEnabled: false, solverHfProxyEnabled: true })
+    });
+    const app = createApp({ db, refreshService, preflopRangesPath, solverJobService });
+    const rangePath = "3OD-EP/3OD-4.3 vs 3IA-4.2.json";
+    await approveRange(app, rangePath);
+
+    const created = await request(app)
+      .post("/api/parallel-jobs")
+      .send({ rangePath, serverIds: ["solver-01"], confirmDatasetName: true });
+
+    expect(created.status).toBe(201);
+    expect(preflightCalls).toBe(2);
+    expect(created.body.run.slices[0]).toMatchObject({
+      serverId: "solver-01",
+      status: "running",
+      job: {
+        status: "running",
+        settings: { uploadEnabled: false }
+      }
+    });
+    expect(created.body.run.slices[0].job.command).toContain("'--no-upload'");
+    expect(created.body.run.slices[0].job.command).not.toContain("HF_TOKEN");
+    const executionCommand = commands.find((command) => command.includes("run_pipeline.py"));
+    expect(executionCommand).toContain("--no-upload");
+    expect(executionCommand).not.toContain("HF_TOKEN");
+    expect(db.getSolverJobEvents(created.body.run.slices[0].jobId)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "upload_fallback",
+          message: expect.stringContaining("dispatching solver with --no-upload")
+        })
+      ])
+    );
   });
 
   it("keeps failed parallel dispatches queued until the server passes SSH preflight", async () => {
