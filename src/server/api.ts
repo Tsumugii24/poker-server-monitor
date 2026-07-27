@@ -56,6 +56,7 @@ import {
 } from "./preflopRangeStore";
 import { SolverJobService } from "./solverJobService";
 import {
+  PARALLEL_SERVER_SELECTION_SCOPES,
   SOLVER_JOB_QUEUE_MODES,
   type ParallelFailurePoolPreviewRequest,
   type ParallelFailurePoolSubmitRequest,
@@ -1678,6 +1679,15 @@ function isParallelSolverJobPreviewRequest(value: unknown): value is ParallelSol
     return false;
   }
   if (value.autoIncludeNewServers != null && typeof value.autoIncludeNewServers !== "boolean") {
+    return false;
+  }
+  if (
+    value.serverScope != null &&
+    (
+      typeof value.serverScope !== "string" ||
+      !(PARALLEL_SERVER_SELECTION_SCOPES as readonly string[]).includes(value.serverScope)
+    )
+  ) {
     return false;
   }
   return true;

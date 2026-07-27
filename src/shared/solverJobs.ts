@@ -28,6 +28,9 @@ export const PARALLEL_SOLVER_RUN_STATUSES = [
 ] as const;
 export type ParallelSolverRunStatus = (typeof PARALLEL_SOLVER_RUN_STATUSES)[number];
 
+export const PARALLEL_SERVER_SELECTION_SCOPES = ["all", "performance", "standard"] as const;
+export type ParallelServerSelectionScope = (typeof PARALLEL_SERVER_SELECTION_SCOPES)[number];
+
 export const PARALLEL_SOLVER_SLICE_STATUSES = [
   "queued",
   "running",
@@ -268,6 +271,7 @@ export type ParallelSolverJobPreviewRequest = {
   datasetName?: string;
   serverIds?: string[];
   autoIncludeNewServers?: boolean;
+  serverScope?: ParallelServerSelectionScope;
   chunkCount?: number;
   settings?: Partial<SolverJobSettings>;
   confirmUnstudied?: boolean;
@@ -309,6 +313,7 @@ export type ParallelSolverJobPreview = {
   settings: SolverJobSettings;
   selectedServerIds: string[];
   autoIncludeNewServers: boolean;
+  serverScope: ParallelServerSelectionScope;
   availableServers: ServerRow[];
   totalBoards: number;
   missingIndices: number[];
@@ -356,6 +361,7 @@ export type ParallelSolverRun = {
   queueOrder: number;
   serverIds: string[];
   autoIncludeNewServers: boolean;
+  serverScope: ParallelServerSelectionScope | null;
   totalIndices: number[];
   missingIndices: number[];
   createdAt: string;

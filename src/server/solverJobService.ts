@@ -5,6 +5,7 @@ import {
   SOLVER_EXPORT_FORMATS,
   DEFAULT_SOLVER_SCENARIO_LIBRARY,
   SOLVER_UPLOAD_FORMATS,
+  type ParallelServerSelectionScope,
   type ParallelFailurePoolEntry,
   type ParallelFailureReason,
   type ParallelFailurePoolPreviewRequest,
@@ -1095,6 +1096,7 @@ export class SolverJobService {
       settings: basePreview.settings,
       selectedServerIds,
       autoIncludeNewServers: input.autoIncludeNewServers === true,
+      serverScope: normalizeParallelServerScope(input),
       availableServers,
       totalBoards: allBoards.length,
       missingIndices: indices,
@@ -1252,6 +1254,7 @@ export class SolverJobService {
       settings: basePreview.settings,
       selectedServerIds: selectedIds,
       autoIncludeNewServers: false,
+      serverScope: normalizeParallelServerScope(input),
       availableServers,
       totalBoards: allBoards.length,
       missingIndices: indices,
@@ -1291,6 +1294,7 @@ export class SolverJobService {
       queueOrder: this.options.db.getNextParallelSolverQueueOrder(),
       serverIds: preview.selectedServerIds,
       autoIncludeNewServers: sourceType === "parallel" && preview.autoIncludeNewServers,
+      serverScope: preview.serverScope,
       totalIndices: preview.missingIndices,
       missingIndices: preview.missingIndices,
       createdAt: now,
@@ -3752,6 +3756,12 @@ function normalizeSelectedServerIds(
     if (!unique.includes(id)) unique.push(id);
   }
   return unique;
+}
+
+function normalizeParallelServerScope(
+  input: Pick<ParallelSolverJobPreviewRequest, "serverScope" | "autoIncludeNewServers">
+): ParallelServerSelectionScope {
+  return input.serverScope ?? (input.autoIncludeNewServers === true ? "all" : "standard");
 }
 
 function sortServersByNaturalId<T extends Pick<ServerRow, "id">>(servers: T[]): T[] {

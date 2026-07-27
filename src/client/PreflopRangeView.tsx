@@ -54,6 +54,7 @@ import {
   DEFAULT_SOLVER_SCENARIO_LIBRARY,
   SOLVER_EXPORT_FORMATS,
   SOLVER_UPLOAD_FORMATS,
+  type ParallelServerSelectionScope,
   type ParallelFailurePoolClearResponse,
   type ParallelFailurePoolEntry,
   type ParallelFailureReason,
@@ -120,7 +121,7 @@ type PendingStatusChange = {
 
 type RangeStatusView = "labeling" | "already";
 type ParallelServerStatusTab = "all" | "available" | "unavailable";
-export type ParallelServerTierMode = "all" | "performance" | "standard";
+export type ParallelServerTierMode = ParallelServerSelectionScope;
 type ParallelHistoryFilter = "all" | "completed" | "completed_with_failures";
 type ParallelQueueMode = "preview" | "edit";
 
@@ -988,6 +989,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
       datasetName: jobDatasetNameTouched ? jobDatasetName.trim() || undefined : undefined,
       serverIds: selectedParallelServerIds,
       autoIncludeNewServers: parallelServerTierMode === "all",
+      serverScope: parallelServerTierMode,
       chunkCount,
       settings: jobSettings,
       confirmUnstudied
@@ -4320,13 +4322,16 @@ function ParallelSolverJobPanel({
               ].filter(Boolean).join(" ")}
             >
               <div className="parallel-run-head">
-                <div>
+                <div className="parallel-run-copy">
                   <strong>{displayDatasetName(run.datasetName)}</strong>
                   <span>
                     {run.sourceType === "failure_pool" ? "Failure pool retry" : "Parallel run"} · {formatShortDateTime(run.createdAt)} · {dispatch.summary}
                   </span>
                 </div>
-                <em className={`solver-job-status ${dispatch.className || run.status}`}>{dispatch.label}</em>
+                <div className="parallel-run-head-actions">
+                  <ParallelServerScopeBadge scope={run.serverScope} />
+                  <em className={`solver-job-status ${dispatch.className || run.status}`}>{dispatch.label}</em>
+                </div>
               </div>
               <ParallelRunProgress
                 assigned={run.report.totalBoards}
@@ -4710,6 +4715,7 @@ export function ParallelQueueBoard({
                 <div className="parallel-queue-copy">
                   <div className="parallel-queue-heading">
                     <strong title={displayDatasetName(run.datasetName)}>{displayDatasetName(run.datasetName)}</strong>
+                    <ParallelServerScopeBadge scope={run.serverScope} compact />
                     <em className={`solver-job-status ${dispatch.className || run.status}`}>{dispatch.label}</em>
                   </div>
                   <p className="parallel-queue-meta">
@@ -6225,6 +6231,39 @@ function formatParallelRunStatus(status: ParallelSolverRun["status"]): string {
   return titleCaseStatus(status);
 }
 
+export function ParallelServerScopeBadge({
+  scope,
+  compact = false
+}: {
+  scope: ParallelSolverRun["serverScope"];
+  compact?: boolean;
+}) {
+  const label = scope == null
+    ? "Selected Servers"
+    : scope === "all"
+      ? "All Servers"
+      : scope === "performance"
+        ? "Performance"
+        : "Standard";
+  const title = scope == null
+    ? "This older run used a fixed server selection; its tier was not recorded."
+    : `Server selection saved when this run was submitted: ${label}`;
+  return (
+    <span
+      className={[
+        "parallel-server-scope-badge",
+        scope ?? "legacy",
+        compact ? "compact" : ""
+      ].filter(Boolean).join(" ")}
+      aria-label={`Server range: ${label}`}
+      title={title}
+    >
+      <span>{compact ? "Range" : "Server range"}</span>
+      <b>{label}</b>
+    </span>
+  );
+}
+
 function formatParallelSliceStatus(status: ParallelSolverRun["slices"][number]["status"]): string {
   if (status === "failed") return "Completed with Failures";
   return titleCaseStatus(status);
@@ -6730,6 +6769,7 @@ function buildParallelReportsMarkdown(
       `- Run ID: ${run.id}`,
       `- Source: ${run.sourceType === "failure_pool" ? "Failure pool retry" : "Parallel run"}`,
       `- Status: ${formatParallelRunStatus(run.status)}`,
+      `- Server Range: ${parallelServerScopeReportLabel(run.serverScope)}`,
       `- Repo: ${run.repoId}`,
       `- Scenario: ${run.scenario}`,
       `- Range: ${run.rangeName}`,
@@ -6771,6 +6811,13 @@ function buildParallelReportsMarkdown(
   }
 
   return `${lines.join("\n").trimEnd()}\n`;
+}
+
+function parallelServerScopeReportLabel(scope: ParallelSolverRun["serverScope"]): string {
+  if (scope === "all") return "All Servers";
+  if (scope === "performance") return "Performance";
+  if (scope === "standard") return "Standard";
+  return "Selected Servers (legacy tier not recorded)";
 }
 
 function markdownCell(value: string): string {

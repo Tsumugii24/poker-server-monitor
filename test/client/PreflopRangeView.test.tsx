@@ -3,7 +3,11 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
-import { DEFAULT_SOLVER_JOB_SETTINGS, type ParallelSolverRun } from "../../src/shared/solverJobs";
+import {
+  DEFAULT_SOLVER_JOB_SETTINGS,
+  type ParallelServerSelectionScope,
+  type ParallelSolverRun
+} from "../../src/shared/solverJobs";
 import {
   ParallelQueueBoard,
   ParallelRunProgress,
@@ -11,7 +15,12 @@ import {
 } from "../../src/client/PreflopRangeView";
 import type { ServerRow } from "../../src/shared/types";
 
-function queuedRun(id: string, datasetName: string, queueOrder: number): ParallelSolverRun {
+function queuedRun(
+  id: string,
+  datasetName: string,
+  queueOrder: number,
+  serverScope: ParallelServerSelectionScope | null = "all"
+): ParallelSolverRun {
   return {
     id,
     sourceType: "parallel",
@@ -27,6 +36,7 @@ function queuedRun(id: string, datasetName: string, queueOrder: number): Paralle
     queueOrder,
     serverIds: ["solver-01"],
     autoIncludeNewServers: true,
+    serverScope,
     totalIndices: [queueOrder],
     missingIndices: [queueOrder],
     createdAt: `2026-07-23T00:00:0${queueOrder}.000Z`,
@@ -48,6 +58,32 @@ function queuedRun(id: string, datasetName: string, queueOrder: number): Paralle
 }
 
 describe("ParallelQueueBoard", () => {
+  it("shows the saved server range for each queued run", () => {
+    render(
+      <ParallelQueueBoard
+        runs={[
+          queuedRun("run-all", "dataset-all", 1, "all"),
+          queuedRun("run-performance", "dataset-performance", 2, "performance"),
+          queuedRun("run-standard", "dataset-standard", 3, "standard"),
+          queuedRun("run-legacy", "dataset-legacy", 4, null)
+        ]}
+        activeRunId="run-all"
+        busy={null}
+        onRunSelect={vi.fn()}
+        onRunDelete={vi.fn()}
+        onSaveOrder={vi.fn(async () => true)}
+      />
+    );
+
+    expect(screen.getByLabelText("Server range: All Servers")).toBeInTheDocument();
+    expect(screen.getByLabelText("Server range: Performance")).toBeInTheDocument();
+    expect(screen.getByLabelText("Server range: Standard")).toBeInTheDocument();
+    expect(screen.getByLabelText("Server range: Selected Servers")).toHaveAttribute(
+      "title",
+      expect.stringContaining("tier was not recorded")
+    );
+  });
+
   it("keeps queue edits local until one explicit save", async () => {
     const user = userEvent.setup();
     const runs = [

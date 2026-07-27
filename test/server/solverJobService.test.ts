@@ -1844,10 +1844,16 @@ describe("solver job API", () => {
 
     const preview = await request(app)
       .post("/api/parallel-jobs/preview")
-      .send({ rangePath, serverIds: ["solver-01", "solver-02"], settings: { uploadEnabled: false } });
+      .send({
+        rangePath,
+        serverIds: ["solver-01", "solver-02"],
+        serverScope: "standard",
+        settings: { uploadEnabled: false }
+      });
 
     expect(preview.status).toBe(200);
     expect(preview.body.sourceType).toBe("parallel");
+    expect(preview.body.serverScope).toBe("standard");
     expect(preview.body.totalBoards).toBe(1755);
     expect(preview.body.missingIndices).toHaveLength(1755);
     expect(preview.body.allocations).toHaveLength(2);
@@ -1865,9 +1871,17 @@ describe("solver job API", () => {
 
     const created = await request(app)
       .post("/api/parallel-jobs")
-      .send({ rangePath, serverIds: ["solver-01", "solver-02"], settings: { uploadEnabled: false }, confirmDatasetName: true });
+      .send({
+        rangePath,
+        serverIds: ["solver-01", "solver-02"],
+        serverScope: "standard",
+        settings: { uploadEnabled: false },
+        confirmDatasetName: true
+      });
 
     expect(created.status).toBe(201);
+    expect(created.body.run.serverScope).toBe("standard");
+    expect(db.getParallelSolverRun(created.body.run.id)?.serverScope).toBe("standard");
     expect(created.body.run.slices).toHaveLength(2);
     expect(created.body.run.slices.every((slice: { jobId: string | null }) => slice.jobId)).toBe(true);
     expect(commands.filter((command) => command.includes("run_pipeline.py"))).toHaveLength(2);
@@ -3015,6 +3029,7 @@ describe("solver job API", () => {
         datasetName: "parallel-auto-scale",
         serverIds: ["solver-01"],
         autoIncludeNewServers: true,
+        serverScope: "all",
         chunkCount: 2,
         settings: { uploadEnabled: false },
         confirmDatasetName: true,
@@ -3023,6 +3038,7 @@ describe("solver job API", () => {
 
     expect(created.status).toBe(201);
     expect(created.body.run.autoIncludeNewServers).toBe(true);
+    expect(created.body.run.serverScope).toBe("all");
     expect(created.body.run.slices).toHaveLength(2);
     expect(created.body.run.slices.every((slice: { candidateServerIds: string[] }) =>
       JSON.stringify(slice.candidateServerIds) === JSON.stringify(["solver-01"])
