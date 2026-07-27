@@ -233,9 +233,7 @@ export class SolverJobService {
       if (!movableIds.has(run.id)) return run.id;
       return uniqueIds[movableIndex++]!;
     });
-    orderedIds.forEach((id, index) => {
-      this.options.db.updateParallelSolverRunQueueOrder(id, index + 1);
-    });
+    this.options.db.updateParallelSolverRunQueueOrders(orderedIds);
     return this.options.db.getParallelSolverRuns();
   }
 

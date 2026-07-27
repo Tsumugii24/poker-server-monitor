@@ -48,9 +48,14 @@ function queuedRun(id: string, datasetName: string, queueOrder: number): Paralle
 }
 
 describe("ParallelQueueBoard", () => {
-  it("moves the selected run with arrow controls and reports movable queue boundaries", async () => {
-    const runs = [queuedRun("run-a", "dataset-a", 1), queuedRun("run-b", "dataset-b", 2)];
-    const onMove = vi.fn();
+  it("keeps queue edits local until one explicit save", async () => {
+    const user = userEvent.setup();
+    const runs = [
+      queuedRun("run-a", "dataset-a", 1),
+      queuedRun("run-b", "dataset-b", 2),
+      queuedRun("run-c", "dataset-c", 3)
+    ];
+    const onSaveOrder = vi.fn(async () => true);
 
     function Harness() {
       const [activeRunId, setActiveRunId] = useState<string | null>("run-a");
@@ -61,25 +66,98 @@ describe("ParallelQueueBoard", () => {
           busy={null}
           onRunSelect={setActiveRunId}
           onRunDelete={vi.fn()}
-          onMove={onMove}
+          onSaveOrder={onSaveOrder}
         />
       );
     }
 
     render(<Harness />);
 
-    await userEvent.click(screen.getByRole("button", { name: "Move selected run left" }));
+    expect(screen.getByLabelText("Saved parallel queue order")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Move selected run left" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Edit" }));
+    await user.click(screen.getByText("dataset-c").closest("article")!);
+    await user.click(screen.getByRole("button", { name: "Move selected run to first" }));
+    expect(queueDatasetOrder()).toEqual(["dataset-c", "dataset-a", "dataset-b"]);
+    expect(onSaveOrder).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "Move selected run right" }));
+    expect(queueDatasetOrder()).toEqual(["dataset-a", "dataset-c", "dataset-b"]);
+    expect(onSaveOrder).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    expect(queueDatasetOrder()).toEqual(["dataset-a", "dataset-b", "dataset-c"]);
+    expect(screen.getByText("2 positions pending")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Edit" }));
+    expect(queueDatasetOrder()).toEqual(["dataset-a", "dataset-c", "dataset-b"]);
+    await user.click(screen.getByRole("button", { name: "Save order" }));
+
+    expect(onSaveOrder).toHaveBeenCalledTimes(1);
+    expect(onSaveOrder).toHaveBeenCalledWith(["run-a", "run-c", "run-b"]);
+    expect(screen.getByLabelText("Saved parallel queue order")).toBeInTheDocument();
+    expect(screen.getByText("Queue order saved.")).toBeInTheDocument();
+  });
+
+  it("reports the editable queue boundaries without saving", async () => {
+    const user = userEvent.setup();
+    const runs = [queuedRun("run-a", "dataset-a", 1), queuedRun("run-b", "dataset-b", 2)];
+    const onSaveOrder = vi.fn(async () => true);
+
+    render(
+      <ParallelQueueBoard
+        runs={runs}
+        activeRunId="run-a"
+        busy={null}
+        onRunSelect={vi.fn()}
+        onRunDelete={vi.fn()}
+        onSaveOrder={onSaveOrder}
+      />
+    );
+
+    await user.click(screen.getByRole("button", { name: "Edit" }));
+    await user.click(screen.getByRole("button", { name: "Move selected run left" }));
     expect(screen.getByRole("status")).toHaveTextContent("already first in the movable queue");
-    expect(onMove).not.toHaveBeenCalled();
+    expect(onSaveOrder).not.toHaveBeenCalled();
+  });
 
-    await userEvent.click(screen.getByText("dataset-b").closest("article")!);
-    await userEvent.click(screen.getByRole("button", { name: "Move selected run right" }));
-    expect(screen.getByRole("status")).toHaveTextContent("already last in the movable queue");
+  it("blocks a stale draft until the current server order is reloaded", async () => {
+    const user = userEvent.setup();
+    const baseRuns = [queuedRun("run-a", "dataset-a", 1), queuedRun("run-b", "dataset-b", 2)];
+    const onSaveOrder = vi.fn(async () => true);
+    const renderBoard = (runs: ParallelSolverRun[]) => (
+      <ParallelQueueBoard
+        runs={runs}
+        activeRunId="run-b"
+        busy={null}
+        onRunSelect={vi.fn()}
+        onRunDelete={vi.fn()}
+        onSaveOrder={onSaveOrder}
+      />
+    );
+    const { rerender } = render(renderBoard(baseRuns));
 
-    await userEvent.click(screen.getByRole("button", { name: "Move selected run left" }));
-    expect(onMove).toHaveBeenCalledWith("run-b", "left");
+    await user.click(screen.getByRole("button", { name: "Edit" }));
+    await user.click(screen.getByRole("button", { name: "Move selected run left" }));
+    expect(queueDatasetOrder()).toEqual(["dataset-b", "dataset-a"]);
+
+    rerender(renderBoard([...baseRuns, queuedRun("run-c", "dataset-c", 3)]));
+
+    expect(screen.getByRole("alert")).toHaveTextContent("live queue changed");
+    expect(screen.getByRole("button", { name: "Save order" })).toBeDisabled();
+
+    await user.click(screen.getByRole("button", { name: "Reload current order" }));
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(queueDatasetOrder()).toEqual(["dataset-a", "dataset-b", "dataset-c"]);
+    expect(onSaveOrder).not.toHaveBeenCalled();
   });
 });
+
+function queueDatasetOrder(): string[] {
+  return Array.from(document.querySelectorAll(".parallel-queue-lane .parallel-queue-heading strong"))
+    .map((element) => element.textContent ?? "");
+}
 
 describe("ParallelRunProgress", () => {
   it("shows done versus assigned boards as a bounded accessible percentage", () => {

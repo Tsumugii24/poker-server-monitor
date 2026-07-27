@@ -26,6 +26,8 @@
 
   --accent:         #3b82f6;
   --accent-hover:   #60a5fa;
+  --accent-strong:  #60a5fa;
+  --accent-contrast:#f8fafc;
   --accent-glow:    rgba(59, 130, 246, 0.25);
   --accent-subtle:  rgba(59, 130, 246, 0.08);
 
@@ -87,6 +89,8 @@
 
   --accent:         #2563eb;
   --accent-hover:   #3b82f6;
+  --accent-strong:  #1d4ed8;
+  --accent-contrast:#f8fafc;
   --accent-glow:    rgba(37, 99, 235, 0.15);
   --accent-subtle:  rgba(37, 99, 235, 0.06);
 
@@ -5680,15 +5684,86 @@ td .port-value {
   align-items: center;
 }
 
+.parallel-queue-board.is-editing {
+  border-color: color-mix(in srgb, var(--accent) 38%, var(--border));
+  background: color-mix(in srgb, var(--accent) 3%, var(--bg-elevated));
+}
+
+.parallel-queue-editor,
+.parallel-queue-edit-actions {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 7px;
+}
+
+.parallel-queue-mode-switch {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 2px;
+  background: var(--bg-base);
+}
+
+.parallel-queue-mode-switch button {
+  position: relative;
+  min-height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  border: 0;
+  border-radius: calc(var(--radius-sm) - 2px);
+  padding: 4px 9px;
+  color: var(--text-tertiary);
+  background: transparent;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 850;
+  cursor: pointer;
+}
+
+.parallel-queue-mode-switch button:hover:not(:disabled),
+.parallel-queue-mode-switch button:focus-visible {
+  color: var(--text-primary);
+}
+
+.parallel-queue-mode-switch button:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 52%, transparent);
+  outline-offset: 2px;
+}
+
+.parallel-queue-mode-switch button.active {
+  color: var(--accent-strong);
+  background: var(--accent-subtle);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 22%, var(--border));
+}
+
+.parallel-queue-mode-switch button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.parallel-queue-dirty-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--yellow);
+  box-shadow: 0 0 0 2px var(--yellow-bg);
+}
+
 .parallel-queue-move-controls {
   display: inline-flex;
   align-items: center;
   justify-content: flex-end;
-  gap: 6px;
+  gap: 4px;
 }
 
 .parallel-queue-selection {
-  margin-right: 2px;
+  margin-right: 1px;
   color: var(--text-tertiary);
   font-size: 11px;
   font-weight: 800;
@@ -5727,6 +5802,83 @@ td .port-value {
   cursor: not-allowed;
 }
 
+.parallel-queue-cancel-button,
+.parallel-queue-save-button {
+  min-height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 5px 9px;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 850;
+  cursor: pointer;
+}
+
+.parallel-queue-cancel-button {
+  color: var(--text-secondary);
+  background: var(--bg-base);
+}
+
+.parallel-queue-save-button {
+  color: var(--accent-contrast);
+  border-color: var(--accent);
+  background: var(--accent);
+}
+
+.parallel-queue-cancel-button:hover:not(:disabled),
+.parallel-queue-cancel-button:focus-visible {
+  border-color: color-mix(in srgb, var(--text-tertiary) 48%, var(--border));
+  color: var(--text-primary);
+}
+
+.parallel-queue-save-button:hover:not(:disabled),
+.parallel-queue-save-button:focus-visible {
+  border-color: var(--accent-strong);
+  background: var(--accent-strong);
+}
+
+.parallel-queue-cancel-button:focus-visible,
+.parallel-queue-save-button:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 52%, transparent);
+  outline-offset: 2px;
+}
+
+.parallel-queue-cancel-button:disabled,
+.parallel-queue-save-button:disabled {
+  opacity: 0.44;
+  cursor: not-allowed;
+}
+
+.parallel-queue-save-state {
+  color: var(--green-text);
+  font-size: 11px;
+  font-weight: 850;
+  white-space: nowrap;
+}
+
+.parallel-queue-save-state::before {
+  width: 6px;
+  height: 6px;
+  display: inline-block;
+  margin-right: 6px;
+  border-radius: 50%;
+  background: var(--green);
+  content: "";
+  vertical-align: 1px;
+}
+
+.parallel-queue-save-state.dirty {
+  color: var(--yellow-text);
+}
+
+.parallel-queue-save-state.dirty::before {
+  background: var(--yellow);
+}
+
 .parallel-queue-notice {
   margin: 0;
   border: 1px solid color-mix(in srgb, var(--yellow) 34%, var(--border));
@@ -5737,6 +5889,33 @@ td .port-value {
   font-size: 11px;
   font-weight: 750;
   line-height: 1.4;
+}
+
+.parallel-queue-stale-notice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border: 1px solid color-mix(in srgb, var(--red) 34%, var(--border));
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  color: var(--red-text);
+  background: var(--red-bg);
+  font-size: 11px;
+  font-weight: 750;
+  line-height: 1.4;
+}
+
+.parallel-queue-stale-notice button {
+  border: 1px solid color-mix(in srgb, var(--red) 34%, var(--border));
+  border-radius: var(--radius-sm);
+  padding: 4px 8px;
+  color: var(--red-text);
+  background: var(--bg-base);
+  font: inherit;
+  font-weight: 850;
+  cursor: pointer;
 }
 
 .parallel-history-board {
@@ -8430,6 +8609,30 @@ td .port-value {
   .parallel-queue-lane > .parallel-queue-item {
     flex: 0 0 min(100%, 520px);
     width: min(100%, 520px);
+  }
+
+  .parallel-queue-editor,
+  .parallel-queue-edit-actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .parallel-queue-mode-switch {
+    flex: 0 0 auto;
+  }
+
+  .parallel-queue-selection {
+    flex: 1 1 100%;
+    text-align: left;
+  }
+
+  .parallel-queue-save-state {
+    margin-left: auto;
+  }
+
+  .parallel-queue-cancel-button,
+  .parallel-queue-save-button {
+    flex: 1 1 120px;
   }
 
 }

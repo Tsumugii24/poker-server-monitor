@@ -797,11 +797,24 @@ export class MonitorDatabase {
     );
   }
 
-  updateParallelSolverRunQueueOrder(id: string, queueOrder: number): void {
-    this.database.run(
-      "UPDATE parallel_solver_runs SET queue_order = ?, updated_at = ? WHERE id = ?",
-      [queueOrder, new Date().toISOString(), id]
+  updateParallelSolverRunQueueOrders(orderedIds: string[]): void {
+    if (orderedIds.length === 0) return;
+    const statement = this.database.prepare(
+      "UPDATE parallel_solver_runs SET queue_order = ?, updated_at = ? WHERE id = ?"
     );
+    const updatedAt = new Date().toISOString();
+    this.database.run("BEGIN TRANSACTION");
+    try {
+      orderedIds.forEach((id, index) => {
+        statement.run([index + 1, updatedAt, id]);
+      });
+      this.database.run("COMMIT");
+    } catch (error) {
+      this.database.run("ROLLBACK");
+      throw error;
+    } finally {
+      statement.free();
+    }
     this.persist();
   }
 
