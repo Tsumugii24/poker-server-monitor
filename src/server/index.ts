@@ -8,7 +8,7 @@ import { MonitorDatabase } from "./db";
 import { OfflineRecoveryService } from "./offlineRecoveryService";
 import { RefreshService } from "./refreshService";
 import { SolverJobService } from "./solverJobService";
-import { loadSolverScenarioLibrary } from "./scenarioLibraryStore";
+import { loadSolverSettingLibrary } from "./settingLibraryStore";
 import { WeChatAccountManager } from "./wechatAccountManager";
 import { WeChatNotifier } from "./wechatNotifier";
 
@@ -93,7 +93,7 @@ async function main(): Promise<void> {
     giteeUsername: config.giteeUsername,
     giteeToken: config.giteeToken,
     getHfProxySettings: () => loadAlertSettings(config.alertSettingsPath),
-    getScenarioLibrary: () => loadSolverScenarioLibrary(config.solverScenarioLibraryPath).scenarios
+    getSettingLibrary: () => loadSolverSettingLibrary(config.solverSettingLibraryPath).settings
   });
   const offlineRecoveryService = new OfflineRecoveryService({
     db,
@@ -121,7 +121,7 @@ async function main(): Promise<void> {
     inventoryPath: config.inventoryPath,
     alertSettingsPath: config.alertSettingsPath,
     preflopRangesPath: config.preflopRangesPath,
-    solverScenarioLibraryPath: config.solverScenarioLibraryPath,
+    solverSettingLibraryPath: config.solverSettingLibraryPath,
     solverJobService,
     solverJobRepoNamespace: config.solverJobRepoNamespace,
     hfToken: config.hfToken,

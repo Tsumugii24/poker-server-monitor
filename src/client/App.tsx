@@ -33,7 +33,6 @@ import { displayDatasetName } from "./datasetDisplay";
 import type {
   AlertSettings,
   AlertStatus,
-  ConnectionStatus,
   HealthLevel,
   HfProxyRuntimeStatus,
   MetricSnapshot,
@@ -48,6 +47,10 @@ import type {
   WeChatAccountsStatus,
   WeChatConnectorStatus
 } from "../shared/types";
+import {
+  connectionDisplayStatus,
+  type ConnectionDisplayStatus
+} from "../shared/serverReadiness";
 import {
   buildWeChatDelivery
 } from "../shared/wechatDelivery";
@@ -852,9 +855,11 @@ function OverviewView({
   const filteredServers = useMemo(() => {
     const servers = overview.servers.filter((server) => {
       const conn = server.latest?.connectionStatus;
+      const displayedConnection = connectionDisplayStatus(server.latest, server.pipeline);
       const health = server.latest?.healthLevel;
       if (filter === "all") return true;
       if (filter === "online") return conn === "online";
+      if (filter === "degraded") return displayedConnection === "degraded";
       if (filter === "offline") return conn === "offline";
       if (filter === "unknown") return conn === "unknown";
       if (filter === "warning") return health === "warning";
@@ -954,6 +959,10 @@ function OverviewView({
             <div className={`stat-online ${filter === "online" ? "active" : ""}`} onClick={() => setFilter("online")}>
               <dt>Online</dt>
               <dd className="dd-value">{overview.summary.online ?? 0}</dd>
+            </div>
+            <div className={`stat-degraded ${filter === "degraded" ? "active" : ""}`} onClick={() => setFilter("degraded")}>
+              <dt>Degraded</dt>
+              <dd className="dd-value">{overview.summary.degraded ?? 0}</dd>
             </div>
             <div className={`stat-offline ${filter === "offline" ? "active" : ""}`} onClick={() => setFilter("offline")}>
               <dt>Offline</dt>
@@ -1067,8 +1076,8 @@ function DetailView({ detail, onBack }: { detail: ServerDetailResponse; onBack: 
           <p>{detail.server.host}:{detail.server.port}</p>
         </div>
         <div className="detail-badges">
-          <ConnBadge status={latest?.connectionStatus ?? "unknown"} />
-          {latest?.connectionStatus === "online" && latest?.healthLevel ? (
+          <ConnBadge status={connectionDisplayStatus(latest, detail.pipeline)} />
+          {connectionDisplayStatus(latest, detail.pipeline) === "online" && latest?.healthLevel ? (
             <HealthBadge level={latest.healthLevel} />
           ) : null}
           {detail.pipeline ? <TaskBadge status={detail.pipeline.displayStatus} /> : null}
@@ -1242,10 +1251,10 @@ function ServerTable({
                 <span className="port-value">{server.port}</span>
               </td>
               <td>
-                <ConnBadge status={server.latest?.connectionStatus ?? "unknown"} />
+                <ConnBadge status={connectionDisplayStatus(server.latest, server.pipeline)} />
               </td>
               <td>
-                {server.latest?.connectionStatus === "online" && server.latest?.healthLevel ? (
+                {connectionDisplayStatus(server.latest, server.pipeline) === "online" && server.latest?.healthLevel ? (
                   <HealthBadge level={server.latest.healthLevel} />
                 ) : (
                   <span className="text-muted">—</span>
@@ -1349,6 +1358,17 @@ function InventoryManageView({
     [servers]
   );
   const enabledCount = servers.filter((server) => server.enabled).length;
+  const deleteTarget = confirmDeleteId
+    ? servers.find((server) => server.id === confirmDeleteId) ?? null
+    : null;
+  const deleteTargetPipelineActive = Boolean(
+    deleteTarget?.pipeline &&
+      deleteTarget.pipeline.processAlive !== false &&
+      (deleteTarget.pipeline.displayStatus === "running" ||
+        deleteTarget.pipeline.displayStatus === "solving" ||
+        deleteTarget.pipeline.displayStatus === "uploading" ||
+        deleteTarget.pipeline.displayStatus === "cleanup")
+  );
 
   const startEditingServer = (server: ServerRow) => {
     setInventoryError(null);
@@ -1630,23 +1650,6 @@ function InventoryManageView({
                               <X size={15} />
                             </button>
                           </>
-                        ) : confirmDeleteId === server.id ? (
-                          <>
-                            <button
-                              className="inventory-confirm-button danger"
-                              disabled={savingId === server.id}
-                              onClick={() => void removeInventoryServer(server)}
-                            >
-                              Delete
-                            </button>
-                            <button
-                              className="inventory-confirm-button"
-                              disabled={savingId === server.id}
-                              onClick={() => setConfirmDeleteId(null)}
-                            >
-                              Cancel
-                            </button>
-                          </>
                         ) : (
                           <>
                             <button
@@ -1676,6 +1679,74 @@ function InventoryManageView({
           </table>
         </div>
       </section>
+
+      {deleteTarget ? (
+        <div
+          className="modal-backdrop inventory-delete-backdrop"
+          role="presentation"
+          onClick={() => savingId !== deleteTarget.id && setConfirmDeleteId(null)}
+        >
+          <section
+            className="inventory-delete-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="inventory-delete-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="inventory-delete-icon" aria-hidden="true">
+              <TriangleAlert size={20} />
+            </div>
+            <div className="inventory-delete-copy">
+              <span className="inventory-delete-eyebrow">Safe removal check</span>
+              <h3 id="inventory-delete-title">Delete server {deleteTarget.id}?</h3>
+              <p className="inventory-delete-primary-warning">
+                Running, deploying, or stopping chunks are not stopped or moved by deletion. Monitoring and later
+                Stop/Cancel controls for those chunks can become unavailable.
+              </p>
+
+              {deleteTargetPipelineActive ? (
+                <div className="inventory-delete-active-warning" role="status">
+                  Latest inventory status shows an active <strong>{deleteTarget.pipeline?.displayStatus}</strong> pipeline
+                  {deleteTarget.pipeline?.datasetName ? <> for <strong>{deleteTarget.pipeline.datasetName}</strong></> : null}.
+                  Stop it or wait for it to finish before deleting this server.
+                </div>
+              ) : null}
+
+              <div className="inventory-delete-section">
+                <strong>Recommended before deletion</strong>
+                <ol>
+                  <li>Stop or finish every Running, Deploying, or Stopping chunk on this server.</li>
+                  <li>Run the single-server Scan + Upload action and confirm its local results are uploaded.</li>
+                  <li>Check that queued fixed-tier chunks still have another server in their original candidate pool.</li>
+                </ol>
+              </div>
+
+              <div className="inventory-delete-queue-note">
+                <strong>Queued chunks:</strong> All Servers jobs can be claimed by another current eligible server at the
+                next queue reconciliation. Performance/Standard jobs can only use surviving servers from their original
+                candidate pool; with no survivor, the chunk remains queued.
+              </div>
+            </div>
+            <div className="inventory-delete-actions">
+              <button
+                className="icon-button ghost compact"
+                disabled={savingId === deleteTarget.id}
+                onClick={() => setConfirmDeleteId(null)}
+              >
+                Cancel
+              </button>
+              <button
+                className="icon-button danger compact"
+                disabled={savingId === deleteTarget.id}
+                onClick={() => void removeInventoryServer(deleteTarget)}
+              >
+                <Trash2 size={15} />
+                {savingId === deleteTarget.id ? "Deleting…" : "Delete server"}
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
     </>
   );
 }
@@ -1826,8 +1897,8 @@ function serverDraftToPatch(draft: ServerInventoryDraft): ServerInventoryUpdateP
   return serverDraftToPayload(draft);
 }
 
-/** Connection status badge — shows online / offline / unknown. */
-function ConnBadge({ status }: { status: ConnectionStatus }) {
+/** Connectivity badge; degraded means the port is reachable but authenticated checks failed. */
+function ConnBadge({ status }: { status: ConnectionDisplayStatus }) {
   return <span className={`badge conn-badge ${status}`}>{status}</span>;
 }
 
@@ -1872,7 +1943,7 @@ function TaskPanel({ task }: { task: PipelineStatusSnapshot | null }) {
           <strong>{formatProcessAlive(task.processAlive)}</strong>
         </div>
         <div>
-          <span className="settings-status-label">Scenario</span>
+          <span className="settings-status-label">Setting</span>
           <strong>{task.scenario ?? "—"}</strong>
         </div>
         <div>

@@ -3,7 +3,7 @@ import {
   DEFAULT_SOLVER_JOB_SETTINGS,
   SOLVER_TOTAL_BOARD_COUNT,
   SOLVER_EXPORT_FORMATS,
-  DEFAULT_SOLVER_SCENARIO_LIBRARY,
+  DEFAULT_SOLVER_SETTING_LIBRARY,
   SOLVER_UPLOAD_FORMATS,
   type ParallelServerSelectionScope,
   type ParallelFailurePoolEntry,
@@ -29,10 +29,17 @@ import {
   type SolverJobStatus,
   type SolverScenario,
   type SolverScenarioLibraryItem,
+  type SolverSettingLibraryItem,
   type SolverUploadFormat
 } from "../shared/solverJobs";
 import type { AlertSettings } from "../shared/types";
 import type { PipelineStatusSnapshot, ServerRow } from "../shared/types";
+import { linkedSolverSettingsForRangePath } from "../shared/solverSettings";
+import {
+  connectionDisplayStatus,
+  serverIsJobReady,
+  serverIsSshReady
+} from "../shared/serverReadiness";
 import {
   PREFLOP_HAND_CODES,
   PREFLOP_PLAYERS,
@@ -90,6 +97,8 @@ type SolverJobServiceOptions = {
   giteeUsername?: string | null;
   giteeToken?: string | null;
   getHfProxySettings?: () => Pick<AlertSettings, "hfProxyEnabled" | "solverHfProxyEnabled">;
+  getSettingLibrary?: () => SolverSettingLibraryItem[];
+  /** @deprecated Use getSettingLibrary. */
   getScenarioLibrary?: () => SolverScenarioLibraryItem[];
 };
 
@@ -126,7 +135,7 @@ export class SolverJobService {
   private readonly giteeUsername: string;
   private readonly giteeToken: string | null;
   private readonly getHfProxySettings: () => Pick<AlertSettings, "hfProxyEnabled" | "solverHfProxyEnabled">;
-  private readonly getScenarioLibrary: () => SolverScenarioLibraryItem[];
+  private readonly getSettingLibrary: () => SolverSettingLibraryItem[];
   private queueReconciliationTask: Promise<void> | null = null;
   private serverOperationReconciliationTask: Promise<void> | null = null;
   private readonly serverOperationStartTasks = new Map<string, Promise<void>>();
@@ -145,7 +154,9 @@ export class SolverJobService {
       hfProxyEnabled: false,
       solverHfProxyEnabled: false
     }));
-    this.getScenarioLibrary = options.getScenarioLibrary ?? (() => DEFAULT_SOLVER_SCENARIO_LIBRARY);
+    this.getSettingLibrary = options.getSettingLibrary
+      ?? options.getScenarioLibrary
+      ?? (() => DEFAULT_SOLVER_SETTING_LIBRARY);
   }
 
   listJobs() {
@@ -371,7 +382,7 @@ export class SolverJobService {
       repoNamespace: this.repoNamespace,
       hfToken: this.hfToken,
       solverHfProxyUrl: this.effectiveSolverHfProxyUrl(),
-      scenarioLibrary: this.getScenarioLibrary()
+      settingLibrary: this.getSettingLibrary()
     });
   }
 
@@ -434,6 +445,7 @@ export class SolverJobService {
       solverRoot,
       repoId: preview.repoId,
       scenario: preview.scenario,
+      setting: preview.setting,
       rangePath: remoteRangePath,
       resultPath: remoteResultPath,
       settings: preview.settings,
@@ -448,6 +460,8 @@ export class SolverJobService {
       rangePath: preview.rangePath,
       rangeName: preview.rangeName,
       datasetName: preview.datasetName,
+      settingId: preview.settingId,
+      setting: preview.setting,
       scenario: preview.scenario,
       repoId: preview.repoId,
       settings: preview.settings,
@@ -750,6 +764,7 @@ export class SolverJobService {
           subscriptionUrl: this.networkSubscriptionUrl,
           giteeUsername: this.giteeUsername,
           giteeToken: this.giteeToken,
+          sudoPassword: this.options.credentials!.password,
           redactSecrets: false
         })
       });
@@ -902,6 +917,7 @@ export class SolverJobService {
             subscriptionUrl: this.networkSubscriptionUrl,
             giteeUsername: this.giteeUsername,
             giteeToken: this.giteeToken,
+            sudoPassword: this.options.credentials!.password,
             redactSecrets: false
           })
         })
@@ -1029,7 +1045,7 @@ export class SolverJobService {
       repoNamespace: this.repoNamespace,
       hfToken: this.hfToken,
       solverHfProxyUrl: this.effectiveSolverHfProxyUrl(),
-      scenarioLibrary: this.getScenarioLibrary()
+      settingLibrary: this.getSettingLibrary()
     });
 
     let repoExists = await huggingFaceDatasetRepoExists(basePreview.repoId, this.hfToken, this.effectiveHfProxyUrl());
@@ -1066,6 +1082,7 @@ export class SolverJobService {
         solverRoot,
         repoId: basePreview.repoId,
         scenario: basePreview.scenario,
+        setting: basePreview.setting,
         rangePath: jobScopedRemoteRangePath("<job-id>", basePreview.datasetName, solverRoot),
         resultPath: jobScopedRemoteResultPath("<job-id>", basePreview.datasetName, solverRoot),
         settings,
@@ -1091,6 +1108,8 @@ export class SolverJobService {
       learned: basePreview.learned,
       datasetName: basePreview.datasetName,
       repoId: basePreview.repoId,
+      settingId: basePreview.settingId,
+      setting: basePreview.setting,
       scenario: basePreview.scenario,
       solverRangeText: basePreview.solverRangeText,
       settings: basePreview.settings,
@@ -1165,7 +1184,7 @@ export class SolverJobService {
       repoNamespace: this.repoNamespace,
       hfToken: this.hfToken,
       solverHfProxyUrl: this.effectiveSolverHfProxyUrl(),
-      scenarioLibrary: this.getScenarioLibrary()
+      settingLibrary: this.getSettingLibrary()
     });
 
     let repoExists = await huggingFaceDatasetRepoExists(basePreview.repoId, this.hfToken, this.effectiveHfProxyUrl());
@@ -1219,6 +1238,7 @@ export class SolverJobService {
         solverRoot,
         repoId: basePreview.repoId,
         scenario: basePreview.scenario,
+        setting: basePreview.setting,
         rangePath: jobScopedRemoteRangePath("<job-id>", basePreview.datasetName, solverRoot),
         resultPath: jobScopedRemoteResultPath("<job-id>", basePreview.datasetName, solverRoot),
         settings,
@@ -1249,6 +1269,8 @@ export class SolverJobService {
       learned: basePreview.learned,
       datasetName: basePreview.datasetName,
       repoId: basePreview.repoId,
+      settingId: basePreview.settingId,
+      setting: basePreview.setting,
       scenario: basePreview.scenario,
       solverRangeText: basePreview.solverRangeText,
       settings: basePreview.settings,
@@ -1286,6 +1308,8 @@ export class SolverJobService {
       rangeName: preview.rangeName,
       datasetName: preview.datasetName,
       repoId: preview.repoId,
+      settingId: preview.settingId,
+      setting: preview.setting,
       scenario: preview.scenario,
       settings: preview.settings,
       solverRangeText: preview.solverRangeText,
@@ -1614,7 +1638,7 @@ export class SolverJobService {
 
     await Promise.all(jobs.map(async (job) => {
       const server = servers.get(job.serverId);
-      if (!server?.enabled || !serverIsOnline(server)) return;
+      if (!server?.enabled || !serverIsSshReady(server)) return;
       const statusFilePath = server.pipelineStatusFilePath?.trim() || this.defaultPipelineStatusFilePath;
       const snapshot = await collectServerPipelineStatus(
         server,
@@ -2022,8 +2046,8 @@ export class SolverJobService {
 
   private ensureServerOnline(server: ServerRow): void {
     if (!serverIsOnline(server)) {
-      const status = server.latest?.connectionStatus ?? "unknown";
-      throw new Error(`Server ${server.id} is ${status}; job operations require an online server.`);
+      const status = connectionDisplayStatus(server.latest, server.pipeline);
+      throw new Error(`Server ${server.id} is ${status}; job operations require an SSH-ready server.`);
     }
   }
 
@@ -2038,6 +2062,7 @@ export class SolverJobService {
       solverRoot: effectiveSolverRoot(server),
       repoId: job.repoId,
       scenario: job.scenario,
+      setting: job.setting,
       rangePath: job.remoteRangePath,
       resultPath: job.remoteResultPath,
       settings: job.settings,
@@ -2055,7 +2080,7 @@ export class SolverJobService {
       return false;
     }
     if (!serverIsOnline(server)) {
-      const status = server.latest?.connectionStatus ?? "unknown";
+      const status = connectionDisplayStatus(server.latest, server.pipeline);
       this.markJobDispatchPending(job, `Dispatch pending: server ${server.id} is ${status}.`);
       return false;
     }
@@ -2131,6 +2156,7 @@ export class SolverJobService {
       solverRoot: effectiveSolverRoot(server),
       repoId: job.repoId,
       scenario: job.scenario,
+      setting: job.setting,
       rangePath: job.remoteRangePath,
       resultPath: job.remoteResultPath,
       settings,
@@ -2167,7 +2193,14 @@ export class SolverJobService {
     if (!server.enabled || !serverIsOnline(server)) return false;
     if (this.options.db.getActiveSolverJobForServer(server.id)) return false;
     if (isPipelineActive(server.pipeline)) return false;
-    const candidate = this.nextQueuedParallelSliceForServer(server.id);
+    let candidate = this.nextQueuedParallelSliceForServer(server.id);
+    while (candidate && parallelRunCanRefreshCoverageBeforeDispatch(candidate.run)) {
+      const runId = candidate.run.id;
+      const changed = await this.refreshQueuedParallelRunCoverageBeforeDispatch(candidate.run);
+      if (!changed) break;
+      candidate = this.nextQueuedParallelSliceForServer(server.id);
+      if (candidate?.run.id === runId) break;
+    }
     if (!candidate) return false;
     const cardsCheck = await this.validateServerCardsForSlice(server, candidate.slice);
     if (!cardsCheck.ready) {
@@ -2189,6 +2222,77 @@ export class SolverJobService {
     }
     const job = this.createJobForParallelSlice(candidate.run, candidate.slice, server);
     return this.startQueuedJobIfDispatchReady(job);
+  }
+
+  private async refreshQueuedParallelRunCoverageBeforeDispatch(run: ParallelSolverRun): Promise<boolean> {
+    const current = this.options.db.getParallelSolverRun(run.id);
+    if (!current || !parallelRunCanRefreshCoverageBeforeDispatch(current)) return false;
+
+    let remoteBoardKeys: Set<string>;
+    try {
+      remoteBoardKeys = await fetchHuggingFaceDatasetBoardKeys(
+        current.repoId,
+        this.hfToken,
+        this.effectiveHfProxyUrl()
+      );
+    } catch (error) {
+      console.warn(
+        `Unable to refresh coverage before dispatching parallel run ${current.id}; keeping its saved queue unchanged.`,
+        error
+      );
+      return false;
+    }
+
+    const historicallyCompleted = new Set(collectHistoricallyCompletedBoardIndices(
+      this.options.db.getParallelSolverRuns().filter((candidate) => candidate.id !== current.id),
+      current.datasetName,
+      current.rangePath
+    ));
+    const isCovered = (boardIndex: number, boardName: string) =>
+      historicallyCompleted.has(boardIndex) || remoteBoardKeys.has(boardKeyFromName(boardName));
+    const coveredIndices = new Set<number>();
+    for (const slice of current.slices) {
+      slice.assignedIndices.forEach((boardIndex, position) => {
+        if (isCovered(boardIndex, slice.assignedBoardNames[position] ?? String(boardIndex))) {
+          coveredIndices.add(boardIndex);
+        }
+      });
+    }
+    if (coveredIndices.size === 0) return false;
+
+    const now = new Date().toISOString();
+    const remainingIndices: number[] = [];
+    this.options.db.runInPersistenceBatch(() => {
+      for (const slice of current.slices) {
+        const assignedBoardNames: string[] = [];
+        const assignedIndices = slice.assignedIndices.filter((boardIndex, position) => {
+          if (coveredIndices.has(boardIndex)) return false;
+          remainingIndices.push(boardIndex);
+          assignedBoardNames.push(slice.assignedBoardNames[position] ?? String(boardIndex));
+          return true;
+        });
+        if (assignedIndices.length === 0) {
+          this.options.db.deleteParallelSolverSlice(slice.id);
+          continue;
+        }
+        this.options.db.updateParallelSolverSlice(slice.id, {
+          rangeExpr: compressIndices(assignedIndices),
+          assignedIndices,
+          assignedBoardNames,
+          updatedAt: now
+        });
+      }
+      remainingIndices.sort((left, right) => left - right);
+      this.options.db.updateParallelSolverRun(current.id, {
+        totalIndices: remainingIndices,
+        missingIndices: remainingIndices,
+        status: remainingIndices.length === 0 ? "completed" : "queued",
+        finishedAt: remainingIndices.length === 0 ? now : null,
+        lastError: null,
+        updatedAt: now
+      });
+    });
+    return true;
   }
 
   private nextQueuedParallelSliceForServer(serverId: string): { run: ParallelSolverRun; slice: ParallelSolverSlice; job: SolverJob | null } | null {
@@ -2227,6 +2331,7 @@ export class SolverJobService {
       solverRoot,
       repoId: run.repoId,
       scenario: run.scenario,
+      setting: run.setting,
       rangePath: remoteRangePath,
       resultPath: remoteResultPath,
       settings,
@@ -2241,6 +2346,8 @@ export class SolverJobService {
       rangePath: run.rangePath,
       rangeName: run.rangeName,
       datasetName: run.datasetName,
+      settingId: run.settingId,
+      setting: run.setting,
       scenario: run.scenario,
       repoId: run.repoId,
       settings,
@@ -2420,7 +2527,8 @@ export function buildSolverJobPreview({
   repoNamespace,
   hfToken,
   solverHfProxyUrl,
-  scenarioLibrary = DEFAULT_SOLVER_SCENARIO_LIBRARY
+  settingLibrary,
+  scenarioLibrary
 }: {
   input: SolverJobPreviewRequest;
   server: ServerRow;
@@ -2429,14 +2537,22 @@ export function buildSolverJobPreview({
   repoNamespace: string;
   hfToken?: string | null;
   solverHfProxyUrl?: string | null;
+  settingLibrary?: SolverSettingLibraryItem[];
+  /** @deprecated Use settingLibrary. */
   scenarioLibrary?: SolverScenarioLibraryItem[];
 }): SolverJobPreview {
   const solverRoot = effectiveSolverRoot(server);
 
   const file = readPreflopRangeFile(preflopRangesPath, input.rangePath);
-  const settings = normalizeSolverJobSettings(input.settings);
-  const scenario = scenarioFromPreviewInput(input, scenarioLibrary);
-  const datasetName = normalizeDatasetName(input.datasetName) ?? datasetNameFromRangePath(input.rangePath, scenario);
+  const library = settingLibrary ?? scenarioLibrary ?? DEFAULT_SOLVER_SETTING_LIBRARY;
+  const setting = settingFromPreviewInput(input, library);
+  const settings = {
+    ...normalizeSolverJobSettings(input.settings),
+    maxIteration: setting.parameters.maxIteration,
+    useIsomorphism: setting.parameters.useIsomorphism ? 1 as const : 0 as const
+  };
+  const scenario = setting.id;
+  const datasetName = normalizeDatasetName(input.datasetName) ?? datasetNameFromRangePath(input.rangePath, setting.id);
   const repoId = `${repoNamespace}/${datasetName}`;
   const solverRangeText = solverRangeTextFromDocument(file.summary.data);
   const tmuxSession = server.tmuxSession?.trim() || "solver";
@@ -2447,6 +2563,7 @@ export function buildSolverJobPreview({
     solverRoot,
     repoId,
     scenario,
+    setting,
     rangePath: remoteRangePath,
     resultPath: remoteResultPath,
     settings,
@@ -2468,6 +2585,8 @@ export function buildSolverJobPreview({
     learned,
     datasetName,
     repoId,
+    settingId: setting.id,
+    setting,
     scenario,
     solverRangeText,
     remoteRangePath,
@@ -2519,18 +2638,22 @@ export function solverRangeTextFromDocument(document: PreflopRangeDocument): str
   ].join("\n");
 }
 
-function scenarioFromPreviewInput(
+function settingFromPreviewInput(
   input: SolverJobPreviewRequest,
-  scenarioLibrary: SolverScenarioLibraryItem[]
-): SolverScenario {
-  const scenarioIds = new Set(scenarioLibrary.map((scenario) => scenario.id));
-  if (input.scenario == null) {
-    const inferred = scenarioFromRangePath(input.rangePath);
-    if (scenarioIds.has(inferred)) return inferred;
-    throw new Error(`Unsupported solver scenario: ${inferred}`);
+  settingLibrary: SolverSettingLibraryItem[]
+): SolverSettingLibraryItem {
+  const settingId = input.settingId ?? input.scenario;
+  if (settingId == null) {
+    const linked = linkedSolverSettingsForRangePath(settingLibrary, input.rangePath);
+    if (linked.length === 1) return linked[0]!;
+    if (linked.length > 1) {
+      throw new Error(`Range path ${input.rangePath} has ambiguous Setting links: ${linked.map((setting) => setting.id).join(", ")}.`);
+    }
+    throw new Error(`Range path ${input.rangePath} is not linked to a Setting. Select one manually.`);
   }
-  if (scenarioIds.has(input.scenario)) return input.scenario;
-  throw new Error(`Unsupported solver scenario: ${input.scenario}`);
+  const setting = settingLibrary.find((candidate) => candidate.id === settingId);
+  if (setting) return setting;
+  throw new Error(`Unsupported solver setting: ${settingId}`);
 }
 
 function normalizeDatasetName(value: unknown): string | null {
@@ -2650,6 +2773,7 @@ export function buildRunPipelineCommand({
   solverRoot,
   repoId,
   scenario,
+  setting,
   rangePath,
   rangeFileName,
   oopRange,
@@ -2664,6 +2788,7 @@ export function buildRunPipelineCommand({
   solverRoot: string;
   repoId: string;
   scenario: SolverScenario;
+  setting?: SolverSettingLibraryItem;
   rangePath?: string;
   rangeFileName?: string;
   oopRange?: string;
@@ -2675,9 +2800,13 @@ export function buildRunPipelineCommand({
   hfProxyUrl?: string | null;
   redactSecrets?: boolean;
 }): string {
+  const effectiveScenario = setting?.id ?? scenario;
+  const injectedSetting = setting && solverSettingRequiresRuntimeInjection(setting) ? setting : null;
   const args = [
     "python",
-    "run_pipeline.py",
+    ...(injectedSetting
+      ? ["-c", SOLVER_SETTING_PIPELINE_LAUNCHER, encodeSolverSettingSnapshot(injectedSetting)]
+      : ["run_pipeline.py"]),
     settings.rangeExpr,
     "--batch-size",
     String(settings.batchSize),
@@ -2692,7 +2821,7 @@ export function buildRunPipelineCommand({
     "--status-file",
     statusFilePath,
     "--scenario",
-    scenario
+    effectiveScenario
   ];
   if (resultPath) {
     args.push("--result-path", resultPath);
@@ -2740,6 +2869,36 @@ export function buildRunPipelineCommand({
     ...environmentExports,
     `PIPELINE_STATUS_FILE=${shellQuote(statusFilePath)} ${args.map(shellQuote).join(" ")}`
   ].join(" && ");
+}
+
+const SOLVER_SETTING_PIPELINE_LAUNCHER = `import base64,json,runpy,sys
+setting=json.loads(base64.b64decode(sys.argv.pop(1)).decode("utf-8"))
+namespace=runpy.run_path("run_pipeline.py",run_name="solver_pipeline")
+configs=namespace.get("SCENARIO_CONFIG")
+defaults=namespace.get("SCENARIO_DEFAULTS")
+if not isinstance(configs,dict) or not isinstance(defaults,dict):
+    raise RuntimeError("run_pipeline.py does not expose SCENARIO_CONFIG and SCENARIO_DEFAULTS")
+setting_id=setting["id"]
+configs[setting_id]=setting["configTemplate"]
+defaults[setting_id]={"pot":setting["pot"],"effective_stack":setting["effectiveStack"]}
+subdirs=tuple(namespace.get("SCENARIO_SUBDIRS",()))
+namespace["SCENARIO_SUBDIRS"]=subdirs if setting_id in subdirs else (*subdirs,setting_id)
+sys.argv=["run_pipeline.py",*sys.argv[1:]]
+main=namespace.get("main")
+if not callable(main):
+    raise RuntimeError("run_pipeline.py does not expose main()")
+main()`;
+
+function encodeSolverSettingSnapshot(setting: SolverSettingLibraryItem): string {
+  return Buffer.from(JSON.stringify(setting), "utf8").toString("base64");
+}
+
+function solverSettingRequiresRuntimeInjection(setting: SolverSettingLibraryItem): boolean {
+  const builtIn = DEFAULT_SOLVER_SETTING_LIBRARY.find((candidate) => candidate.id === setting.id);
+  return !builtIn ||
+    builtIn.configTemplate !== setting.configTemplate ||
+    builtIn.pot !== setting.pot ||
+    builtIn.effectiveStack !== setting.effectiveStack;
 }
 
 export function buildDeployRangeCommand(job: SolverJob): string {
@@ -2836,16 +2995,19 @@ export function buildServerNetworkSyncCommand({
   subscriptionUrl = null,
   giteeUsername = "Tsumugii24",
   giteeToken = null,
+  sudoPassword = null,
   redactSecrets = false
 }: {
   subscriptionUrl?: string | null;
   giteeUsername?: string | null;
   giteeToken?: string | null;
+  sudoPassword?: string | null;
   redactSecrets?: boolean;
 } = {}): string {
   const normalizedUrl = subscriptionUrl?.trim() || null;
   const normalizedGiteeUsername = giteeUsername?.trim() || "Tsumugii24";
   const normalizedGiteeToken = giteeToken?.trim() || null;
+  const normalizedSudoPassword = sudoPassword ?? "";
   if (!redactSecrets && !normalizedUrl) {
     throw new Error("SUBSCRIPTION_URL is required for network sync operations.");
   }
@@ -2858,6 +3020,9 @@ export function buildServerNetworkSyncCommand({
   const giteeTokenAssignment = redactSecrets
     ? "GITEE_TOKEN=$GITEE_TOKEN"
     : `GITEE_TOKEN=${shellQuote(normalizedGiteeToken ?? "")}`;
+  const sudoPasswordAssignment = redactSecrets
+    ? "SUDO_PASSWORD=$SUDO_PASSWORD"
+    : `SUDO_PASSWORD=${shellQuote(normalizedSudoPassword)}`;
   return String.raw`set +e
 REPO_DIR="$HOME/mihomo-release"
 REPO_URL="https://gitee.com/Tsumugii24/mihomo-release"
@@ -2870,6 +3035,7 @@ export GIT_CONFIG_GLOBAL=/dev/null
 ${subscriptionAssignment}
 ${giteeUsernameAssignment}
 ${giteeTokenAssignment}
+${sudoPasswordAssignment}
 GIT_ASKPASS_FILE=""
 if [ -n "$GITEE_TOKEN" ]; then
   GIT_ASKPASS_FILE=$(mktemp)
@@ -2947,6 +3113,34 @@ if [ "$BINARY_CODE" -eq 0 ]; then
   if [ "$BACKUP_CODE" -eq 0 ]; then
     timeout 90 wget --timeout=30 --tries=2 -q -O config.yaml.next "$SUBSCRIPTION_URL"
     DOWNLOAD_CODE=$?
+    DOWNLOAD_INITIAL_CODE=$DOWNLOAD_CODE
+    DOWNLOAD_RETRY_CODE=-1
+    DNS_RETRY_ATTEMPTED=0
+    DNS_REPAIR_CODE=0
+    if [ "$DOWNLOAD_INITIAL_CODE" -ne 0 ]; then
+      DNS_RETRY_ATTEMPTED=1
+      if [ "$(id -u)" -eq 0 ]; then
+        bash -c 'echo "nameserver 223.5.5.5" > /etc/resolv.conf'
+        DNS_PRIMARY_CODE=$?
+        bash -c 'echo "nameserver 8.8.8.8" >> /etc/resolv.conf'
+        DNS_SECONDARY_CODE=$?
+      else
+        printf '%s\n' "$SUDO_PASSWORD" | timeout 15 sudo -S -p '' bash -c 'echo "nameserver 223.5.5.5" > /etc/resolv.conf'
+        DNS_PRIMARY_CODE=$?
+        printf '%s\n' "$SUDO_PASSWORD" | timeout 15 sudo -S -p '' bash -c 'echo "nameserver 8.8.8.8" >> /etc/resolv.conf'
+        DNS_SECONDARY_CODE=$?
+      fi
+      if [ "$DNS_PRIMARY_CODE" -ne 0 ]; then
+        DNS_REPAIR_CODE=$DNS_PRIMARY_CODE
+      elif [ "$DNS_SECONDARY_CODE" -ne 0 ]; then
+        DNS_REPAIR_CODE=$DNS_SECONDARY_CODE
+      fi
+      rm -f config.yaml.next
+      timeout 90 wget --timeout=30 --tries=2 -q -O config.yaml.next "$SUBSCRIPTION_URL"
+      DOWNLOAD_CODE=$?
+      DOWNLOAD_RETRY_CODE=$DOWNLOAD_CODE
+    fi
+    unset SUDO_PASSWORD
     if [ "$DOWNLOAD_CODE" -eq 0 ] && [ -s config.yaml.next ]; then
       mv config.yaml.next config.yaml
     else
@@ -2955,10 +3149,18 @@ if [ "$BINARY_CODE" -eq 0 ]; then
     fi
   else
     DOWNLOAD_CODE=1
+    DOWNLOAD_INITIAL_CODE=1
+    DOWNLOAD_RETRY_CODE=-1
+    DNS_RETRY_ATTEMPTED=0
+    DNS_REPAIR_CODE=0
     rm -f config.yaml.next
   fi
 else
   DOWNLOAD_CODE=1
+  DOWNLOAD_INITIAL_CODE=1
+  DOWNLOAD_RETRY_CODE=-1
+  DNS_RETRY_ATTEMPTED=0
+  DNS_REPAIR_CODE=0
   BACKUP_CODE=1
 fi
 if [ "$DOWNLOAD_CODE" -eq 0 ]; then
@@ -2995,13 +3197,14 @@ else
   NETWORK_KIND=failed
 fi
 export GIT_OUTPUT VALIDATE_OUTPUT
-python - "$OP_RESULT_FILE" "$NETWORK_KIND" "$INSTALL_KIND" "$GIT_CODE" "$GIT_ATTEMPT_CODE" "$BINARY_CODE" "$BACKUP_CODE" "$DOWNLOAD_CODE" "$VALIDATE_CODE" "$START_CODE" "$SESSION_CODE" "$NETWORK_STARTED_AT" "$NETWORK_FINISHED_AT" <<'PY'
+python - "$OP_RESULT_FILE" "$NETWORK_KIND" "$INSTALL_KIND" "$GIT_CODE" "$GIT_ATTEMPT_CODE" "$BINARY_CODE" "$BACKUP_CODE" "$DOWNLOAD_CODE" "$DOWNLOAD_INITIAL_CODE" "$DOWNLOAD_RETRY_CODE" "$DNS_RETRY_ATTEMPTED" "$DNS_REPAIR_CODE" "$VALIDATE_CODE" "$START_CODE" "$SESSION_CODE" "$NETWORK_STARTED_AT" "$NETWORK_FINISHED_AT" <<'PY'
 import json
 import os
 import sys
 
 (path, kind, install_kind, git_code, git_attempt_code, binary_code, backup_code,
- download_code, validate_code, start_code, session_code, started_at, finished_at) = sys.argv[1:14]
+ download_code, download_initial_code, download_retry_code, dns_retry_attempted,
+ dns_repair_code, validate_code, start_code, session_code, started_at, finished_at) = sys.argv[1:18]
 result = {
     "summary": {
         "network_ready": 1 if kind == "ready" else 0,
@@ -3010,6 +3213,8 @@ result = {
         "cloned": 1 if install_kind == "cloned" and kind == "ready" else 0,
         "updated": 1 if install_kind == "updated" and kind == "ready" else 0,
         "cached": 1 if install_kind == "cached" and kind == "ready" else 0,
+        "dns_retry": int(dns_retry_attempted),
+        "dns_retry_recovered": 1 if dns_retry_attempted == "1" and download_code == "0" else 0,
     },
     "details": [{
         "kind": kind,
@@ -3019,6 +3224,10 @@ result = {
         "binary_code": int(binary_code),
         "backup_code": int(backup_code),
         "download_code": int(download_code),
+        "download_initial_code": int(download_initial_code),
+        "download_retry_code": int(download_retry_code),
+        "dns_retry_attempted": int(dns_retry_attempted),
+        "dns_repair_code": int(dns_repair_code),
         "validate_code": int(validate_code),
         "start_code": int(start_code),
         "session_code": int(session_code),
@@ -3538,7 +3747,7 @@ export function buildGracefulStopPipelineCommand(job: SolverJob): string {
 SESSION=${shellQuote(job.tmuxSession)}
 STATUS_FILE=${shellQuote(statusFileFromJob(job))}
 case "$STATUS_FILE" in
-  "~/"*) STATUS_FILE="$HOME/${"$"}{STATUS_FILE#~/}" ;;
+  "~/"*) STATUS_FILE="$HOME/${"$"}{STATUS_FILE#??}" ;;
 esac
 PID=""
 if [ -f "$STATUS_FILE" ]; then
@@ -3563,7 +3772,7 @@ export function buildForceKillPipelineCommand(job: SolverJob): string {
 SESSION=${shellQuote(job.tmuxSession)}
 STATUS_FILE=${shellQuote(statusFileFromJob(job))}
 case "$STATUS_FILE" in
-  "~/"*) STATUS_FILE="$HOME/${"$"}{STATUS_FILE#~/}" ;;
+  "~/"*) STATUS_FILE="$HOME/${"$"}{STATUS_FILE#??}" ;;
 esac
 PID=""
 PGID=""
@@ -3659,7 +3868,7 @@ function pipelineBelongsToJob(pipeline: PipelineStatusSnapshot, job: SolverJob):
 }
 
 function serverIsOnline(server: ServerRow): boolean {
-  return server.latest?.connectionStatus === "online";
+  return serverIsJobReady(server);
 }
 
 function serverIsReadyForParallelSelection(server: ServerRow, activeJob: SolverJob | null): boolean {
@@ -4401,6 +4610,14 @@ function parallelRunLocked(run: ParallelSolverRun): boolean {
     slice.job?.status === "running" ||
     slice.job?.status === "stopping"
   );
+}
+
+function parallelRunCanRefreshCoverageBeforeDispatch(run: ParallelSolverRun): boolean {
+  return run.sourceType === "parallel" &&
+    run.status === "queued" &&
+    !run.startedAt &&
+    run.slices.length > 0 &&
+    run.slices.every((slice) => slice.status === "queued" && !slice.jobId && !slice.job);
 }
 
 function parallelSliceJobCanBeReassigned(slice: ParallelSolverSlice): boolean {

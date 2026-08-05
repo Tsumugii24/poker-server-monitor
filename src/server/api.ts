@@ -12,6 +12,7 @@ import type {
   WeChatConnectorStatus,
   WeChatRecipient
 } from "../shared/types";
+import { serverIsJobReady } from "../shared/serverReadiness";
 import type { PreflopRangeDocument } from "../shared/preflopRange";
 import { PREFLOP_REVIEW_STATUSES } from "../shared/preflopRange";
 import {
@@ -43,6 +44,7 @@ import {
   deletePreflopRangePath,
   listPreflopRanges,
   movePreflopRangePath,
+  preflopRangePathKind,
   readPreflopRangeFile,
   renamePreflopRangePath,
   reorderPreflopRanges,
@@ -82,6 +84,15 @@ import {
   loadSolverScenarioLibrary,
   updateSolverScenario
 } from "./scenarioLibraryStore";
+import {
+  addSolverSetting,
+  deleteSolverSettingRangeFolderLinks,
+  deleteSolverSetting,
+  duplicateSolverSetting,
+  loadSolverSettingLibrary,
+  renameSolverSettingRangeFolderLinks,
+  updateSolverSetting
+} from "./settingLibraryStore";
 
 export type AppDependencies = {
   db: MonitorDatabase;
@@ -92,6 +103,8 @@ export type AppDependencies = {
   inventoryPath?: string;
   alertSettingsPath?: string;
   preflopRangesPath?: string;
+  solverSettingLibraryPath?: string;
+  /** @deprecated Use solverSettingLibraryPath. */
   solverScenarioLibraryPath?: string;
   solverJobService?: SolverJobService;
   solverJobRepoNamespace?: string;
@@ -134,7 +147,8 @@ export function createApp({
   inventoryPath = "config/servers.json",
   alertSettingsPath = "config/alerts.json",
   preflopRangesPath = "config/preflop-ranges",
-  solverScenarioLibraryPath = "config/solver-scenarios.json",
+  solverSettingLibraryPath,
+  solverScenarioLibraryPath,
   solverJobService: providedSolverJobService,
   solverJobRepoNamespace = "Tsumugii",
   hfToken = null,
@@ -162,6 +176,9 @@ export function createApp({
   updateWeChatAccount,
   verifyWeChatAccount
 }: AppDependencies): Express {
+  const effectiveSettingLibraryPath = solverSettingLibraryPath ??
+    solverScenarioLibraryPath ??
+    "config/solver-settings.json";
   const solverJobService = providedSolverJobService ?? new SolverJobService({
     db,
     preflopRangesPath,
@@ -173,7 +190,7 @@ export function createApp({
     giteeUsername,
     giteeToken,
     getHfProxySettings: () => loadAlertSettings(alertSettingsPath),
-    getScenarioLibrary: () => loadSolverScenarioLibrary(solverScenarioLibraryPath).scenarios
+    getSettingLibrary: () => loadSolverSettingLibrary(effectiveSettingLibraryPath).settings
   });
   const app = express();
   app.use(express.json({ limit: "25mb" }));
@@ -317,7 +334,8 @@ export function createApp({
   // ── Range Library ─────────────────────────────────────
 
   const preflopRangeRuntime = (): PreflopRangeRuntimeInput => ({
-    jobs: solverJobService.listJobs().jobs
+    jobs: solverJobService.listJobs().jobs,
+    parallelRuns: db.getParallelSolverRuns()
   });
 
   app.get("/api/preflop-ranges", (_request, response) => {
@@ -346,7 +364,8 @@ export function createApp({
       const progress = await refreshPreflopRangeProgress(preflopRangesPath, {
         hfToken,
         repoNamespace: solverJobRepoNamespace,
-        hfProxyUrl: settings.hfProxyEnabled ? hfProxyUrl : null
+        hfProxyUrl: settings.hfProxyEnabled ? hfProxyUrl : null,
+        runtime: preflopRangeRuntime()
       });
       response.json({
         ok: true,
@@ -418,8 +437,12 @@ export function createApp({
     }
 
     try {
+      const kind = preflopRangePathKind(preflopRangesPath, request.body.path);
       const path = renamePreflopRangePath(preflopRangesPath, request.body.path, request.body.newName);
-      response.json({ ok: true, path });
+      const settingLibrary = kind === "folder"
+        ? renameSolverSettingRangeFolderLinks(effectiveSettingLibraryPath, request.body.path, path)
+        : null;
+      response.json({ ok: true, path, settingLibrary });
     } catch (error) {
       respondPreflopRangeError(response, error, "preflop_range_rename_failed");
     }
@@ -432,8 +455,12 @@ export function createApp({
     }
 
     try {
+      const kind = preflopRangePathKind(preflopRangesPath, request.body.path);
       const path = movePreflopRangePath(preflopRangesPath, request.body.path, request.body.targetFolder);
-      response.json({ ok: true, path });
+      const settingLibrary = kind === "folder"
+        ? renameSolverSettingRangeFolderLinks(effectiveSettingLibraryPath, request.body.path, path)
+        : null;
+      response.json({ ok: true, path, settingLibrary });
     } catch (error) {
       respondPreflopRangeError(response, error, "preflop_range_move_failed");
     }
@@ -507,18 +534,88 @@ export function createApp({
 
   app.delete("/api/preflop-ranges/path", (request, response) => {
     try {
-      deletePreflopRangePath(preflopRangesPath, String(request.query.path ?? ""));
-      response.json({ ok: true });
+      const path = String(request.query.path ?? "");
+      const kind = preflopRangePathKind(preflopRangesPath, path);
+      deletePreflopRangePath(preflopRangesPath, path);
+      const settingLibrary = kind === "folder"
+        ? deleteSolverSettingRangeFolderLinks(effectiveSettingLibraryPath, path)
+        : null;
+      response.json({ ok: true, settingLibrary });
     } catch (error) {
       respondPreflopRangeError(response, error, "preflop_range_delete_failed");
     }
   });
 
-  // ── Solver scenario library ──────────────────────────────────
+  // ── Solver setting library ───────────────────────────────────
+
+  app.get("/api/solver-settings", (_request, response) => {
+    try {
+      response.json(loadSolverSettingLibrary(effectiveSettingLibraryPath));
+    } catch (error) {
+      respondSettingLibraryError(response, error, "solver_setting_list_failed");
+    }
+  });
+
+  app.post("/api/solver-settings", (request, response) => {
+    if (!isRecord(request.body) || !isRecord(request.body.setting)) {
+      response.status(400).json({ error: "invalid_solver_setting", message: "setting is required" });
+      return;
+    }
+    try {
+      response.status(201).json(addSolverSetting(
+        effectiveSettingLibraryPath,
+        request.body.setting
+      ));
+    } catch (error) {
+      respondSettingLibraryError(response, error, "solver_setting_create_failed");
+    }
+  });
+
+  app.patch("/api/solver-settings/:id", (request, response) => {
+    if (!isRecord(request.body) || !isRecord(request.body.setting)) {
+      response.status(400).json({ error: "invalid_solver_setting", message: "setting is required" });
+      return;
+    }
+    try {
+      response.json(updateSolverSetting(
+        effectiveSettingLibraryPath,
+        request.params.id,
+        request.body.setting
+      ));
+    } catch (error) {
+      respondSettingLibraryError(response, error, "solver_setting_update_failed");
+    }
+  });
+
+  app.post("/api/solver-settings/:id/duplicate", (request, response) => {
+    if (!isRecord(request.body) || typeof request.body.id !== "string") {
+      response.status(400).json({ error: "invalid_solver_setting", message: "id is required" });
+      return;
+    }
+    try {
+      response.status(201).json(duplicateSolverSetting(
+        effectiveSettingLibraryPath,
+        request.params.id,
+        request.body.id
+      ));
+    } catch (error) {
+      respondSettingLibraryError(response, error, "solver_setting_duplicate_failed");
+    }
+  });
+
+  app.delete("/api/solver-settings/:id", (request, response) => {
+    try {
+      response.json(deleteSolverSetting(effectiveSettingLibraryPath, request.params.id));
+    } catch (error) {
+      respondSettingLibraryError(response, error, "solver_setting_delete_failed");
+    }
+  });
+
+  // Legacy aliases. Remove only after old clients have migrated to /api/solver-settings.
 
   app.get("/api/scenarios", (_request, response) => {
     try {
-      response.json(loadSolverScenarioLibrary(solverScenarioLibraryPath));
+      response.json(loadSolverScenarioLibrary(effectiveSettingLibraryPath));
     } catch (error) {
       response.status(500).json({
         error: "solver_scenario_list_failed",
@@ -535,7 +632,7 @@ export function createApp({
 
     try {
       response.status(201).json(addSolverScenario(
-        solverScenarioLibraryPath,
+        effectiveSettingLibraryPath,
         request.body.scenario as SolverScenarioLibraryItem
       ));
     } catch (error) {
@@ -551,7 +648,7 @@ export function createApp({
 
     try {
       response.json(updateSolverScenario(
-        solverScenarioLibraryPath,
+        effectiveSettingLibraryPath,
         request.params.id,
         request.body.scenario as SolverScenarioLibraryItem
       ));
@@ -562,7 +659,7 @@ export function createApp({
 
   app.delete("/api/scenarios/:id", (request, response) => {
     try {
-      response.json(deleteSolverScenario(solverScenarioLibraryPath, request.params.id));
+      response.json(deleteSolverScenario(effectiveSettingLibraryPath, request.params.id));
     } catch (error) {
       respondScenarioLibraryError(response, error, "solver_scenario_delete_failed");
     }
@@ -1487,36 +1584,45 @@ export function createApp({
 function buildSummary(servers: ReturnType<MonitorDatabase["getServerRows"]>): OverviewSummary {
   const latest = servers.map((server) => server.latest);
   const onlineSnapshots = latest.filter((s) => s?.connectionStatus === "online");
-  const onlineServerIds = new Set(
-    servers.filter((server) => server.latest?.connectionStatus === "online").map((server) => server.id)
+  const readySnapshots = servers
+    .filter(serverIsJobReady)
+    .map((server) => server.latest)
+    .filter((snapshot): snapshot is NonNullable<typeof snapshot> => snapshot != null);
+  const degradedServers = servers.filter(
+    (server) => server.latest?.connectionStatus === "online" &&
+      (server.latest.errorCode != null || server.pipeline?.errorCode != null)
   );
-  const onlinePipelines = servers
-    .filter((server) => onlineServerIds.has(server.id))
+  const readyServerIds = new Set(
+    servers.filter(serverIsJobReady).map((server) => server.id)
+  );
+  const readyPipelines = servers
+    .filter((server) => readyServerIds.has(server.id))
     .map((server) => server.pipeline);
 
   return {
     total: servers.length,
     // Connectivity
     online: onlineSnapshots.length,
+    degraded: degradedServers.length,
     offline: latest.filter((s) => s?.connectionStatus === "offline").length,
     unknown: latest.filter((s) => !s || s.connectionStatus === "unknown").length,
-    // Health (among online servers)
-    healthy: onlineSnapshots.filter((s) => s?.healthLevel === "healthy").length,
-    warning: onlineSnapshots.filter((s) => s?.healthLevel === "warning").length,
-    dangerous: onlineSnapshots.filter((s) => s?.healthLevel === "dangerous").length,
-    // Averages (among online servers)
-    averageCpu: average(onlineSnapshots.map((s) => s?.cpuUsedPercent ?? null)),
-    averageMemory: average(onlineSnapshots.map((s) => s?.memoryUsedPercent ?? null)),
-    averageDisk: average(onlineSnapshots.map((s) => s?.diskUsedPercent ?? null)),
-    pipelineRunning: onlinePipelines.filter((pipeline) =>
+    // Health (among SSH-ready servers)
+    healthy: readySnapshots.filter((s) => s?.healthLevel === "healthy").length,
+    warning: readySnapshots.filter((s) => s?.healthLevel === "warning").length,
+    dangerous: readySnapshots.filter((s) => s?.healthLevel === "dangerous").length,
+    // Averages (among SSH-ready servers)
+    averageCpu: average(readySnapshots.map((s) => s?.cpuUsedPercent ?? null)),
+    averageMemory: average(readySnapshots.map((s) => s?.memoryUsedPercent ?? null)),
+    averageDisk: average(readySnapshots.map((s) => s?.diskUsedPercent ?? null)),
+    pipelineRunning: readyPipelines.filter((pipeline) =>
       pipeline != null &&
       (pipeline.displayStatus === "running" ||
         pipeline.displayStatus === "solving" ||
         pipeline.displayStatus === "uploading" ||
         pipeline.displayStatus === "cleanup")
     ).length,
-    pipelineIdle: onlinePipelines.filter((pipeline) => pipeline?.displayStatus === "idle").length,
-    pipelineStale: onlinePipelines.filter((pipeline) => pipeline?.displayStatus === "stale").length
+    pipelineIdle: readyPipelines.filter((pipeline) => pipeline?.displayStatus === "idle").length,
+    pipelineStale: readyPipelines.filter((pipeline) => pipeline?.displayStatus === "stale").length
   };
 }
 
@@ -1564,11 +1670,12 @@ function describeOverview(summary: OverviewSummary): string {
   if (summary.dangerous > 0) healthIssues.push(`${summary.dangerous} dangerous`);
   const health = healthIssues.length > 0 ? healthIssues.join(", ") : "all healthy";
   const offline = summary.offline > 0 ? `${summary.offline} offline` : "none offline";
+  const degraded = summary.degraded > 0 ? `${summary.degraded} degraded` : "none degraded";
   const pipelineParts: string[] = [];
   if (summary.pipelineRunning > 0) pipelineParts.push(`${summary.pipelineRunning} task running`);
   if (summary.pipelineStale > 0) pipelineParts.push(`${summary.pipelineStale} stale task`);
   const pipeline = pipelineParts.length > 0 ? pipelineParts.join(", ") : "no active tasks";
-  return `${connectivity}; ${health}; ${offline}; ${pipeline}.`;
+  return `${connectivity}; ${health}; ${degraded}; ${offline}; ${pipeline}.`;
 }
 
 function average(values: Array<number | null>): number | null {
@@ -1939,13 +2046,13 @@ function respondSolverJobError(
     ? 404
       : /already has active|active solver task|must be stopped|must be canceled|confirmation is required|must be approved|dataset repo is missing|online server|is offline|is unknown|only queued/i.test(message)
       ? 409
-      : /missing|must have|required|invalid|outside|not marked studied/i.test(message)
+      : /missing|must have|required|invalid|outside|not marked studied|not linked to a Setting|ambiguous Setting links/i.test(message)
         ? 400
         : 500;
   response.status(status).json({ error: code, message });
 }
 
-function respondScenarioLibraryError(
+function respondSettingLibraryError(
   response: express.Response,
   error: unknown,
   code: string
@@ -1960,3 +2067,5 @@ function respondScenarioLibraryError(
         : 500;
   response.status(status).json({ error: code, message });
 }
+
+const respondScenarioLibraryError = respondSettingLibraryError;

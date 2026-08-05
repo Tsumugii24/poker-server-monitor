@@ -1,3 +1,6 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { ConnectionStatus, HealthLevel, MetricSnapshot, ServerConfig } from "../../src/shared/types";
 import { MonitorDatabase } from "../../src/server/db";
@@ -159,5 +162,25 @@ describe("MonitorDatabase", () => {
         averageDisk: 70
       }
     ]);
+  });
+
+  it("allows only one process-wide writer for a file-backed database", async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "server-monitor-db-lock-"));
+    const databasePath = path.join(tempDir, "monitor.sqlite");
+    const lockPath = `${databasePath}.lock`;
+    const first = await MonitorDatabase.open(databasePath);
+    try {
+      expect(fs.existsSync(lockPath)).toBe(true);
+      await expect(MonitorDatabase.open(databasePath)).rejects.toThrow(
+        /already in use by process/
+      );
+    } finally {
+      first.close();
+    }
+
+    expect(fs.existsSync(lockPath)).toBe(false);
+    const reopened = await MonitorDatabase.open(databasePath);
+    reopened.close();
+    fs.rmSync(tempDir, { recursive: true, force: true });
   });
 });

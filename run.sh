@@ -66,6 +66,16 @@ if command -v lsof >/dev/null 2>&1; then
     if [[ -n "$pid" ]]; then
       echo "Stopping existing process on port $PORT: $pid"
       kill "$pid" || true
+      for _ in {1..50}; do
+        if ! kill -0 "$pid" 2>/dev/null; then
+          break
+        fi
+        sleep 0.1
+      done
+      if kill -0 "$pid" 2>/dev/null; then
+        echo "Existing process $pid did not stop; refusing to start a second database writer." >&2
+        exit 1
+      fi
     fi
   done
 elif command -v fuser >/dev/null 2>&1; then

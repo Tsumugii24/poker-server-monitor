@@ -6,16 +6,20 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp } from "../../src/server/api";
 import { MonitorDatabase } from "../../src/server/db";
 import { RefreshService } from "../../src/server/refreshService";
+import { saveSolverSettingLibrary } from "../../src/server/settingLibraryStore";
+import { DEFAULT_SOLVER_SETTING_LIBRARY } from "../../src/shared/solverSettings";
 
 describe("preflop range API", () => {
   let tempDir: string;
   let preflopRangesPath: string;
+  let solverSettingLibraryPath: string;
   let db: MonitorDatabase;
   let service: RefreshService;
 
   beforeEach(async () => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "server-monitor-preflop-"));
     preflopRangesPath = path.join(tempDir, "preflop-ranges");
+    solverSettingLibraryPath = path.join(tempDir, "solver-settings.json");
     fs.mkdirSync(path.join(preflopRangesPath, "3OD-EP"), { recursive: true });
     fs.writeFileSync(
       path.join(preflopRangesPath, "3OD-EP", "3OD-4.3 vs 3IA-4.2.json"),
@@ -45,7 +49,7 @@ describe("preflop range API", () => {
   });
 
   it("lists and reads converted JSON range files", async () => {
-    const app = createApp({ db, refreshService: service, preflopRangesPath });
+    const app = createApp({ db, refreshService: service, preflopRangesPath, solverSettingLibraryPath });
 
     const listResponse = await request(app).get("/api/preflop-ranges");
     expect(listResponse.status).toBe(200);
@@ -65,7 +69,7 @@ describe("preflop range API", () => {
   });
 
   it("updates learned status in local metadata without changing the range file", async () => {
-    const app = createApp({ db, refreshService: service, preflopRangesPath });
+    const app = createApp({ db, refreshService: service, preflopRangesPath, solverSettingLibraryPath });
     const rangeFile = path.join(preflopRangesPath, "3OD-EP", "3OD-4.3 vs 3IA-4.2.json");
     const before = fs.readFileSync(rangeFile, "utf8");
 
@@ -92,7 +96,7 @@ describe("preflop range API", () => {
   });
 
   it("updates review status in local metadata without changing the range file", async () => {
-    const app = createApp({ db, refreshService: service, preflopRangesPath });
+    const app = createApp({ db, refreshService: service, preflopRangesPath, solverSettingLibraryPath });
     const rangeFile = path.join(preflopRangesPath, "3OD-EP", "3OD-4.3 vs 3IA-4.2.json");
     const before = fs.readFileSync(rangeFile, "utf8");
 
@@ -124,7 +128,7 @@ describe("preflop range API", () => {
         B: { raise: "", call: "KK" }
       })
     );
-    const app = createApp({ db, refreshService: service, preflopRangesPath });
+    const app = createApp({ db, refreshService: service, preflopRangesPath, solverSettingLibraryPath });
     const firstFile = path.join(preflopRangesPath, "3OD-EP", "3OD-4.3 vs 3IA-4.2.json");
     const before = fs.readFileSync(firstFile, "utf8");
 
@@ -325,7 +329,7 @@ describe("preflop range API", () => {
   });
 
   it("uploads legacy .range files as .json", async () => {
-    const app = createApp({ db, refreshService: service, preflopRangesPath });
+    const app = createApp({ db, refreshService: service, preflopRangesPath, solverSettingLibraryPath });
 
     const response = await request(app)
       .post("/api/preflop-ranges/upload-many")
@@ -363,7 +367,7 @@ describe("preflop range API", () => {
   });
 
   it("preserves explicit OOP and IP assignments during upload", async () => {
-    const app = createApp({ db, refreshService: service, preflopRangesPath });
+    const app = createApp({ db, refreshService: service, preflopRangesPath, solverSettingLibraryPath });
 
     const response = await request(app)
       .post("/api/preflop-ranges/upload-many")
@@ -396,7 +400,14 @@ describe("preflop range API", () => {
         B: { raise: "", call: "KK" }
       })
     );
-    const app = createApp({ db, refreshService: service, preflopRangesPath });
+    saveSolverSettingLibrary(solverSettingLibraryPath, [{
+      ...DEFAULT_SOLVER_SETTING_LIBRARY[0]!,
+      id: "nested-setting",
+      label: "Nested Setting",
+      rangeFolderPaths: ["3OD-EP/Nested"],
+      rangeSubdir: "3OD-EP/Nested"
+    }]);
+    const app = createApp({ db, refreshService: service, preflopRangesPath, solverSettingLibraryPath });
 
     await request(app)
       .post("/api/preflop-ranges/status")
@@ -408,6 +419,9 @@ describe("preflop range API", () => {
 
     expect(response.status).toBe(200);
     expect(response.body.path).toBe("3OD-EP/Renamed");
+    expect(response.body.settingLibrary.changes).toEqual([
+      expect.objectContaining({ id: "nested-setting", nextPaths: ["3OD-EP/Renamed"] })
+    ]);
     expect(fs.existsSync(path.join(preflopRangesPath, "3OD-EP", "Nested"))).toBe(false);
     expect(fs.existsSync(path.join(preflopRangesPath, "3OD-EP", "Renamed", "nested.json"))).toBe(true);
 
@@ -435,7 +449,7 @@ describe("preflop range API", () => {
         B: { raise: "", call: "KK" }
       })
     );
-    const app = createApp({ db, refreshService: service, preflopRangesPath });
+    const app = createApp({ db, refreshService: service, preflopRangesPath, solverSettingLibraryPath });
 
     await request(app)
       .post("/api/preflop-ranges/status")

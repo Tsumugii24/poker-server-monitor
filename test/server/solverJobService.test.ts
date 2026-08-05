@@ -4,6 +4,7 @@ import path from "node:path";
 import request from "supertest";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_SOLVER_JOB_SETTINGS, type ParallelFailurePoolEntry } from "../../src/shared/solverJobs";
+import { DEFAULT_SOLVER_SETTING_LIBRARY } from "../../src/shared/solverSettings";
 import type { ServerOperation } from "../../src/shared/serverOperations";
 import type { ConnectionStatus, MetricSnapshot, PipelineStatusSnapshot, ServerConfig } from "../../src/shared/types";
 import { createApp } from "../../src/server/api";
@@ -85,6 +86,31 @@ describe("solver job helpers", () => {
     expect(command).not.toContain("'--estimate-memory'");
     expect(command).toContain("'--stall-timeout' '60'");
     expect(command).toContain("PIPELINE_STATUS_FILE='~/run/status.json'");
+  });
+
+  it("injects a custom Setting snapshot into the remote pipeline launcher", () => {
+    const setting = {
+      ...DEFAULT_SOLVER_SETTING_LIBRARY[0]!,
+      id: "custom-setting",
+      label: "Custom Setting",
+      pot: 7,
+      effectiveStack: 91
+    };
+    const command = buildRunPipelineCommand({
+      solverRoot: "/srv/solver",
+      repoId: "Tsumugii/custom-dataset",
+      scenario: setting.id,
+      setting,
+      rangePath: "~/solver/job-ranges/job-1/custom.txt",
+      statusFilePath: "~/run/status.json",
+      settings: { ...DEFAULT_SOLVER_JOB_SETTINGS, uploadEnabled: false }
+    });
+    const encodedSetting = Buffer.from(JSON.stringify(setting), "utf8").toString("base64");
+
+    expect(command).toContain("'python' '-c'");
+    expect(command).toContain("SCENARIO_CONFIG");
+    expect(command).toContain(`'${encodedSetting}'`);
+    expect(command).toContain("'--scenario' 'custom-setting'");
   });
 
   it("adds proxy and HF token exports when upload is enabled", () => {
@@ -171,6 +197,7 @@ describe("solver job helpers", () => {
     expect(command).toContain("SUBSCRIPTION_URL=$SUBSCRIPTION_URL");
     expect(command).toContain("GITEE_USERNAME=$GITEE_USERNAME");
     expect(command).toContain("GITEE_TOKEN=$GITEE_TOKEN");
+    expect(command).toContain("SUDO_PASSWORD=$SUDO_PASSWORD");
     expect(command).not.toContain("gitee-secret-token");
     expect(command).toContain('REPO_URL="https://gitee.com/Tsumugii24/mihomo-release"');
     expect(command).toContain("export GIT_TERMINAL_PROMPT=0");
@@ -185,6 +212,16 @@ describe("solver job helpers", () => {
     expect(command).toContain('INSTALL_KIND=cached');
     expect(command).toContain('GIT_ATTEMPT_CODE=$GIT_CODE');
     expect(command).toContain("timeout 90 wget --timeout=30 --tries=2");
+    expect(command.match(/timeout 90 wget --timeout=30 --tries=2/g)).toHaveLength(2);
+    expect(command).toContain('if [ "$DOWNLOAD_INITIAL_CODE" -ne 0 ]');
+    expect(command).toContain('printf \'%s\\n\' "$SUDO_PASSWORD" | timeout 15 sudo -S -p \'\' bash -c \'echo "nameserver 223.5.5.5" > /etc/resolv.conf\'');
+    expect(command).toContain('printf \'%s\\n\' "$SUDO_PASSWORD" | timeout 15 sudo -S -p \'\' bash -c \'echo "nameserver 8.8.8.8" >> /etc/resolv.conf\'');
+    expect(command).toContain('"dns_retry_recovered"');
+    const firstDownload = command.indexOf("timeout 90 wget --timeout=30 --tries=2");
+    const dnsRepair = command.indexOf('nameserver 223.5.5.5');
+    const retryDownload = command.lastIndexOf("timeout 90 wget --timeout=30 --tries=2");
+    expect(firstDownload).toBeLessThan(dnsRepair);
+    expect(dnsRepair).toBeLessThan(retryDownload);
     expect(command).toContain("config.yaml.previous");
     expect(command).toContain("./mihomo -t -d .");
     expect(command).toContain('tmux new-session -d -s mihomo');
@@ -332,10 +369,12 @@ describe("solver job helpers", () => {
 
     expect(graceful).toContain("tmux send-keys -t \"$SESSION\" C-c");
     expect(graceful).toContain("PIPELINE_ALIVE=1");
+    expect(graceful).toContain('STATUS_FILE="$HOME/${STATUS_FILE#??}"');
     expect(graceful).not.toContain("tmux kill-session");
     expect(force).toContain("tmux kill-session -t \"$SESSION\"");
     expect(force).toContain("kill -TERM");
     expect(force).toContain("kill -KILL");
+    expect(force).toContain('STATUS_FILE="$HOME/${STATUS_FILE#??}"');
   });
 });
 
@@ -501,7 +540,7 @@ describe("solver job API", () => {
     const queuedRange = await request(app)
       .get("/api/preflop-ranges/file")
       .query({ path: rangePath });
-    expect(queuedRange.body.summary.data.runStatus).toBe("queue");
+    expect(queuedRange.body.summary.data.runStatus).toBe("idle");
 
     const started = await request(app).post(`/api/jobs/${created.body.job.id}/start`);
 
@@ -857,7 +896,7 @@ describe("solver job API", () => {
     const solverJobService = new SolverJobService({
       db,
       preflopRangesPath,
-      credentials: { username: "root", password: "secret" },
+      credentials: { username: "root", password: "sudo-login-password" },
       executor,
       networkSubscriptionUrl: "https://subscription.example/secret-token",
       giteeUsername: "gitee-login",
@@ -877,9 +916,12 @@ describe("solver job API", () => {
     });
     expect(started.body.operations[0].command).toContain("SUBSCRIPTION_URL=$SUBSCRIPTION_URL");
     expect(started.body.operations[0].command).toContain("GITEE_TOKEN=$GITEE_TOKEN");
+    expect(started.body.operations[0].command).toContain("SUDO_PASSWORD=$SUDO_PASSWORD");
+    expect(started.body.operations[0].command).not.toContain("sudo-login-password");
     expect(started.body.operations[0].command).not.toContain("secret-token");
     expect(commands.some((command) => command.includes("secret-token"))).toBe(true);
     expect(commands.some((command) => command.includes("gitee-secret-token"))).toBe(true);
+    expect(commands.some((command) => command.includes("sudo-login-password"))).toBe(true);
     expect(commands.some((command) => command.includes("GIT_ASKPASS_FILE=$(mktemp)"))).toBe(true);
     expect(commands.some((command) => command.includes("tmux send-keys"))).toBe(true);
   });
@@ -1160,6 +1202,33 @@ describe("solver job API", () => {
     expect(overridden.body.commandPreview).toContain("'--scenario' 'sia-sod-open3'");
   });
 
+  it("requires manual Setting selection when a Range has no Folder Link", async () => {
+    fs.mkdirSync(path.join(preflopRangesPath, "Unlinked"), { recursive: true });
+    fs.copyFileSync(
+      path.join(preflopRangesPath, "SOD", "2.5bb", "SIA-45 vs SOD-40.json"),
+      path.join(preflopRangesPath, "Unlinked", "SIA-45 vs SOD-40.json")
+    );
+    const solverJobService = new SolverJobService({
+      db,
+      preflopRangesPath,
+      credentials: { username: "root", password: "secret" },
+      repoNamespace: "Tsumugii",
+      hfToken: "hf_test_token"
+    });
+    const app = createApp({ db, refreshService, preflopRangesPath, solverJobService });
+    const rangePath = "Unlinked/SIA-45 vs SOD-40.json";
+
+    const automatic = await request(app).post("/api/jobs/preview").send({ serverId: "solver-01", rangePath });
+    expect(automatic.status).toBe(400);
+    expect(automatic.body.message).toContain("is not linked to a Setting");
+
+    const manual = await request(app)
+      .post("/api/jobs/preview")
+      .send({ serverId: "solver-01", rangePath, settingId: "sia-sod" });
+    expect(manual.status).toBe(200);
+    expect(manual.body.settingId).toBe("sia-sod");
+  });
+
   it("manages scenario library and uses custom scenarios in preview", async () => {
     const solverJobService = new SolverJobService({
       db,
@@ -1204,6 +1273,30 @@ describe("solver job API", () => {
       effectiveStack: 91
     }));
 
+    const settingList = await request(app).get("/api/solver-settings");
+    expect(settingList.status).toBe(200);
+    expect(settingList.body.settings).toContainEqual(expect.objectContaining({
+      id: "custom-test",
+      pot: 7,
+      effectiveStack: 91,
+      configTemplate: expect.stringContaining("set_pot {pot}")
+    }));
+    const customSetting = settingList.body.settings.find((setting: { id: string }) => setting.id === "custom-test");
+    const structuredUpdate = await request(app)
+      .patch("/api/solver-settings/custom-test")
+      .send({
+        setting: {
+          ...customSetting,
+          parameters: {
+            ...customSetting.parameters,
+            maxIteration: 777,
+            useIsomorphism: false,
+            accuracy: 0.25
+          }
+        }
+      });
+    expect(structuredUpdate.status).toBe(200);
+
     const preview = await request(app)
       .post("/api/jobs/preview")
       .send({
@@ -1215,6 +1308,9 @@ describe("solver job API", () => {
 
     expect(preview.status).toBe(200);
     expect(preview.body.scenario).toBe("custom-test");
+    expect(preview.body.settings).toMatchObject({ maxIteration: 777, useIsomorphism: 0 });
+    expect(preview.body.setting.parameters).toMatchObject({ maxIteration: 777, useIsomorphism: false, accuracy: 0.25 });
+    expect(preview.body.setting.configTemplate).toContain("set_accuracy 0.25");
     expect(preview.body.commandPreview).toContain("'--scenario' 'custom-test'");
 
     const updated = await request(app)
@@ -1983,6 +2079,75 @@ describe("solver job API", () => {
     expect(preview.body.coverage.missingCount).toBe(151);
     expect(preview.body.missingIndices).toHaveLength(151);
     expect(preview.body.missingIndices[0]).toBe(1605);
+  });
+
+  it("shrinks an untouched queued parallel run to the boards still missing immediately before dispatch", async () => {
+    const datasetName = "dispatch-coverage-refresh";
+    let remoteBoardCount = 0;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/tree/main")) {
+        return new Response(JSON.stringify(
+          Array.from({ length: remoteBoardCount }, (_value, index) => ({ path: `board-${index + 1}.parquet` }))
+        ), { status: 200 });
+      }
+      if (url.includes("/api/datasets/")) {
+        return new Response(JSON.stringify({ id: `Tsumugii/${datasetName}` }), { status: 200 });
+      }
+      return new Response("{}", { status: 200 });
+    }));
+    const executor: SshExecutor = {
+      run: vi.fn(async (_server, _credentials, command) => {
+        if (command.includes("cards/cards.txt")) return solverCardsText();
+        if (command.includes("DISPATCH_READY")) return "DISPATCH_READY=1\n";
+        if (isCodeReadyCommand(command)) return codeReadyOutput();
+        commands.push(command);
+        return "ok";
+      })
+    };
+    const solverJobService = new SolverJobService({
+      db,
+      preflopRangesPath,
+      credentials: { username: "root", password: "secret" },
+      executor,
+      defaultPipelineStatusFilePath: "~/run/solver_running_status.json",
+      repoNamespace: "Tsumugii",
+      hfToken: "hf_test_token"
+    });
+    const app = createApp({ db, refreshService, preflopRangesPath, solverJobService });
+    const rangePath = "3OD-EP/3OD-4.3 vs 3IA-4.2.json";
+    await approveRange(app, rangePath);
+
+    const created = await request(app)
+      .post("/api/parallel-jobs")
+      .send({
+        rangePath,
+        datasetName,
+        serverIds: ["solver-01"],
+        chunkCount: 1,
+        settings: { uploadEnabled: false },
+        confirmDatasetName: true,
+        queueMode: "queue_next"
+      });
+    expect(created.status).toBe(201);
+    expect(created.body.run.slices[0].assignedIndices).toHaveLength(1755);
+    expect(created.body.run.slices[0].jobId).toBeNull();
+
+    remoteBoardCount = 1754;
+    await solverJobService.reconcileAndStartQueuedJobs();
+
+    const run = solverJobService.listParallelJobs().runs.find((candidate) => candidate.id === created.body.run.id);
+    expect(run?.totalIndices).toEqual([1755]);
+    expect(run?.missingIndices).toEqual([1755]);
+    expect(run?.slices).toHaveLength(1);
+    expect(run?.slices[0]).toMatchObject({
+      rangeExpr: "1755",
+      assignedIndices: [1755],
+      assignedBoardNames: ["board-1755"],
+      status: "running"
+    });
+    expect(run?.slices[0]?.job?.assignedIndices).toEqual([1755]);
+    expect(commands.filter((command) => command.includes("run_pipeline.py"))).toHaveLength(1);
   });
 
   it("removes remotely covered boards from a stale failure pool before retry preview", async () => {
@@ -3066,6 +3231,189 @@ describe("solver job API", () => {
     expect(run?.slices.map((slice) => slice.serverId).sort()).toEqual(["solver-01", "solver-02"]);
     expect(run?.slices.every((slice) => slice.status === "running")).toBe(true);
     expect(commands.filter((command) => command.includes("run_pipeline.py"))).toHaveLength(2);
+  });
+
+  it("assigns an All Servers queued chunk after its only original candidate is removed", async () => {
+    const replacementServer: ServerConfig = {
+      id: "solver-02",
+      name: "Solver 02",
+      host: "10.0.0.2",
+      port: 22,
+      enabled: true,
+      note: "TBD",
+      solverRoot: "/srv/solver",
+      tmuxSession: "solver",
+      pipelineStatusFilePath: "~/run/status.json"
+    };
+    const executor: SshExecutor = {
+      run: vi.fn(async (_server, _credentials, command) => {
+        if (command.includes("cards/cards.txt")) return solverCardsText();
+        if (command.includes("DISPATCH_READY")) return "DISPATCH_READY=1\n";
+        if (isCodeReadyCommand(command)) return codeReadyOutput();
+        commands.push(command);
+        return "ok";
+      })
+    };
+    const solverJobService = new SolverJobService({
+      db,
+      preflopRangesPath,
+      credentials: { username: "root", password: "secret" },
+      executor,
+      defaultPipelineStatusFilePath: "~/run/solver_running_status.json",
+      repoNamespace: "Tsumugii",
+      hfToken: "hf_test_token"
+    });
+    const app = createApp({ db, refreshService, preflopRangesPath, solverJobService });
+    const rangePath = "3OD-EP/3OD-4.3 vs 3IA-4.2.json";
+    await approveRange(app, rangePath);
+
+    const created = await request(app)
+      .post("/api/parallel-jobs")
+      .send({
+        rangePath,
+        datasetName: "parallel-all-original-removed",
+        serverIds: ["solver-01"],
+        autoIncludeNewServers: true,
+        serverScope: "all",
+        chunkCount: 1,
+        settings: { uploadEnabled: false },
+        confirmDatasetName: true,
+        queueMode: "queue_next"
+      });
+
+    expect(created.status).toBe(201);
+    expect(created.body.run.slices[0].candidateServerIds).toEqual(["solver-01"]);
+
+    db.syncServers([replacementServer]);
+    db.insertSnapshot(metricSnapshot("solver-02", "online"));
+    await solverJobService.reconcileAndStartQueuedJobs();
+
+    const run = solverJobService.listParallelJobs().runs.find((candidate) => candidate.id === created.body.run.id);
+    expect(run?.slices[0]).toMatchObject({ serverId: "solver-02", status: "running" });
+  });
+
+  it("assigns a fixed-pool queued chunk to a surviving original candidate after another candidate is removed", async () => {
+    const secondServer: ServerConfig = {
+      id: "solver-02",
+      name: "Solver 02",
+      host: "10.0.0.2",
+      port: 22,
+      enabled: true,
+      note: "TBD",
+      solverRoot: "/srv/solver",
+      tmuxSession: "solver",
+      pipelineStatusFilePath: "~/run/status.json"
+    };
+    db.syncServers([...servers, secondServer]);
+    db.insertSnapshot(metricSnapshot("solver-02", "online"));
+    const executor: SshExecutor = {
+      run: vi.fn(async (_server, _credentials, command) => {
+        if (command.includes("cards/cards.txt")) return solverCardsText();
+        if (command.includes("DISPATCH_READY")) return "DISPATCH_READY=1\n";
+        if (isCodeReadyCommand(command)) return codeReadyOutput();
+        commands.push(command);
+        return "ok";
+      })
+    };
+    const solverJobService = new SolverJobService({
+      db,
+      preflopRangesPath,
+      credentials: { username: "root", password: "secret" },
+      executor,
+      defaultPipelineStatusFilePath: "~/run/solver_running_status.json",
+      repoNamespace: "Tsumugii",
+      hfToken: "hf_test_token"
+    });
+    const app = createApp({ db, refreshService, preflopRangesPath, solverJobService });
+    const rangePath = "3OD-EP/3OD-4.3 vs 3IA-4.2.json";
+    await approveRange(app, rangePath);
+
+    const created = await request(app)
+      .post("/api/parallel-jobs")
+      .send({
+        rangePath,
+        datasetName: "parallel-fixed-pool-survivor",
+        serverIds: ["solver-01", "solver-02"],
+        autoIncludeNewServers: false,
+        serverScope: "standard",
+        chunkCount: 1,
+        settings: { uploadEnabled: false },
+        confirmDatasetName: true,
+        queueMode: "queue_next"
+      });
+
+    expect(created.status).toBe(201);
+    expect(created.body.run.slices[0]).toMatchObject({
+      serverId: "",
+      candidateServerIds: ["solver-01", "solver-02"],
+      status: "queued"
+    });
+
+    db.syncServers([secondServer]);
+    await solverJobService.reconcileAndStartQueuedJobs();
+
+    const run = solverJobService.listParallelJobs().runs.find((candidate) => candidate.id === created.body.run.id);
+    expect(run?.slices[0]).toMatchObject({ serverId: "solver-02", status: "running" });
+  });
+
+  it("leaves a fixed-pool chunk queued when every original candidate has been removed", async () => {
+    const replacementServer: ServerConfig = {
+      id: "solver-02",
+      name: "Solver 02",
+      host: "10.0.0.2",
+      port: 22,
+      enabled: true,
+      note: "TBD",
+      solverRoot: "/srv/solver",
+      tmuxSession: "solver",
+      pipelineStatusFilePath: "~/run/status.json"
+    };
+    const executor: SshExecutor = {
+      run: vi.fn(async (_server, _credentials, command) => {
+        if (command.includes("cards/cards.txt")) return solverCardsText();
+        if (command.includes("DISPATCH_READY")) return "DISPATCH_READY=1\n";
+        if (isCodeReadyCommand(command)) return codeReadyOutput();
+        commands.push(command);
+        return "ok";
+      })
+    };
+    const solverJobService = new SolverJobService({
+      db,
+      preflopRangesPath,
+      credentials: { username: "root", password: "secret" },
+      executor,
+      defaultPipelineStatusFilePath: "~/run/solver_running_status.json",
+      repoNamespace: "Tsumugii",
+      hfToken: "hf_test_token"
+    });
+    const app = createApp({ db, refreshService, preflopRangesPath, solverJobService });
+    const rangePath = "3OD-EP/3OD-4.3 vs 3IA-4.2.json";
+    await approveRange(app, rangePath);
+
+    const created = await request(app)
+      .post("/api/parallel-jobs")
+      .send({
+        rangePath,
+        datasetName: "parallel-fixed-pool-removed",
+        serverIds: ["solver-01"],
+        autoIncludeNewServers: false,
+        serverScope: "standard",
+        chunkCount: 1,
+        settings: { uploadEnabled: false },
+        confirmDatasetName: true,
+        queueMode: "queue_next"
+      });
+
+    expect(created.status).toBe(201);
+    expect(created.body.run.slices[0].candidateServerIds).toEqual(["solver-01"]);
+
+    db.syncServers([replacementServer]);
+    db.insertSnapshot(metricSnapshot("solver-02", "online"));
+    await solverJobService.reconcileAndStartQueuedJobs();
+
+    const run = solverJobService.listParallelJobs().runs.find((candidate) => candidate.id === created.body.run.id);
+    expect(run?.slices[0]).toMatchObject({ serverId: "", status: "queued" });
+    expect(commands.filter((command) => command.includes("run_pipeline.py"))).toHaveLength(0);
   });
 
   it("keeps running parallel runs locked while reordering later queued runs", async () => {

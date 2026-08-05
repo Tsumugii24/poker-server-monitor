@@ -1,10 +1,10 @@
 import type { ServerRow } from "../shared/types";
 import type { SshTimeoutOptions } from "./sshCollector";
-import { Ssh2Executor, type SshCredentials } from "./sshCollector";
+import type { SshCredentials } from "./sshCollector";
 import type { MonitorDatabase } from "./db";
 import type { RefreshService } from "./refreshService";
-
-export const OFFLINE_RECOVERY_PROBE_COMMAND = "printf 'OFFLINE_RECOVERY_OK=1\\n'";
+import { serverIsJobReady } from "../shared/serverReadiness";
+import { probeSshConnectivity } from "./sshConnectivityProbe";
 
 export type OfflineRecoveryCheckResult = {
   checked: number;
@@ -88,7 +88,10 @@ export class OfflineRecoveryService {
     }
 
     const offlineServers = this.options.db.getServerRows()
-      .filter((server) => server.enabled && server.latest?.connectionStatus === "offline");
+      .filter((server) => server.enabled && (
+        server.latest?.connectionStatus === "offline" ||
+        (server.latest?.connectionStatus === "online" && !serverIsJobReady(server))
+      ));
     const recoveredServerIds: string[] = [];
     const failedServerIds: string[] = [];
     let checked = 0;
@@ -101,7 +104,10 @@ export class OfflineRecoveryService {
         try {
           await this.probe(server);
           const refreshed = await this.options.refreshService.refreshServer(server.id);
-          if (refreshed?.metrics.connectionStatus === "online") {
+          if (refreshed && serverIsJobReady({
+            latest: refreshed.metrics,
+            pipeline: refreshed.pipeline
+          })) {
             recoveredServerIds.push(server.id);
           } else {
             failedServerIds.push(server.id);
@@ -130,11 +136,10 @@ export class OfflineRecoveryService {
       await this.options.probe(server);
       return;
     }
-    if (!this.options.credentials) {
-      throw new Error("SSH credentials are required for offline recovery.");
+    const result = await probeSshConnectivity(server);
+    if (!result.reachable) {
+      throw new Error(result.errorMessage ?? "SSH connectivity probe failed");
     }
-    const executor = new Ssh2Executor(this.options.getSshTimeouts?.());
-    await executor.run(server, this.options.credentials, OFFLINE_RECOVERY_PROBE_COMMAND);
   }
 }
 

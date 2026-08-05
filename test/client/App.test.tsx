@@ -12,6 +12,7 @@ const overview = {
   summary: {
     total: 2,
     online: 2,
+    degraded: 0,
     offline: 0,
     unknown: 0,
     healthy: 1,
@@ -658,7 +659,10 @@ describe("App", () => {
     await userEvent.click(await screen.findByRole("button", { name: "Manage Inventory" }));
     expect(await screen.findByText("Inventory Management")).toBeInTheDocument();
     await userEvent.click(await screen.findByRole("button", { name: "Delete server prod-02" }));
-    await userEvent.click(screen.getByRole("button", { name: "Delete" }));
+    expect(screen.getByRole("dialog", { name: "Delete server prod-02?" })).toBeInTheDocument();
+    expect(screen.getByText(/Running, deploying, or stopping chunks are not stopped or moved/)).toBeInTheDocument();
+    expect(screen.getByText(/Performance\/Standard jobs can only use surviving servers/)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Delete server" }));
 
     await waitFor(() => {
       expect(fetch).toHaveBeenCalledWith(
@@ -667,6 +671,24 @@ describe("App", () => {
       );
     });
     await waitFor(() => expect(inventoryIds()).toEqual(["prod-01"]));
+  });
+
+  it("warns when the latest inventory snapshot shows an active solver pipeline", async () => {
+    render(<App />);
+
+    await userEvent.click(await screen.findByRole("button", { name: "Manage Inventory" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Delete server prod-01" }));
+
+    expect(screen.getByRole("dialog", { name: "Delete server prod-01?" })).toBeInTheDocument();
+    expect(screen.getByText(/Latest inventory status shows an active/)).toHaveTextContent(
+      "Latest inventory status shows an active solving pipeline for sia-45-sod-40."
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("dialog", { name: "Delete server prod-01?" })).not.toBeInTheDocument();
+    expect(vi.mocked(fetch).mock.calls.some(([url, init]) =>
+      url === "/api/servers/prod-01" && init?.method === "DELETE"
+    )).toBe(false);
   });
 
   it("opens settings and saves WeChat alert settings", async () => {

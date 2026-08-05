@@ -18,7 +18,13 @@ import {
   type PreflopRangeTreeResponse
 } from "../shared/preflopRange";
 import { datasetNameFromRangePath, scenarioFromRangePath } from "../shared/preflopDataset";
-import { SOLVER_TOTAL_BOARD_COUNT, type SolverJob, type SolverJobStatus } from "../shared/solverJobs";
+import {
+  SOLVER_TOTAL_BOARD_COUNT,
+  type ParallelSolverRun,
+  type SolverJob,
+  type SolverJobStatus
+} from "../shared/solverJobs";
+import { boardKeyFromBoardName, completedBoardIndicesForSlice } from "../shared/solverCoverage";
 import { huggingFaceFetch, type HuggingFaceFetchOptions } from "./huggingFaceHttp";
 
 const ORDER_FILE = ".range_order.json";
@@ -42,6 +48,7 @@ type RangeStatusMetadata = {
 
 type RangeProgressEntry = PreflopRangeProgress & {
   updatedAt?: string;
+  remoteBoardKeys?: string[];
 };
 
 type RangeProgressMetadata = {
@@ -51,11 +58,19 @@ type RangeProgressMetadata = {
 
 export type PreflopRangeRuntimeInput = {
   jobs?: SolverJob[];
+  parallelRuns?: ParallelSolverRun[];
   progress?: RangeProgressMetadata;
+};
+
+type LocalRangeCompletion = {
+  indices: Set<number>;
+  boardKeyByIndex: Map<number, string>;
 };
 
 type RangeRuntimeContext = {
   jobsByPath: Map<string, SolverJob[]>;
+  parallelRunStatusesByPath: Map<string, Set<ParallelSolverRun["status"]>>;
+  localCompletions: Map<string, LocalRangeCompletion>;
   progress: RangeProgressMetadata;
 };
 
@@ -129,13 +144,20 @@ export function savePreflopRangeFile(
 
 export async function refreshPreflopRangeProgress(
   rootPath: string,
-  options: { hfToken?: string | null; hfProxyUrl?: string | null; repoNamespace?: string; totalRows?: number } = {}
+  options: {
+    hfToken?: string | null;
+    hfProxyUrl?: string | null;
+    repoNamespace?: string;
+    totalRows?: number;
+    runtime?: PreflopRangeRuntimeInput;
+  } = {}
 ): Promise<PreflopRangeProgressRefreshResult> {
   const root = ensureRoot(rootPath);
   const metadata = loadProgressMetadata(root);
   const nextRanges: Record<string, RangeProgressEntry> = {};
   const repoNamespace = normalizedRepoNamespace(options.repoNamespace);
   const totalRows = positiveTotalRows(options.totalRows);
+  const localCompletions = buildLocalCompletions(options.runtime);
   const approvedFiles = walkRangeFiles(root).flatMap((file) => {
     const document = readRangeDocumentWithStatus(root, file);
     if (document.reviewStatus !== "approved") return [];
@@ -162,14 +184,42 @@ export async function refreshPreflopRangeProgress(
         fetchContext
       );
       if (result.usedFileListing) fileListingFallbacks += 1;
-      nextRanges[rangePath] = progressEntry(datasetName, result.rows, totalRows, checkedAt);
+      const local = localCompletions.get(rangeIdentity(rangePath, datasetName));
+      let remoteBoardKeys = result.boardKeys;
+      if (local && local.indices.size > 0 && !remoteBoardKeys) {
+        try {
+          remoteBoardKeys = await fetchHuggingFaceBoardArtifactKeys(
+            `${repoNamespace}/${datasetName}`,
+            huggingFaceHeaders(options.hfToken ?? null),
+            options.hfProxyUrl ?? null
+          );
+        } catch {
+          // Remote row progress remains valid. Until the next successful file
+          // listing, combined progress uses a conservative overlap estimate.
+        }
+      }
+      nextRanges[rangePath] = progressEntry(
+        datasetName,
+        result.rows,
+        totalRows,
+        checkedAt,
+        local,
+        remoteBoardKeys
+      );
     } catch (error) {
       failed += 1;
       const message = error instanceof Error ? error.message : String(error);
       failures.push({ rangePath, datasetName, message });
       const fallbackRows = previous?.datasetName === datasetName ? previous.rows : 0;
       nextRanges[rangePath] = {
-        ...progressEntry(datasetName, fallbackRows, totalRows, checkedAt),
+        ...progressEntry(
+          datasetName,
+          fallbackRows,
+          totalRows,
+          checkedAt,
+          localCompletions.get(rangeIdentity(rangePath, datasetName)),
+          previous?.remoteBoardKeys ? new Set(previous.remoteBoardKeys) : undefined
+        ),
         error: message
       };
     }
@@ -196,6 +246,18 @@ export function createPreflopRangeFolder(rootPath: string, parentRelative: strin
   fs.mkdirSync(target, { recursive: true });
   appendToOrder(root, parent, path.basename(target));
   return relativeString(root, target);
+}
+
+export function preflopRangePathKind(rootPath: string, relativePath: string): "folder" | "file" {
+  const root = ensureRoot(rootPath);
+  const target = safePath(root, relativePath);
+  if (target === root || !fs.existsSync(target) || path.basename(target).startsWith(".")) {
+    throw new Error("Path does not exist.");
+  }
+  const stat = fs.statSync(target);
+  if (stat.isDirectory()) return "folder";
+  if (stat.isFile() && path.extname(target).toLowerCase() === ".json") return "file";
+  throw new Error("Only range JSON files and folders are supported.");
 }
 
 export function renamePreflopRangePath(rootPath: string, relativePath: string, nextName: string): string {
@@ -495,10 +557,58 @@ function createRangeRuntimeContext(root: string, input: PreflopRangeRuntimeInput
     existing.push(job);
     jobsByPath.set(job.rangePath, existing);
   }
+  const parallelRunStatusesByPath = new Map<string, Set<ParallelSolverRun["status"]>>();
+  for (const run of input.parallelRuns ?? []) {
+    const existing = parallelRunStatusesByPath.get(run.rangePath) ?? new Set<ParallelSolverRun["status"]>();
+    existing.add(run.status);
+    parallelRunStatusesByPath.set(run.rangePath, existing);
+  }
   return {
     jobsByPath,
+    parallelRunStatusesByPath,
+    localCompletions: buildLocalCompletions(input),
     progress: input.progress ?? loadProgressMetadata(root)
   };
+}
+
+function buildLocalCompletions(input: PreflopRangeRuntimeInput = {}): Map<string, LocalRangeCompletion> {
+  const completions = new Map<string, LocalRangeCompletion>();
+  const ensure = (rangePath: string, datasetName: string): LocalRangeCompletion => {
+    const identity = rangeIdentity(rangePath, datasetName);
+    const current = completions.get(identity);
+    if (current) return current;
+    const created: LocalRangeCompletion = { indices: new Set(), boardKeyByIndex: new Map() };
+    completions.set(identity, created);
+    return created;
+  };
+
+  for (const run of input.parallelRuns ?? []) {
+    const completion = ensure(run.rangePath, run.datasetName);
+    for (const slice of run.slices) {
+      for (const index of completedBoardIndicesForSlice(slice)) {
+        if (!Number.isInteger(index) || index < 1) continue;
+        completion.indices.add(index);
+        const position = slice.assignedIndices.indexOf(index);
+        const boardName = position >= 0 ? slice.assignedBoardNames[position] : undefined;
+        if (boardName) completion.boardKeyByIndex.set(index, boardKeyFromBoardName(boardName));
+      }
+    }
+  }
+
+  for (const job of input.jobs ?? []) {
+    const completion = ensure(job.rangePath, job.datasetName);
+    const indices = job.status === "completed" && job.assignedIndices.length > 0
+      ? job.assignedIndices
+      : job.pipeline?.completedIndices ?? [];
+    for (const index of indices) {
+      if (Number.isInteger(index) && index > 0) completion.indices.add(index);
+    }
+  }
+  return completions;
+}
+
+function rangeIdentity(rangePath: string, datasetName: string): string {
+  return `${rangePath}\u0000${datasetName}`;
 }
 
 function applyRuntimeState(
@@ -522,11 +632,13 @@ function applyRuntimeState(
 function runtimeRunStatus(root: string, file: string, runtime: RangeRuntimeContext): PreflopRunStatus {
   const rangePath = relativeString(root, file);
   const jobs = runtime.jobsByPath.get(rangePath) ?? [];
+  const parallelRunStatuses = runtime.parallelRunStatusesByPath.get(rangePath);
+  if (parallelRunStatuses?.has("running")) return "running";
   if (jobs.some((job) => RUNNING_JOB_STATUSES.has(job.status))) return "running";
-  if (jobs.some((job) => job.status === "queued")) return "queue";
+  if (parallelRunStatuses?.has("queued")) return "queue";
 
   const progress = runtimeProgress(root, file, runtime, canonicalDatasetName(rangePath));
-  return progress.ratio >= 1 ? "solved" : "idle";
+  return progress.combinedRatio >= 1 ? "solved" : "idle";
 }
 
 function runtimeProgress(
@@ -537,17 +649,22 @@ function runtimeProgress(
 ): PreflopRangeProgress {
   const rangePath = relativeString(root, file);
   const entry = runtime.progress.ranges[rangePath];
+  const local = runtime.localCompletions.get(rangeIdentity(rangePath, datasetName));
   if (entry?.datasetName === datasetName) {
     return {
-      datasetName,
-      rows: normalizedRows(entry.rows),
-      totalRows: positiveTotalRows(entry.totalRows),
-      ratio: clampRatio(entry.ratio),
+      ...progressEntry(
+        datasetName,
+        entry.rows,
+        entry.totalRows,
+        entry.checkedAt,
+        local,
+        entry.remoteBoardKeys ? new Set(entry.remoteBoardKeys) : undefined
+      ),
       checkedAt: entry.checkedAt,
       error: entry.error
     };
   }
-  return progressEntry(datasetName, 0, SOLVER_TOTAL_BOARD_COUNT, entry?.checkedAt);
+  return progressEntry(datasetName, 0, SOLVER_TOTAL_BOARD_COUNT, entry?.checkedAt, local);
 }
 
 function canonicalDatasetName(rangePath: string): string {
@@ -867,27 +984,76 @@ function normalizeProgressEntry(value: unknown): RangeProgressEntry | null {
     : null;
   if (!datasetName) return null;
   const totalRows = positiveTotalRows(value.totalRows);
+  const rows = normalizedRows(value.rows);
+  const localRows = normalizedRows(value.localRows);
+  const combinedRows = normalizedRows(value.combinedRows ?? Math.max(rows, localRows));
+  const localOverlapKnown = typeof value.localOverlapKnown === "boolean"
+    ? value.localOverlapKnown
+    : localRows === 0 || Array.isArray(value.remoteBoardKeys);
   return {
     datasetName,
-    rows: normalizedRows(value.rows),
+    rows,
     totalRows,
-    ratio: clampRatio(value.ratio ?? normalizedRows(value.rows) / totalRows),
+    ratio: clampRatio(value.ratio ?? rows / totalRows),
+    localRows,
+    combinedRows,
+    combinedRatio: clampRatio(value.combinedRatio ?? combinedRows / totalRows),
+    localOnlyRows: localOverlapKnown
+      ? normalizedRows(value.localOnlyRows ?? Math.max(0, combinedRows - rows))
+      : 0,
+    localOverlapKnown,
     checkedAt: typeof value.checkedAt === "string" ? value.checkedAt : undefined,
     updatedAt: typeof value.updatedAt === "string" ? value.updatedAt : undefined,
-    error: typeof value.error === "string" ? value.error : undefined
+    error: typeof value.error === "string" ? value.error : undefined,
+    remoteBoardKeys: Array.isArray(value.remoteBoardKeys)
+      ? [...new Set(value.remoteBoardKeys.filter((item): item is string => typeof item === "string" && item !== ""))]
+      : undefined
   };
 }
 
-function progressEntry(datasetName: string, rows: number, totalRows: number, checkedAt?: string): RangeProgressEntry {
+function progressEntry(
+  datasetName: string,
+  rows: number,
+  totalRows: number,
+  checkedAt?: string,
+  local?: LocalRangeCompletion,
+  remoteBoardKeys?: Set<string>
+): RangeProgressEntry {
   const normalizedTotal = positiveTotalRows(totalRows);
   const normalizedRowCount = normalizedRows(rows);
+  const remoteRowsWithinTotal = Math.min(normalizedTotal, normalizedRowCount);
+  const localRows = Math.min(normalizedTotal, local?.indices.size ?? 0);
+  let combinedRows = Math.max(remoteRowsWithinTotal, localRows);
+  if (local && remoteBoardKeys) {
+    let keyedLocalRows = 0;
+    let knownLocalOnlyRows = 0;
+    for (const index of local.indices) {
+      const boardKey = local.boardKeyByIndex.get(index);
+      if (!boardKey) continue;
+      keyedLocalRows += 1;
+      if (!remoteBoardKeys.has(boardKey)) knownLocalOnlyRows += 1;
+    }
+    const unknownLocalRows = Math.max(0, localRows - keyedLocalRows);
+    combinedRows = Math.max(
+      remoteRowsWithinTotal + knownLocalOnlyRows,
+      localRows,
+      remoteRowsWithinTotal + Math.max(0, unknownLocalRows - remoteRowsWithinTotal)
+    );
+  }
+  combinedRows = Math.min(normalizedTotal, combinedRows);
   return {
     datasetName,
     rows: normalizedRowCount,
     totalRows: normalizedTotal,
     ratio: clampRatio(normalizedRowCount / normalizedTotal),
+    localRows,
+    combinedRows,
+    combinedRatio: clampRatio(combinedRows / normalizedTotal),
+    localOnlyRows: remoteBoardKeys ? Math.max(0, combinedRows - remoteRowsWithinTotal) : 0,
+    localOverlapKnown: localRows === 0 || remoteBoardKeys != null,
     checkedAt,
-    updatedAt: checkedAt
+    updatedAt: checkedAt,
+    remoteBoardKeys: remoteBoardKeys ? [...remoteBoardKeys].sort() : undefined
   };
 }
 
@@ -896,18 +1062,18 @@ async function fetchHuggingFaceDatasetRows(
   hfToken: string | null,
   hfProxyUrl: string | null,
   context: { preferFileListing: boolean }
-): Promise<{ rows: number; usedFileListing: boolean }> {
-  const headers: Record<string, string> = {};
-  const token = hfToken?.trim();
-  if (token) headers.Authorization = `Bearer ${token}`;
+): Promise<{ rows: number; usedFileListing: boolean; boardKeys?: Set<string> }> {
+  const headers = huggingFaceHeaders(hfToken);
   if (!await huggingFaceDatasetMatches(repoId, headers, hfProxyUrl)) {
     return { rows: 0, usedFileListing: false };
   }
 
   if (context.preferFileListing) {
+    const boardKeys = await fetchHuggingFaceBoardArtifactKeys(repoId, headers, hfProxyUrl);
     return {
-      rows: await fetchHuggingFaceBoardArtifactCount(repoId, headers, hfProxyUrl),
-      usedFileListing: true
+      rows: boardKeys.size,
+      usedFileListing: true,
+      boardKeys
     };
   }
 
@@ -935,14 +1101,23 @@ async function fetchHuggingFaceDatasetRows(
 
   context.preferFileListing = true;
   try {
+    const boardKeys = await fetchHuggingFaceBoardArtifactKeys(repoId, headers, hfProxyUrl);
     return {
-      rows: await fetchHuggingFaceBoardArtifactCount(repoId, headers, hfProxyUrl),
-      usedFileListing: true
+      rows: boardKeys.size,
+      usedFileListing: true,
+      boardKeys
     };
   } catch (error) {
     const fallbackMessage = error instanceof Error ? error.message : String(error);
     throw new Error(`${sizeError.message} Repository file listing fallback failed: ${fallbackMessage}`);
   }
+}
+
+function huggingFaceHeaders(hfToken: string | null): Record<string, string> {
+  const headers: Record<string, string> = {};
+  const token = hfToken?.trim();
+  if (token) headers.Authorization = `Bearer ${token}`;
+  return headers;
 }
 
 async function huggingFaceDatasetMatches(
@@ -969,11 +1144,11 @@ async function huggingFaceDatasetMatches(
   return actualRepoId === repoId;
 }
 
-async function fetchHuggingFaceBoardArtifactCount(
+async function fetchHuggingFaceBoardArtifactKeys(
   repoId: string,
   headers: Record<string, string>,
   hfProxyUrl: string | null
-): Promise<number> {
+): Promise<Set<string>> {
   const encodedRepoId = repoId.split("/").map(encodeURIComponent).join("/");
   const treePath = `/api/datasets/${encodedRepoId}/tree/main`;
   let nextUrl: string | null = `${HUGGING_FACE_ORIGIN}${treePath}?recursive=1&limit=${HUGGING_FACE_TREE_PAGE_LIMIT}`;
@@ -990,7 +1165,7 @@ async function fetchHuggingFaceBoardArtifactCount(
       proxyUrl: hfProxyUrl,
       redirect: "manual"
     });
-    if (response.status === 404 || isRedirectStatus(response.status)) return 0;
+    if (response.status === 404 || isRedirectStatus(response.status)) return new Set();
     if (!response.ok) {
       throw new Error(
         `Hugging Face dataset file listing failed for ${repoId} on page ${page}: ` +
@@ -1021,7 +1196,7 @@ async function fetchHuggingFaceBoardArtifactCount(
       `Hugging Face dataset file listing exceeded ${HUGGING_FACE_TREE_MAX_PAGES} pages for ${repoId}.`
     );
   }
-  return boardKeys.size;
+  return boardKeys;
 }
 
 function boardArtifactKey(rawPath: string): string | null {

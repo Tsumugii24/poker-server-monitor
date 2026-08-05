@@ -1,4 +1,21 @@
 import type { PipelineStatusSnapshot, ServerRow } from "./types";
+import {
+  DEFAULT_SOLVER_SETTING_LIBRARY,
+  type SolverSettingId,
+  type SolverSettingLibraryItem
+} from "./solverSettings";
+
+export {
+  DEFAULT_SOLVER_SETTING_LIBRARY,
+  SIA_SOD_CONFIG_TEMPLATE,
+  SOA_SID_CONFIG_TEMPLATE,
+  SOLVER_SETTING_TEMPLATE_PLACEHOLDERS,
+  SOLVER_SETTING_TEMPLATE_PRESETS,
+  TOA_TID_CONFIG_TEMPLATE,
+  type SolverSettingId,
+  type SolverSettingLibraryItem,
+  type SolverSettingLibraryResponse
+} from "./solverSettings";
 
 export const SOLVER_TOTAL_BOARD_COUNT = 1755;
 
@@ -46,87 +63,19 @@ export type ParallelFailurePoolStatus = (typeof PARALLEL_FAILURE_POOL_STATUSES)[
 export const PARALLEL_FAILURE_REASONS = ["abnormal_end", "skipped", "best_server_skipped", "unclassified"] as const;
 export type ParallelFailureReason = (typeof PARALLEL_FAILURE_REASONS)[number];
 
-export const SOLVER_SCENARIOS = [
-  "sia-sod",
-  "sia-sod-open2",
-  "sia-sod-open2.5",
-  "sia-sod-open3",
-  "soa-sid",
-  "3ia-3od"
-] as const;
-export type SolverScenario = string;
-
-export type SolverScenarioLibraryItem = {
-  id: SolverScenario;
-  label: string;
-  rangeSubdir: string;
-  configTemplate: string;
-  pot: number;
-  effectiveStack: number;
-  description?: string;
-};
-
+export const SOLVER_SETTING_IDS = DEFAULT_SOLVER_SETTING_LIBRARY.map((setting) => setting.id);
+/** @deprecated Use SOLVER_SETTING_IDS. */
+export const SOLVER_SCENARIOS = SOLVER_SETTING_IDS;
+export type SolverScenario = SolverSettingId;
+/** @deprecated Use SolverSettingLibraryItem. */
+export type SolverScenarioLibraryItem = SolverSettingLibraryItem;
+/** @deprecated Use SolverSettingLibraryResponse. */
 export type SolverScenarioLibraryResponse = {
-  scenarios: SolverScenarioLibraryItem[];
+  scenarios: SolverSettingLibraryItem[];
   updatedAt: string | null;
 };
-
-export const DEFAULT_SOLVER_SCENARIO_LIBRARY: SolverScenarioLibraryItem[] = [
-  {
-    id: "sia-sod",
-    label: "SIA vs SOD",
-    rangeSubdir: "sia-sod",
-    configTemplate: "SIA_SOD_CONFIG",
-    pot: 5,
-    effectiveStack: 98,
-    description: "Default single-raised SIA/SOD scenario."
-  },
-  {
-    id: "sia-sod-open2",
-    label: "SIA vs SOD Open 2",
-    rangeSubdir: "sia-sod-open2",
-    configTemplate: "SIA_SOD_CONFIG",
-    pot: 4,
-    effectiveStack: 98,
-    description: "SIA/SOD open-size scenario using open2 defaults."
-  },
-  {
-    id: "sia-sod-open2.5",
-    label: "SIA vs SOD Open 2.5",
-    rangeSubdir: "sia-sod-open2.5",
-    configTemplate: "SIA_SOD_CONFIG",
-    pot: 5,
-    effectiveStack: 98,
-    description: "SIA/SOD open-size scenario using open2.5 defaults."
-  },
-  {
-    id: "sia-sod-open3",
-    label: "SIA vs SOD Open 3",
-    rangeSubdir: "sia-sod-open3",
-    configTemplate: "SIA_SOD_CONFIG",
-    pot: 6,
-    effectiveStack: 97,
-    description: "SIA/SOD open-size scenario using open3 defaults."
-  },
-  {
-    id: "soa-sid",
-    label: "SOA vs SID",
-    rangeSubdir: "soa-sid",
-    configTemplate: "SOA_SID_CONFIG",
-    pot: 5,
-    effectiveStack: 98,
-    description: "SOA/SID scenario."
-  },
-  {
-    id: "3ia-3od",
-    label: "3IA vs 3OD",
-    rangeSubdir: "3ia-3od",
-    configTemplate: "TOA_TID_CONFIG",
-    pot: 16,
-    effectiveStack: 92,
-    description: "3-bet 3IA/3OD scenario."
-  }
-];
+/** @deprecated Use DEFAULT_SOLVER_SETTING_LIBRARY. */
+export const DEFAULT_SOLVER_SCENARIO_LIBRARY = DEFAULT_SOLVER_SETTING_LIBRARY;
 
 export const SOLVER_EXPORT_FORMATS = ["json", "parquet", "parquet_native"] as const;
 export type SolverExportFormat = (typeof SOLVER_EXPORT_FORMATS)[number];
@@ -167,6 +116,8 @@ export const DEFAULT_SOLVER_JOB_SETTINGS: SolverJobSettings = {
 export type SolverJobPreviewRequest = {
   serverId: string;
   rangePath: string;
+  settingId?: SolverSettingId;
+  /** @deprecated Use settingId. */
   scenario?: SolverScenario;
   datasetName?: string;
   settings?: Partial<SolverJobSettings>;
@@ -185,6 +136,9 @@ export type SolverJobPreview = {
   learned: boolean;
   datasetName: string;
   repoId: string;
+  settingId: SolverSettingId;
+  setting: SolverSettingLibraryItem;
+  /** @deprecated Use settingId. */
   scenario: SolverScenario;
   solverRangeText: string;
   remoteRangePath: string;
@@ -203,6 +157,9 @@ export type SolverJob = {
   rangePath: string;
   rangeName: string;
   datasetName: string;
+  settingId: SolverSettingId;
+  setting: SolverSettingLibraryItem;
+  /** @deprecated Use settingId. */
   scenario: SolverScenario;
   repoId: string;
   settings: SolverJobSettings;
@@ -267,6 +224,8 @@ export type ParallelSolverServerAllocation = {
 
 export type ParallelSolverJobPreviewRequest = {
   rangePath: string;
+  settingId?: SolverSettingId;
+  /** @deprecated Use settingId. */
   scenario?: SolverScenario;
   datasetName?: string;
   serverIds?: string[];
@@ -308,6 +267,9 @@ export type ParallelSolverJobPreview = {
   learned: boolean;
   datasetName: string;
   repoId: string;
+  settingId: SolverSettingId;
+  setting: SolverSettingLibraryItem;
+  /** @deprecated Use settingId. */
   scenario: SolverScenario;
   solverRangeText: string;
   settings: SolverJobSettings;
@@ -353,6 +315,9 @@ export type ParallelSolverRun = {
   rangeName: string;
   datasetName: string;
   repoId: string;
+  settingId: SolverSettingId;
+  setting: SolverSettingLibraryItem;
+  /** @deprecated Use settingId. */
   scenario: SolverScenario;
   settings: SolverJobSettings;
   solverRangeText: string;

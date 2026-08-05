@@ -61,9 +61,19 @@ export type PreflopRangeStats = {
 
 export type PreflopRangeProgress = {
   datasetName: string;
+  /** Remote Hugging Face rows. This preserves the original progress meaning. */
   rows: number;
   totalRows: number;
   ratio: number;
+  /** Boards completed in locally persisted solver history. */
+  localRows: number;
+  /** Deduplicated union of remote rows and locally completed boards. */
+  combinedRows: number;
+  combinedRatio: number;
+  /** Locally completed boards not currently represented by remote artifacts. */
+  localOnlyRows: number;
+  /** Whether remote artifacts were available for exact local/remote deduplication. */
+  localOverlapKnown: boolean;
   checkedAt?: string;
   error?: string;
 };

@@ -12,8 +12,10 @@ __pycache__/
 .playwright-mcp/
 data/*.sqlite
 data/*.sqlite-*
+data/*.sqlite.lock
 data/*.db
 data/*.db-*
+data/*.db.lock
 data/backups/
 data/wechat-accounts/
 .vite/
