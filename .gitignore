@@ -22,6 +22,7 @@ data/wechat-accounts/
 
 /config/servers.json
 /config/alerts.json
+/config/solver-settings.json
 /config/solver-scenarios.json
 /config/preflop-ranges/
 .range_status.json
