@@ -14,6 +14,13 @@ import { collectServerMetrics, type SshCredentials, Ssh2Executor } from "./sshCo
 import type { AlertService } from "./alertService";
 import { classifyWeChatSendError } from "./wechatNotifier";
 import { loadServerInventory, updateServerInventoryName } from "./config";
+import {
+  probeSshConnectivity,
+  type SshConnectivityProbeResult
+} from "./sshConnectivityProbe";
+import { buildFailureSnapshot } from "./metrics";
+
+const DEFAULT_REFRESH_CONCURRENCY = 4;
 
 export type RefreshServiceOptions = {
   db: MonitorDatabase;
@@ -23,6 +30,8 @@ export type RefreshServiceOptions = {
   pipelineStatusFilePath?: string;
   collect?: (server: ServerConfig) => Promise<MetricSnapshot>;
   collectPipeline?: (server: ServerConfig) => Promise<PipelineStatusSnapshot>;
+  probeConnectivity?: (server: ServerConfig) => Promise<SshConnectivityProbeResult>;
+  refreshConcurrency?: number;
   getSshTimeouts?: () => SshTimeoutOptions;
   alerts?: AlertService;
   inventoryPath?: string;
@@ -43,6 +52,7 @@ export class RefreshService {
   private readonly serverRefreshTasks = new Map<string, Promise<ServerRefreshResult>>();
   private readonly collect: (server: ServerConfig) => Promise<MetricSnapshot>;
   private readonly collectPipeline: (server: ServerConfig) => Promise<PipelineStatusSnapshot>;
+  private readonly probeConnectivity: ((server: ServerConfig) => Promise<SshConnectivityProbeResult>) | null;
 
   constructor(private readonly options: RefreshServiceOptions) {
     this.intervalMs = options.intervalMs;
@@ -69,6 +79,7 @@ export class RefreshService {
           this.createExecutor()
         );
       });
+    this.probeConnectivity = options.probeConnectivity ?? (options.credentials ? probeSshConnectivity : null);
   }
 
   private createExecutor(): Ssh2Executor {
@@ -97,14 +108,16 @@ export class RefreshService {
         totalServers: enabledServers.length,
         completedServers: 0
       };
-      const collected = await Promise.all(
-        enabledServers.map(async (server) => {
+      const collected = await mapWithConcurrency(
+        enabledServers,
+        normalizeConcurrency(this.options.refreshConcurrency),
+        async (server) => {
           const item = await this.collectAndPersistServer(server, collectedAt);
           if (this.current?.startedAt === startedAt) {
             this.current.completedServers += 1;
           }
           return item;
-        })
+        }
       );
       this.syncDiscoveredServerNames(collected);
       this.options.db.pruneSnapshots(24);
@@ -117,8 +130,20 @@ export class RefreshService {
         startedAt,
         finishedAt: new Date().toISOString(),
         status: "completed",
-        successCount: snapshots.filter((item) => item.connectionStatus === "online" && item.healthLevel === "healthy").length,
-        warningCount: snapshots.filter((item) => item.connectionStatus === "online" && item.healthLevel !== "healthy").length,
+        successCount: collected.filter(
+          (item) => item.metrics.connectionStatus === "online" &&
+            item.metrics.errorCode == null &&
+            item.pipeline.errorCode == null &&
+            item.metrics.healthLevel === "healthy"
+        ).length,
+        warningCount: collected.filter(
+          (item) => item.metrics.connectionStatus === "online" &&
+            (
+              item.metrics.errorCode != null ||
+              item.pipeline.errorCode != null ||
+              item.metrics.healthLevel !== "healthy"
+            )
+        ).length,
         failureCount: snapshots.filter(
           (item) => item.connectionStatus === "offline" || item.connectionStatus === "unknown"
         ).length
@@ -208,10 +233,7 @@ export class RefreshService {
     const current = this.serverRefreshTasks.get(server.id);
     if (current) return current;
 
-    const task = Promise.all([
-      this.collect(server),
-      this.collectPipeline(server)
-    ]).then(([metrics, pipeline]) => {
+    const task = this.collectServer(server).then(({ metrics, pipeline }) => {
       const item: ServerRefreshResult = {
         metrics: { ...metrics, collectedAt },
         pipeline: { ...pipeline, collectedAt }
@@ -229,6 +251,98 @@ export class RefreshService {
     });
     this.serverRefreshTasks.set(server.id, task);
     return task;
+  }
+
+  private async collectServer(server: ServerConfig): Promise<ServerRefreshResult> {
+    if (!this.probeConnectivity) {
+      const [metrics, pipeline] = await Promise.all([
+        this.collect(server),
+        this.collectPipeline(server)
+      ]);
+      return { metrics, pipeline };
+    }
+
+    let connectivity: SshConnectivityProbeResult;
+    try {
+      connectivity = await this.probeConnectivity(server);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      connectivity = {
+        reachable: false,
+        latencyMs: null,
+        banner: null,
+        errorCode: "probe_failed",
+        errorMessage: message
+      };
+    }
+
+    if (!connectivity.reachable) {
+      const errorCode = connectivity.errorCode ?? "connect_failed";
+      const errorMessage = connectivity.errorMessage ?? "SSH connectivity probe failed";
+      return {
+        metrics: buildFailureSnapshot(server.id, errorCode, errorMessage),
+        pipeline: buildPipelineFailureSnapshot(server.id, errorCode, errorMessage)
+      };
+    }
+
+    let metrics: MetricSnapshot;
+    try {
+      metrics = await this.collect(server);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      metrics = buildFailureSnapshot(server.id, "collection_failed", message);
+    }
+
+    // The provider-style probe established network connectivity. An auth,
+    // handshake, command, or parse failure is therefore degraded SSH readiness,
+    // not an offline server.
+    metrics = this.withReachableConnectivity(metrics, server.id);
+
+    if (metrics.errorCode != null) {
+      return {
+        metrics,
+        pipeline: buildPipelineFailureSnapshot(
+          server.id,
+          metrics.errorCode,
+          metrics.errorMessage ?? "Authenticated SSH metric collection failed"
+        )
+      };
+    }
+
+    let pipeline: PipelineStatusSnapshot;
+    try {
+      pipeline = await this.collectPipeline(server);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      pipeline = buildPipelineFailureSnapshot(server.id, "pipeline_collection_failed", message);
+    }
+    return { metrics, pipeline };
+  }
+
+  private withReachableConnectivity(snapshot: MetricSnapshot, serverId: string): MetricSnapshot {
+    if (snapshot.errorCode == null) {
+      return { ...snapshot, connectionStatus: "online" };
+    }
+
+    const previous = this.options.db.getLatestSnapshot(serverId);
+    return {
+      ...snapshot,
+      connectionStatus: "online",
+      healthLevel: previous?.healthLevel ?? null,
+      cpuUsedPercent: previous?.cpuUsedPercent ?? null,
+      memoryUsedPercent: previous?.memoryUsedPercent ?? null,
+      diskUsedPercent: previous?.diskUsedPercent ?? null,
+      load1: previous?.load1 ?? null,
+      load5: previous?.load5 ?? null,
+      load15: previous?.load15 ?? null,
+      uptimeSeconds: previous?.uptimeSeconds ?? null,
+      cpuModel: previous?.cpuModel ?? null,
+      cpuVcores: previous?.cpuVcores ?? null,
+      memoryTotalBytes: previous?.memoryTotalBytes ?? null,
+      memoryUsedBytes: previous?.memoryUsedBytes ?? null,
+      diskTotalBytes: previous?.diskTotalBytes ?? null,
+      diskUsedBytes: previous?.diskUsedBytes ?? null
+    };
   }
 
   private syncDiscoveredServerNames(collected: Array<{
@@ -257,4 +371,29 @@ export class RefreshService {
       this.updateServers(servers);
     }
   }
+}
+
+function normalizeConcurrency(value: number | undefined): number {
+  if (value == null) return DEFAULT_REFRESH_CONCURRENCY;
+  const parsed = Math.trunc(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_REFRESH_CONCURRENCY;
+}
+
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  callback: (item: T) => Promise<R>
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+  const workers = Array.from({ length: Math.min(items.length, concurrency) }, async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      const item = items[index];
+      if (item !== undefined) results[index] = await callback(item);
+    }
+  });
+  await Promise.all(workers);
+  return results;
 }

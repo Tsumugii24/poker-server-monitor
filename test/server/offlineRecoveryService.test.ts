@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ConnectionStatus, MetricSnapshot, ServerConfig } from "../../src/shared/types";
 import { MonitorDatabase } from "../../src/server/db";
-import { buildPipelineFailureSnapshot } from "../../src/server/pipelineStatusCollector";
+import { buildPipelineSnapshot } from "../../src/server/pipelineStatusCollector";
 import {
   OfflineRecoveryService,
   type OfflineRecoveryServiceOptions
@@ -60,7 +60,11 @@ describe("OfflineRecoveryService", () => {
     const onRecovered = vi.fn(async () => undefined);
     const refreshServer = vi.fn(async (serverId: string) => ({
       metrics: metric(serverId, "online"),
-      pipeline: buildPipelineFailureSnapshot(serverId, "not_configured", "test")
+      pipeline: buildPipelineSnapshot(serverId, {
+        available: false,
+        processAlive: null,
+        raw: null
+      })
     }));
     const service = createService({ probe, onRecovered, refreshServer });
 

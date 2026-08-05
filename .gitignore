@@ -12,14 +12,17 @@ __pycache__/
 .playwright-mcp/
 data/*.sqlite
 data/*.sqlite-*
+data/*.sqlite.lock
 data/*.db
 data/*.db-*
+data/*.db.lock
 data/backups/
 data/wechat-accounts/
 .vite/
 
 /config/servers.json
 /config/alerts.json
+/config/solver-settings.json
 /config/solver-scenarios.json
 /config/preflop-ranges/
 .range_status.json

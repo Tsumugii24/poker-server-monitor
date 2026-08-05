@@ -21,6 +21,7 @@ describe("shared monitor contracts", () => {
       summary: {
         total: 1,
         online: 1,
+        degraded: 0,
         offline: 0,
         unknown: 0,
         healthy: 1,

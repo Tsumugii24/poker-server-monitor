@@ -2,7 +2,13 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
-import type { ConnectionStatus, HealthLevel, MetricSnapshot, ServerConfig } from "../../src/shared/types";
+import type {
+  ConnectionStatus,
+  HealthLevel,
+  MetricSnapshot,
+  PipelineStatusSnapshot,
+  ServerConfig
+} from "../../src/shared/types";
 import { MonitorDatabase } from "../../src/server/db";
 import { RefreshService } from "../../src/server/refreshService";
 import type { AlertService } from "../../src/server/alertService";
@@ -97,6 +103,105 @@ describe("RefreshService", () => {
       warningCount: 1,
       failureCount: 0
     });
+  });
+
+  it("keeps provider-reachable SSH failures online but degraded and retains last-known metrics", async () => {
+    db.insertSnapshot(metric("prod-01", "online"));
+    const collectPipeline = vi.fn(async () => buildIdlePipeline("prod-01"));
+    const service = new RefreshService({
+      db,
+      servers: [servers[0]!],
+      intervalMs: 3_600_000,
+      probeConnectivity: async () => ({
+        reachable: true,
+        latencyMs: 12.5,
+        banner: "SSH-2.0-OpenSSH_9.6",
+        errorCode: null,
+        errorMessage: null
+      }),
+      collect: async (server) => metric(server.id, "offline"),
+      collectPipeline
+    });
+
+    await service.refreshAll("manual");
+
+    const row = db.getServerRows().find((server) => server.id === "prod-01")!;
+    expect(row.latest).toMatchObject({
+      connectionStatus: "online",
+      errorCode: "connect_failed",
+      cpuUsedPercent: 20,
+      memoryUsedPercent: 30
+    });
+    expect(row.pipeline).toMatchObject({ displayStatus: "unavailable", errorCode: "connect_failed" });
+    expect(collectPipeline).not.toHaveBeenCalled();
+    expect(db.getLastRefreshRun()).toMatchObject({ warningCount: 1, failureCount: 0 });
+  });
+
+  it("marks a failed provider connectivity probe offline and skips authenticated SSH", async () => {
+    const collect = vi.fn(async (server: ServerConfig) => metric(server.id, "online"));
+    const collectPipeline = vi.fn(async (server: ServerConfig) => buildIdlePipeline(server.id));
+    const service = new RefreshService({
+      db,
+      servers: [servers[0]!],
+      intervalMs: 3_600_000,
+      probeConnectivity: async () => ({
+        reachable: false,
+        latencyMs: null,
+        banner: null,
+        errorCode: "connection_refused",
+        errorMessage: "Connection refused (port may be closed)"
+      }),
+      collect,
+      collectPipeline
+    });
+
+    await service.refreshAll("manual");
+
+    expect(collect).not.toHaveBeenCalled();
+    expect(collectPipeline).not.toHaveBeenCalled();
+    expect(db.getServerRows()[0]?.latest).toMatchObject({
+      connectionStatus: "offline",
+      errorCode: "connection_refused"
+    });
+  });
+
+  it("limits a full refresh to four servers in flight", async () => {
+    const manyServers = Array.from({ length: 8 }, (_, index): ServerConfig => ({
+      id: `prod-${index + 1}`,
+      name: `Production ${index + 1}`,
+      host: `10.0.1.${index + 1}`,
+      port: 22,
+      enabled: true,
+      note: "TBD"
+    }));
+    db.syncServers(manyServers);
+    let activeCollectors = 0;
+    let maximumActiveCollectors = 0;
+    const service = new RefreshService({
+      db,
+      servers: manyServers,
+      intervalMs: 3_600_000,
+      probeConnectivity: async () => ({
+        reachable: true,
+        latencyMs: 1,
+        banner: "SSH-2.0-test",
+        errorCode: null,
+        errorMessage: null
+      }),
+      collect: async (server) => {
+        activeCollectors += 1;
+        maximumActiveCollectors = Math.max(maximumActiveCollectors, activeCollectors);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        activeCollectors -= 1;
+        return metric(server.id, "online");
+      },
+      collectPipeline: async (server) => buildIdlePipeline(server.id)
+    });
+
+    await service.refreshAll("manual");
+
+    expect(maximumActiveCollectors).toBe(4);
+    expect(db.getServerRows().filter((server) => server.latest?.connectionStatus === "online")).toHaveLength(8);
   });
 
   it("refreshes one recovered server without running a full inventory refresh", async () => {
@@ -342,3 +447,39 @@ describe("RefreshService", () => {
     releaseAlert();
   });
 });
+
+function buildIdlePipeline(serverId: string): PipelineStatusSnapshot {
+  return {
+    id: `${serverId}-idle-${crypto.randomUUID()}`,
+    serverId,
+    collectedAt: new Date().toISOString(),
+    available: false,
+    processAlive: null,
+    fileStatus: null,
+    displayStatus: "idle",
+    phase: null,
+    repoId: null,
+    datasetName: null,
+    scenario: null,
+    currentBatch: null,
+    totalBatches: null,
+    totalTasks: null,
+    batchExpr: null,
+    assignedIndices: [],
+    completedIndices: [],
+    failedIndices: [],
+    skippedIndices: [],
+    completedCount: null,
+    failedCount: null,
+    skippedCount: null,
+    resultPath: null,
+    pid: null,
+    startedAt: null,
+    updatedAt: null,
+    finishedAt: null,
+    command: null,
+    error: null,
+    errorCode: null,
+    errorMessage: null
+  };
+}

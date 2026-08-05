@@ -277,17 +277,18 @@ export type OverviewSummary = {
   total: number;
   // Connectivity counts
   online: number;
+  degraded: number;
   offline: number;
   unknown: number;
-  // Health counts (among online servers only)
+  // Health counts (among SSH-ready servers only)
   healthy: number;
   warning: number;
   dangerous: number;
-  // Averages (among online servers only)
+  // Averages (among SSH-ready servers only)
   averageCpu: number | null;
   averageMemory: number | null;
   averageDisk: number | null;
-  // Pipeline counts (among online servers only)
+  // Pipeline counts (among Job Ready servers only)
   pipelineRunning: number;
   pipelineIdle: number;
   pipelineStale: number;

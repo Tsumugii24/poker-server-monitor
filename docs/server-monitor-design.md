@@ -2,7 +2,7 @@
 
 ## Goal
 
-Build a local-first server monitoring dashboard for 12 Linux servers. The app runs on the user's Windows machine, connects to the servers over SSH with one shared username and password, collects basic load metrics, stores the last 24 hours of history, and displays both an overall health view and per-server details.
+Build a local-first server monitoring dashboard for a Linux solver fleet. The app runs on the user's machine, connects to the servers over SSH with one shared username and password, collects basic load metrics, stores the last 24 hours of history, and displays both an overall health view and per-server details.
 
 The first version is intentionally scoped to local access only. It listens on localhost, does not expose SSH credentials to the frontend, and does not include multi-user auth.
 
@@ -15,7 +15,7 @@ The first version is intentionally scoped to local access only. It listens on lo
 - The dashboard is accessed only from the local machine.
 - Default automatic refresh interval is 1 hour.
 - Users can trigger a manual refresh.
-- Refreshes should run all 12 SSH checks in parallel; no concurrency limit is needed.
+- Full refreshes use a bounded concurrency of four servers so a 22-node fleet does not create a burst of 44 simultaneous authenticated SSH sessions.
 - A refresh should not overlap with another active refresh.
 - Metrics history should be retained for the most recent 24 hours.
 - First version metrics are online status, CPU usage, memory usage, disk usage, system load, and uptime.
@@ -58,15 +58,29 @@ Inventory entries without `tier` remain backward compatible and load as `standar
 1. Scheduler starts an automatic refresh every hour.
 2. User can start a manual refresh from the dashboard.
 3. Backend checks whether a refresh is already running.
-4. If no refresh is active, backend starts SSH collection for all enabled servers in parallel.
-5. Each server has independent timeouts, such as 10 seconds for connection and 15 seconds for command execution.
-6. Backend parses Linux command output into normalized metrics.
-7. Backend stores one metric snapshot per server.
-8. Backend records the refresh run summary.
-9. Backend deletes metric snapshots older than 24 hours.
+4. If no refresh is active, backend checks enabled servers with at most four servers in flight.
+5. Each server first receives a provider-compatible TCP + SSH-banner probe: TCP connect timeout is 8 seconds and banner wait timeout is 4 seconds. This stage does not authenticate.
+6. Only a reachable server proceeds to authenticated metric collection, followed by pipeline collection. These two commands run sequentially for that server.
+7. Each authenticated command has independently configurable SSH connect and overall command timeouts (10 and 15 seconds by default).
+8. Backend parses Linux command output into normalized metrics and stores one metric and pipeline snapshot per server.
+9. Backend records the refresh run summary and deletes snapshots older than 24 hours.
 10. Frontend reads latest status, overview summary, and historical series through API endpoints.
 
-## SSH Collection
+## Connectivity, SSH Readiness, and Collection
+
+Connectivity and job readiness are deliberately separate:
+
+- `online` means the TCP connection and SSH banner probe succeeded. It is comparable to the server provider's availability check.
+- `offline` means the TCP connection or banner probe failed.
+- `unknown` means the server has not yet produced a definitive connectivity snapshot.
+- `degraded` is a frontend/readiness state derived from an `online` metric snapshot with a collection error, or a failed pipeline snapshot. The port is reachable, but authenticated SSH commands are not currently trusted for work.
+- `SSH Ready` requires an online snapshot with no authenticated metric error. `Job Ready` additionally requires no known pipeline collection error.
+
+Parallel allocation, single-job dispatch, and Server Operations require Job Ready plus their existing idle/active-job checks. A TCP/Banner success alone never authorizes a job. Dispatch retains its existing authenticated preflight immediately before deployment, so queued work remains queued if authentication, remote state, cards, proxy, or tmux validation fails.
+
+When connectivity succeeds but authenticated metric collection fails, the new snapshot remains `online`, carries the SSH error code/message, and reuses the last-known metric values for display. Health aggregates exclude these stale degraded values. If the connectivity probe itself fails, authenticated metric and pipeline commands are skipped and the server is stored as `offline`.
+
+### Authenticated SSH Collection
 
 The backend should execute Linux commands that are broadly available on standard distributions. The exact command set can be finalized during implementation, but the target fields are:
 
@@ -84,7 +98,7 @@ Failure modes are first-class results, not crashes:
 - Unexpected command output.
 - Partial parsing failure.
 
-Each failure is stored with an error code and user-readable message so the dashboard can explain what happened.
+Each failure is stored with an error code and user-readable message so the dashboard can explain what happened. The provider-compatible probe also returns latency and banner diagnostics internally; the current snapshot schema persists the resulting connectivity state rather than those raw probe details.
 
 ## Persistence
 
@@ -211,24 +225,32 @@ Context refresh reminder behavior:
 The current implementation also includes solver job orchestration for the shared `~/solver` deployment on each server:
 
 - Single solver jobs submit one reviewed range to one selected server.
-- Parallel solver jobs split remaining board indices across available servers and keep a queue for follow-up chunks. The default `All Servers` mode uses the dynamic enabled-server pool: newly added enabled servers can claim still-queued chunks after they have an online, idle snapshot; already-running chunks are never split or moved. `Performance Tier` and `Standard Tier` modes submit the enabled servers in that tier as a fixed pool. Changing mode resets Chunk Number to the selected pool size; an operator can still override that value afterward.
+- Parallel solver jobs split remaining board indices across available servers and keep a queue for follow-up chunks. The default `All Servers` mode uses the dynamic enabled-server pool: newly added enabled servers can claim still-queued chunks after they have a Job Ready, idle snapshot; already-running chunks are never split or moved. `Performance Tier` and `Standard Tier` modes submit the enabled servers in that tier as a fixed pool. Changing mode resets Chunk Number to the selected pool size; an operator can still override that value afterward.
 - The Failure Pool is scoped to the currently inspected Range and Dataset. Its count includes unresolved pending, queued, running, and failed entries; solved entries are omitted. Confirmed Clear removes only pending/failed entries in that exact scope and never removes queued/running retries.
 - Terminal Parallel History records have a separate confirmed Delete action. It permanently removes the selected run, its report, slices, solver jobs, events, and failure-pool entries linked to that run. Active or locked runs cannot be deleted.
 - A solver job stores the pipeline snapshot that settled it. Terminal slices are immutable during later reconciliation, so a newer task on the same server cannot overwrite historical Done, Failed, or Success Rate statistics.
+- The former Scenario Library is now a top-level Setting Library below Range Preview and above Solver Jobs. Each entry stores structured bet-size rules plus pot, effective stack, accuracy, iteration/print controls, isomorphism, enable-range, label, description, and zero or more Range Folder Links. A parent Folder Link covers all descendant folders and files; the most-specific link wins. The backend generates the low-level solving config while the frontend displays and edits only structured controls. Jobs and parallel runs persist a full Setting snapshot, so later library edits do not change queued work, and the generated config is injected into a job-scoped launcher at execution time. Range folder rename, move, and delete operations rewrite or remove affected Setting links after an impact confirmation.
+- `config/solver-settings.json` is mutable local runtime configuration and is intentionally ignored by Git, matching `servers.json`, `alerts.json`, and the local Range Library. The tracked `config/solver-settings.json.example` preserves a reusable baseline; a new installation can copy it to the runtime path when it needs the same custom Settings and Folder Links. Remote solver servers never read either file because each submitted job carries a persisted Setting snapshot in its generated launcher.
+- Donk sizing is available only for `OOP Turn` and `OOP River`. The other four position/street groups omit Donk controls entirely, and normalization/config generation discard unsupported Donk rules from legacy files or API payloads.
+- Single and parallel submission both support automatic Setting matching from the selected Range path or an explicit Range + Setting link.
 - Every inventory server belongs to either `Performance Tier` or `Standard Tier`. Server Operations provides a two-column checkbox editor with an explicit Save action, and Performance servers carry a distinct badge in Parallel Server Status Preview. The former single `Best Server` setting is removed.
 - Skipped failure-pool boards use the complete enabled Performance Tier as their retry candidate pool. Other failure reasons continue to use the server pool selected for the retry request.
-- `Server Operations` is a manual maintenance center with explicit all-online actions plus inventory-scoped maintenance for selected servers.
-- `Sync Code` starts a sync tmux session on each online enabled server. The remote command exports the solver proxy variables, runs `git stash`, then `git pull --rebase`.
-- `Sync Network` clones or updates `~/mihomo-release`, expands the Mihomo binary, downloads `config.yaml` from the backend-only `SUBSCRIPTION_URL`, validates it, and restarts a persistent tmux session named `mihomo`. The command card can target every online server, while the Network inventory supports selecting one or more available servers and syncing only that exact selection, so newly provisioned nodes do not force repeat work on the existing fleet. HTTPS Git authentication uses backend-only `GITEE_USERNAME` and `GITEE_TOKEN` through a temporary remote AskPass file; secrets are not retained in operation commands or reports.
+- `Server Operations` is a manual maintenance center with explicit all-online actions plus per-server controls in the inventory. Each Server ID row can independently start `Code Sync`, `Check Online`, or `Scan + Upload`; the confirmation dialog lists the exact target IDs before submission. These controls reuse the same filtered backend operations as their all-online counterparts and do not change the default bulk behavior.
+- `Sync Code` starts a sync tmux session on each targeted Job Ready enabled server. The remote command exports the solver proxy variables, runs `git stash`, then `git pull --rebase`.
+- `Sync Network` clones or updates `~/mihomo-release`, expands the Mihomo binary, downloads `config.yaml` from the backend-only `SUBSCRIPTION_URL`, validates it, and restarts a persistent tmux session named `mihomo`. If the first config `wget` returns any non-zero code, the command makes one bounded DNS recovery attempt by replacing `/etc/resolv.conf` with `223.5.5.5` and `8.8.8.8`, then retries that download exactly once. Root writes directly; a non-root SSH account supplies the backend SSH login password to `sudo -S` with an empty prompt. The password is injected only into the unredacted execution command and is excluded from the persisted command preview, events, result JSON, API response, and frontend. The initial and retry download codes, DNS repair code, retry attempt, and recovery outcome are retained in the operation result. The command card can target every online server, while the Network inventory supports selecting one or more available servers and syncing only that exact selection, so newly provisioned nodes do not force repeat work on the existing fleet. HTTPS Git authentication uses backend-only `GITEE_USERNAME` and `GITEE_TOKEN` through a temporary remote AskPass file; secrets are not retained in operation commands or reports.
 - Solver dispatch checks SSH availability and idle state but does not inspect, update, or synchronize Git. When solver upload proxying is enabled, dispatch also requires the manually managed `mihomo` tmux session and a successful Hugging Face request through that proxy; otherwise the chunk remains queued with a `Sync Network` recovery message.
-- Offline recovery runs independently from the full inventory refresh. By default, every 60 seconds it performs a lightweight SSH probe only against enabled servers whose latest metric snapshot is `offline`. A successful probe triggers a complete metric and pipeline refresh for that server, followed immediately by Job/Parallel Queue reconciliation. Failed probes keep the existing offline snapshot instead of generating minute-by-minute duplicate history. The interval is persisted as `offlineRetryIntervalSeconds` and can be changed from Settings > Connection Check.
+- Connectivity/readiness recovery runs independently from the full inventory refresh. By default, every 60 seconds it applies the same TCP + SSH-banner probe to enabled servers that are offline or degraded. A reachable server receives a complete metric and pipeline refresh. Job/Parallel Queue reconciliation runs only after Job Ready is restored; otherwise the chunk remains queued. Failed recovery probes keep the existing snapshot instead of generating minute-by-minute duplicate history. The interval is persisted as `offlineRetryIntervalSeconds` and can be changed from Settings > Connection Check.
 - Manual inventory refresh and parallel queue reconciliation run as background work. Each server snapshot is persisted as soon as its SSH checks finish, the UI shows completed/total refresh progress, and Server Operations remain usable while queue reconciliation continues. Alert delivery runs after snapshot persistence without extending the refresh lock.
-- Parallel Queue and History reads return the persisted SQLite snapshot immediately. Reconciliation is scheduled separately, and related local status updates are persisted as one batch so a large restored queue cannot block the read endpoint by repeatedly exporting the full database. Parallel Queue opens in a read-only Preview mode. Edit mode keeps all movable-run changes in a local draft, supports step and first/last moves, and writes the complete movable order only once when the operator selects Save Order; Cancel leaves the persisted order untouched. Active runs remain locked in place, and an editor opened against a queue that changes during reconciliation must reload before it can save.
+- The file-backed sql.js database has a process-level single-writer lock. A second Server Monitor instance targeting the same database exits instead of dispatching from a stale in-memory queue and later overwriting newer task records. The launcher waits for the previous listener to exit before starting its replacement.
+- Parallel Queue and History reads return the persisted SQLite snapshot immediately. Reconciliation is scheduled separately, and related local status updates are persisted as one batch so a large restored queue cannot block the read endpoint by repeatedly exporting the full database. Parallel Queue opens in a read-only Preview mode. Edit mode keeps all movable-run changes in a local draft, supports step and first/last moves, and writes the complete movable order only once when the operator selects Save Order; Cancel leaves the persisted order untouched. Active runs remain locked in place, and an editor opened against a queue that changes during reconciliation must reload before it can save. Before the first slice of an untouched normal Parallel run is dispatched, the backend refreshes Hugging Face coverage and persisted terminal-success history once more, removes newly covered indices from the saved slices, and completes a now-empty run without launching a server job. Runs that have started, already own a solver job, are in Parallel History, or come from the explicit Failure Pool retry flow are never rewritten by this guard.
+- Parallel History includes a local keyword search over dataset/repository name, range path, Setting, status, run id, and server ids. Search filters only the visible History cards, resets the status filter to All when text entry begins, and selects the first matching card when the previously selected History card is no longer visible; it does not mutate persisted history or the Parallel Queue.
 - A selected Parallel Queue or History run shows a completion bar in Parallel Reports. The percentage is the bounded `completedBoards / totalBoards` ratio, alongside the exact Done and Assigned counts; zero-board runs remain at 0% and inconsistent over-completion is visually capped at 100%.
 - New parallel runs persist their submitted server range (`All Servers`, `Performance`, or `Standard`) with the run instead of inferring it from the current inventory. Parallel Queue and Parallel Reports show this saved range as a compact badge, and downloaded report Markdown includes it as well. Historical fixed-pool runs created before this field existed remain labeled `Selected Servers` because their original Performance/Standard choice cannot be reconstructed safely; historical dynamic-pool runs are migrated to `All Servers`.
 - The Parallel tab does not currently poll remote pipeline status on its own. Job context loads when the range workspace opens and after relevant mutations. `Refresh Status` starts a full monitor/pipeline refresh and reloads job context every two seconds until both inventory refresh and parallel reconciliation settle, which updates Done and the completion bar. Backend scheduled refresh and 30-second queue reconciliation can persist newer state, but an already-open browser receives it only on its next load or explicit refresh.
 - Hugging Face dataset checks use exact Repo ID matching. A rename redirect such as `dataset` to `dataset-backup` is treated as a missing `dataset`, allowing the original name to be created independently after explicit confirmation instead of reading coverage from the backup.
-- Range progress prefers the Hugging Face dataset size service. If that service is unavailable during a refresh, the remaining checks use paginated repository file listings and count unique solver board artifacts, matching Parallel Preview coverage instead of failing the entire batch.
+- The Range Library `All checked` view keeps one progress pill per range and provides a compact `Total / Remote` source tab on the right side of the current `All Ranges · X items` header. `Remote` preserves the original Hugging Face-only row progress. `Total` combines Remote with completed boards from persisted local solver jobs and Parallel History. The selected source is saved in browser local storage and survives data refreshes, page reloads, and later visits. When local history exists, Remote Refresh also reads remote board artifact keys so the union is deduplicated: uploaded local boards count once, while locally solved but not uploaded boards increase Total and are identified in the tooltip as awaiting remote upload. Before an artifact listing succeeds, Total uses a conservative non-double-counting estimate and marks the pill with `≥` when it is a lower bound.
+- Range Library execution badges follow active work rather than dormant job records. `Queue` is shown only when the matching top-level Parallel run is queued, while `Running` is shown for a running Parallel run or an actively deploying/running/stopping solver job. Queued single jobs and terminal Parallel History runs do not pin a range in Queue.
+- Remote Range progress prefers the Hugging Face dataset size service. If that service is unavailable during a refresh, the remaining checks use paginated repository file listings and count unique solver board artifacts, matching Parallel Preview coverage instead of failing the entire batch.
 - Multi-server code sync, network sync, result scans, and upload tmux startup use bounded concurrency instead of waiting for every server serially.
 - `Scan All Results` inspects `~/solver/results/<dataset>/<job-id>` on every online enabled server and lists retained parquet/json result folders in a filterable, bounded-height inventory. Operators can select all folders matching the current Range/Dataset filter, then upload the selection or delete it without uploading. Each row retains its own targeted Upload/Delete actions.
 - `Scan All Results` and `Scan + Upload All` are manually initiated. The latter performs a fresh scan server-side after confirmation before starting upload tmux sessions. Each server serially uploads every retained format in every assigned result folder through `python upload.py --results-dir <dir> --repo-id <repo> --file-format <format>`.
@@ -243,15 +265,15 @@ The current implementation also includes solver job orchestration for the shared
 
 | Mechanism | Trigger / default cadence | Target scope | Does it initiate SSH? | Result |
 | --- | --- | --- | --- | --- |
-| Startup full refresh | Once when the backend starts | Every enabled inventory server | Yes — full metrics and pipeline collection | Creates the initial persisted connectivity and workload snapshots. |
-| Scheduled full refresh | Every 60 minutes by default through `SERVER_MONITOR_REFRESH_INTERVAL_MS`; when alerts are enabled, the saved alert cooldown controls this cadence | Every enabled inventory server | Yes — full metrics and pipeline collection | Replaces the latest snapshots, records a refresh run, and evaluates offline alerts. |
-| Offline recovery check | Every 60 seconds by default; configurable as `offlineRetryIntervalSeconds` in Settings > Connection Check | Enabled servers whose latest metric status is `offline` | Yes — lightweight SSH probe first; full collection only after the probe succeeds | On success, refreshes only that server and immediately triggers Job/Parallel Queue reconciliation. On failure, retains the existing offline snapshot without adding duplicate history. |
-| Manual `Refresh Status` | On demand | Every enabled inventory server | Yes — full metrics and pipeline collection | Updates status immediately without changing the next scheduled full-refresh time. |
-| Job/Parallel Queue reconciliation | Every 30 seconds, plus an immediate run after offline recovery | Queued jobs, queued chunks, and persisted server state | Not for servers already marked offline; online candidates can receive dispatch preflight SSH checks | Starts eligible queued work and leaves unavailable work queued. This loop does not itself recover an offline connectivity snapshot. |
-| Active Server Operations reconciliation | Every 10 seconds while the Server Operations tab is open and an operation is active | Active operation records on servers currently stored as online | Yes — operation status and tmux probes | Updates sync, network, and upload operation progress without performing a full inventory refresh. |
+| Startup full refresh | Once when the backend starts | Every enabled inventory server, four at a time | Yes — TCP/banner probe, then sequential authenticated metrics and pipeline commands | Creates the initial persisted connectivity and workload snapshots. |
+| Scheduled full refresh | Every 60 minutes by default through `SERVER_MONITOR_REFRESH_INTERVAL_MS`; when alerts are enabled, the saved alert cooldown controls this cadence | Every enabled inventory server, four at a time | Yes — TCP/banner probe, then authenticated collection when reachable | Replaces the latest snapshots, records a refresh run, and evaluates connectivity alerts. |
+| Connectivity/readiness recovery check | Every 60 seconds by default; configurable as `offlineRetryIntervalSeconds` in Settings > Connection Check | Enabled servers whose latest state is offline or degraded | Yes — TCP/banner probe first; full collection only after the probe succeeds | On Job Ready recovery, refreshes that server and immediately triggers Job/Parallel Queue reconciliation. On failure, leaves it unavailable to jobs. |
+| Manual `Refresh Status` | On demand | Every enabled inventory server, four at a time | Yes — TCP/banner probe, then authenticated collection when reachable | Updates status immediately without changing the next scheduled full-refresh time. |
+| Job/Parallel Queue reconciliation | Every 30 seconds, plus an immediate run after readiness recovery | Queued jobs, queued chunks, and persisted server state | Only Job Ready candidates receive dispatch preflight SSH checks | Starts eligible queued work and leaves offline or degraded work queued. This loop does not itself recover readiness. |
+| Active Server Operations reconciliation | Every 10 seconds while the Server Operations tab is open and an operation is active | Active operation records on Job Ready servers | Yes — operation status and tmux probes | Updates sync, network, and upload operation progress without performing a full inventory refresh. |
 | Frontend refresh-progress polling | Every 2 seconds only while a manual `Refresh Status` action is active | Backend refresh and reconciliation state | No — API reads only | Updates the visible progress, server state, jobs, and reports while the manual refresh is running. |
 
-Offline recovery checks are deduplicated, skipped while a full inventory refresh is active, and run with a bounded concurrency of eight servers. SSH connect and command timeouts remain independently configurable in Settings > Connection Check; their defaults are 10 and 15 seconds respectively. Outside a manual refresh, an already-open Parallel tab does not continuously poll the backend, so a background recovery can become visible after the next page/context load even though backend queue reassignment happens immediately.
+Recovery checks are deduplicated, skipped while a full inventory refresh is active, and run with a bounded concurrency of eight servers. The provider-compatible probe uses fixed 8-second TCP and 4-second banner timeouts. Authenticated SSH connect and command timeouts remain independently configurable in Settings > Connection Check; their defaults are 10 and 15 seconds respectively. Outside a manual refresh, an already-open Parallel tab does not continuously poll the backend, so a background recovery can become visible after the next page/context load even though backend queue reassignment happens immediately.
 
 ## API Shape
 
@@ -267,6 +289,9 @@ Representative backend endpoints:
 - `GET /api/settings/alerts`: alert settings and runtime status.
 - `PATCH /api/settings/alerts`: update alert settings.
 - `POST /api/settings/alerts/test`: send a test alert.
+- `GET /api/solver-settings`: list Setting Library entries (with automatic migration from `config/solver-scenarios.json` to `config/solver-settings.json`).
+- `POST /api/solver-settings`, `PATCH /api/solver-settings/:id`, and `DELETE /api/solver-settings/:id`: create, edit, and delete Settings.
+- `POST /api/solver-settings/:id/duplicate`: duplicate a Setting under a new id.
 - `GET /api/settings/wechat/accounts`: list WeChat ClawBot recipient accounts and delivery state.
 - `POST /api/settings/wechat/accounts`: create a recipient and start QR login.
 - `POST /api/settings/wechat/accounts/:accountId/verify`: verify a target user from detected inbound messages.
@@ -287,7 +312,7 @@ The first version did not need API routes for editing server inventory. The curr
 ## Error Handling
 
 - Manual refresh during an active refresh returns a clear `refresh_in_progress` response.
-- Per-server SSH failures are stored as metric snapshots with failure status and error information.
+- TCP/banner failures are stored as offline metric snapshots. Authenticated SSH or pipeline failures after a successful connectivity probe are stored as online snapshots with error information and displayed as degraded.
 - Backend startup should fail clearly if required SSH credentials are missing.
 - Frontend should show stale data with last collection time rather than blanking the dashboard during refresh.
 - Frontend should show `unknown` for servers that have never been collected.

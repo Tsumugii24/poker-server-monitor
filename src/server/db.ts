@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import initSqlJs, { type Database, type SqlJsStatic } from "sql.js";
@@ -24,6 +25,11 @@ import type {
   SolverJobSettings,
   SolverJobStatus
 } from "../shared/solverJobs";
+import {
+  DEFAULT_SOLVER_SETTING_LIBRARY,
+  solverSettingParametersFromTemplate,
+  type SolverSettingLibraryItem
+} from "../shared/solverSettings";
 import type {
   ServerOperation,
   ServerOperationEvent,
@@ -44,13 +50,33 @@ function getSql(): Promise<SqlJsStatic> {
 
 type SqlValue = string | number | null;
 
+type DatabaseFileLock = {
+  path: string;
+  token: string;
+};
+
+type DatabaseFileLockOwner = {
+  pid: number;
+  token: string;
+  startedAt: string;
+};
+
+const ownedDatabaseFileLocks = new Map<string, string>();
+
+process.once("exit", () => {
+  for (const [lockPath, token] of ownedDatabaseFileLocks) {
+    releaseDatabaseFileLock({ path: lockPath, token });
+  }
+});
+
 export class MonitorDatabase {
   private persistenceBatchDepth = 0;
   private persistencePending = false;
 
   private constructor(
     private readonly database: Database,
-    private readonly filename: string | null
+    private readonly filename: string | null,
+    private readonly fileLock: DatabaseFileLock | null = null
   ) {
     this.initializeSchema();
   }
@@ -62,13 +88,24 @@ export class MonitorDatabase {
 
   static async open(filename: string): Promise<MonitorDatabase> {
     const SQL = await getSql();
-    const existing = fs.existsSync(filename) ? fs.readFileSync(filename) : undefined;
-    return new MonitorDatabase(new SQL.Database(existing), filename);
+    const resolvedFilename = path.resolve(filename);
+    const fileLock = acquireDatabaseFileLock(resolvedFilename);
+    try {
+      const existing = fs.existsSync(resolvedFilename) ? fs.readFileSync(resolvedFilename) : undefined;
+      return new MonitorDatabase(new SQL.Database(existing), resolvedFilename, fileLock);
+    } catch (error) {
+      releaseDatabaseFileLock(fileLock);
+      throw error;
+    }
   }
 
   close(): void {
-    this.persist();
-    this.database.close();
+    try {
+      this.persist();
+      this.database.close();
+    } finally {
+      if (this.fileLock) releaseDatabaseFileLock(this.fileLock);
+    }
   }
 
   runInPersistenceBatch<T>(action: () => T): T {
@@ -409,12 +446,12 @@ export class MonitorDatabase {
   insertSolverJob(job: SolverJob): void {
     this.database.run(
       `INSERT INTO solver_jobs (
-        id, server_id, range_path, range_name, dataset_name, scenario, repo_id,
+        id, server_id, range_path, range_name, dataset_name, scenario, setting_json, repo_id,
         settings_json, command_text, solver_range_text, status, queue_mode,
         confirm_unstudied, tmux_session, remote_range_path, remote_result_path,
         parallel_run_id, parallel_slice_id, assigned_indices_json, source_type, pipeline_snapshot_id,
         created_at, updated_at, started_at, finished_at, last_error
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         job.id,
         job.serverId,
@@ -422,6 +459,7 @@ export class MonitorDatabase {
         job.rangeName,
         job.datasetName,
         job.scenario,
+        JSON.stringify(job.setting),
         job.repoId,
         JSON.stringify(job.settings),
         job.command,
@@ -569,10 +607,10 @@ export class MonitorDatabase {
   insertParallelSolverRun(run: ParallelSolverRun): void {
     this.database.run(
       `INSERT INTO parallel_solver_runs (
-        id, source_type, range_path, range_name, dataset_name, scenario, repo_id,
+        id, source_type, range_path, range_name, dataset_name, scenario, setting_json, repo_id,
         settings_json, solver_range_text, status, report_cleared, server_ids_json, auto_include_new_servers, server_scope, total_indices_json,
         missing_indices_json, queue_order, created_at, updated_at, started_at, finished_at, last_error
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         run.id,
         run.sourceType,
@@ -580,6 +618,7 @@ export class MonitorDatabase {
         run.rangeName,
         run.datasetName,
         run.scenario,
+        JSON.stringify(run.setting),
         run.repoId,
         JSON.stringify(run.settings),
         run.solverRangeText,
@@ -603,17 +642,22 @@ export class MonitorDatabase {
 
   updateParallelSolverRun(
     id: string,
-    patch: Partial<Pick<ParallelSolverRun, "status" | "startedAt" | "finishedAt" | "lastError" | "updatedAt">>
+    patch: Partial<Pick<
+      ParallelSolverRun,
+      "status" | "totalIndices" | "missingIndices" | "startedAt" | "finishedAt" | "lastError" | "updatedAt"
+    >>
   ): ParallelSolverRun {
     const current = this.getParallelSolverRun(id);
     if (!current) throw new Error(`Parallel solver run ${id} not found`);
     const updatedAt = patch.updatedAt ?? new Date().toISOString();
     this.database.run(
       `UPDATE parallel_solver_runs
-       SET status = ?, started_at = ?, finished_at = ?, last_error = ?, updated_at = ?
+       SET status = ?, total_indices_json = ?, missing_indices_json = ?, started_at = ?, finished_at = ?, last_error = ?, updated_at = ?
        WHERE id = ?`,
       [
         patch.status ?? current.status,
+        patch.totalIndices !== undefined ? JSON.stringify(patch.totalIndices) : JSON.stringify(current.totalIndices),
+        patch.missingIndices !== undefined ? JSON.stringify(patch.missingIndices) : JSON.stringify(current.missingIndices),
         patch.startedAt !== undefined ? patch.startedAt : current.startedAt,
         patch.finishedAt !== undefined ? patch.finishedAt : current.finishedAt,
         patch.lastError !== undefined ? patch.lastError : current.lastError,
@@ -657,20 +701,28 @@ export class MonitorDatabase {
 
   updateParallelSolverSlice(
     id: string,
-    patch: Partial<Pick<ParallelSolverSlice, "serverId" | "candidateServerIds" | "status" | "jobId" | "completedCount" | "failedCount" | "startedAt" | "finishedAt" | "lastError" | "updatedAt">>
+    patch: Partial<Pick<
+      ParallelSolverSlice,
+      "serverId" | "candidateServerIds" | "jobId" | "rangeExpr" | "assignedIndices" | "assignedBoardNames" |
+      "status" | "completedCount" | "failedCount" | "startedAt" | "finishedAt" | "lastError" | "updatedAt"
+    >>
   ): ParallelSolverSlice {
     const current = this.getParallelSolverSlice(id);
     if (!current) throw new Error(`Parallel solver slice ${id} not found`);
     const updatedAt = patch.updatedAt ?? new Date().toISOString();
     this.database.run(
       `UPDATE parallel_solver_slices
-       SET server_id = ?, candidate_server_ids_json = ?, status = ?, job_id = ?, completed_count = ?, failed_count = ?, started_at = ?, finished_at = ?, last_error = ?, updated_at = ?
+       SET server_id = ?, candidate_server_ids_json = ?, job_id = ?, range_expr = ?, assigned_indices_json = ?, assigned_board_names_json = ?,
+           status = ?, completed_count = ?, failed_count = ?, started_at = ?, finished_at = ?, last_error = ?, updated_at = ?
        WHERE id = ?`,
       [
         patch.serverId !== undefined ? patch.serverId : current.serverId,
         patch.candidateServerIds !== undefined ? JSON.stringify(patch.candidateServerIds) : JSON.stringify(current.candidateServerIds),
-        patch.status ?? current.status,
         patch.jobId !== undefined ? patch.jobId : current.jobId,
+        patch.rangeExpr !== undefined ? patch.rangeExpr : current.rangeExpr,
+        patch.assignedIndices !== undefined ? JSON.stringify(patch.assignedIndices) : JSON.stringify(current.assignedIndices),
+        patch.assignedBoardNames !== undefined ? JSON.stringify(patch.assignedBoardNames) : JSON.stringify(current.assignedBoardNames),
+        patch.status ?? current.status,
         patch.completedCount !== undefined ? patch.completedCount : current.completedCount,
         patch.failedCount !== undefined ? patch.failedCount : current.failedCount,
         patch.startedAt !== undefined ? patch.startedAt : current.startedAt,
@@ -684,6 +736,11 @@ export class MonitorDatabase {
     const updated = this.getParallelSolverSlice(id);
     if (!updated) throw new Error(`Parallel solver slice ${id} not found`);
     return updated;
+  }
+
+  deleteParallelSolverSlice(id: string): void {
+    this.database.run("DELETE FROM parallel_solver_slices WHERE id = ?", [id]);
+    this.persist();
   }
 
   getParallelSolverRuns(): ParallelSolverRun[] {
@@ -1290,6 +1347,7 @@ export class MonitorDatabase {
         range_name TEXT NOT NULL,
         dataset_name TEXT NOT NULL,
         scenario TEXT NOT NULL,
+        setting_json TEXT,
         repo_id TEXT NOT NULL,
         settings_json TEXT NOT NULL,
         command_text TEXT NOT NULL,
@@ -1367,6 +1425,7 @@ export class MonitorDatabase {
         range_name TEXT NOT NULL,
         dataset_name TEXT NOT NULL,
         scenario TEXT NOT NULL,
+        setting_json TEXT,
         repo_id TEXT NOT NULL,
         settings_json TEXT NOT NULL,
         solver_range_text TEXT NOT NULL,
@@ -1437,6 +1496,7 @@ export class MonitorDatabase {
     this.ensurePipelineDetailColumns();
     this.ensureSolverJobParallelColumns();
     this.ensureSolverJobPipelineSnapshotColumn();
+    this.ensureSolverSettingSnapshotColumns();
     this.ensureParallelSolverRunQueueOrderColumn();
     this.ensureParallelSolverRunReportClearedColumn();
     this.ensureParallelSolverRunAutoIncludeNewServersColumn();
@@ -1500,6 +1560,19 @@ export class MonitorDatabase {
     );
     if (!columns.some((column) => column.name === "pipeline_snapshot_id")) {
       this.database.run("ALTER TABLE solver_jobs ADD COLUMN pipeline_snapshot_id TEXT");
+    }
+  }
+
+  private ensureSolverSettingSnapshotColumns(): void {
+    for (const table of ["solver_jobs", "parallel_solver_runs"]) {
+      const columns = this.query<{ name: string }>(
+        `PRAGMA table_info(${table})`,
+        [],
+        (row) => ({ name: String(row.name) })
+      );
+      if (!columns.some((column) => column.name === "setting_json")) {
+        this.database.run(`ALTER TABLE ${table} ADD COLUMN setting_json TEXT`);
+      }
     }
   }
 
@@ -1680,6 +1753,85 @@ export class MonitorDatabase {
   }
 }
 
+function acquireDatabaseFileLock(databaseFilename: string): DatabaseFileLock {
+  const lockPath = `${databaseFilename}.lock`;
+  const token = randomUUID();
+  const candidatePath = `${lockPath}.${process.pid}.${token}.tmp`;
+  const owner: DatabaseFileLockOwner = {
+    pid: process.pid,
+    token,
+    startedAt: new Date().toISOString()
+  };
+  fs.mkdirSync(path.dirname(databaseFilename), { recursive: true });
+  fs.writeFileSync(candidatePath, `${JSON.stringify(owner)}\n`, { flag: "wx" });
+  try {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        // Creating a hard link publishes a fully written lock atomically. This
+        // prevents another process from mistaking a briefly empty lock for a
+        // stale one while this process is starting.
+        fs.linkSync(candidatePath, lockPath);
+        ownedDatabaseFileLocks.set(lockPath, token);
+        return { path: lockPath, token };
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        const existingOwner = readDatabaseFileLockOwner(lockPath);
+        if (existingOwner && processIsAlive(existingOwner.pid)) {
+          throw new Error(
+            `Monitor database ${databaseFilename} is already in use by process ${existingOwner.pid} ` +
+            `(started ${existingOwner.startedAt}). Stop the other Server Monitor instance before starting another one.`
+          );
+        }
+        fs.rmSync(lockPath, { force: true });
+      }
+    }
+  } finally {
+    fs.rmSync(candidatePath, { force: true });
+  }
+  throw new Error(`Could not acquire the single-writer lock for monitor database ${databaseFilename}.`);
+}
+
+function releaseDatabaseFileLock(lock: DatabaseFileLock): void {
+  try {
+    const owner = readDatabaseFileLockOwner(lock.path);
+    if (owner?.token === lock.token) fs.rmSync(lock.path, { force: true });
+  } finally {
+    if (ownedDatabaseFileLocks.get(lock.path) === lock.token) {
+      ownedDatabaseFileLocks.delete(lock.path);
+    }
+  }
+}
+
+function readDatabaseFileLockOwner(lockPath: string): DatabaseFileLockOwner | null {
+  try {
+    const value = JSON.parse(fs.readFileSync(lockPath, "utf8")) as Partial<DatabaseFileLockOwner>;
+    if (
+      !Number.isInteger(value.pid) ||
+      Number(value.pid) <= 0 ||
+      typeof value.token !== "string" ||
+      typeof value.startedAt !== "string"
+    ) {
+      return null;
+    }
+    return {
+      pid: Number(value.pid),
+      token: value.token,
+      startedAt: value.startedAt
+    };
+  } catch {
+    return null;
+  }
+}
+
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
 function mapServerConfig(row: Record<string, SqlValue>): ServerConfig {
   const server: ServerConfig = {
     id: String(row.id),
@@ -1704,13 +1856,17 @@ function mapServerConfig(row: Record<string, SqlValue>): ServerConfig {
 }
 
 function mapSolverJob(row: Record<string, SqlValue>, pipeline: PipelineStatusSnapshot | null): SolverJob {
+  const legacyScenario = String(row.scenario);
+  const setting = parseSolverSettingSnapshot(row.setting_json, legacyScenario);
   return {
     id: String(row.id),
     serverId: String(row.server_id),
     rangePath: String(row.range_path),
     rangeName: String(row.range_name),
     datasetName: String(row.dataset_name),
-    scenario: String(row.scenario) as SolverJob["scenario"],
+    settingId: setting.id,
+    setting,
+    scenario: setting.id,
     repoId: String(row.repo_id),
     settings: parseSolverJobSettings(row.settings_json),
     command: redactSensitiveCommand(String(row.command_text)),
@@ -1804,6 +1960,8 @@ function mapParallelSolverRun(row: Record<string, SqlValue>, slices: ParallelSol
   const queuedBoards = slices
     .filter((slice) => slice.status === "queued")
     .reduce((sum, slice) => sum + slice.assignedIndices.length, 0);
+  const legacyScenario = String(row.scenario);
+  const setting = parseSolverSettingSnapshot(row.setting_json, legacyScenario);
   return {
     id: String(row.id),
     sourceType: row.source_type === "failure_pool" ? "failure_pool" : "parallel",
@@ -1811,7 +1969,9 @@ function mapParallelSolverRun(row: Record<string, SqlValue>, slices: ParallelSol
     rangeName: String(row.range_name),
     datasetName: String(row.dataset_name),
     repoId: String(row.repo_id),
-    scenario: String(row.scenario),
+    settingId: setting.id,
+    setting,
+    scenario: setting.id,
     settings: parseSolverJobSettings(row.settings_json),
     solverRangeText: String(row.solver_range_text),
     status: String(row.status) as ParallelSolverRunStatus,
@@ -1837,6 +1997,52 @@ function mapParallelSolverRun(row: Record<string, SqlValue>, slices: ParallelSol
       successRate: totalBoards > 0 ? completedBoards / totalBoards : 1,
       durationSeconds: durationSeconds(startedAt, finishedAt)
     }
+  };
+}
+
+function parseSolverSettingSnapshot(value: SqlValue, legacyScenario: string): SolverSettingLibraryItem {
+  if (typeof value === "string" && value.trim()) {
+    try {
+      const parsed = JSON.parse(value) as Partial<SolverSettingLibraryItem>;
+      if (
+        typeof parsed.id === "string" && parsed.id.trim() &&
+        typeof parsed.label === "string" && parsed.label.trim() &&
+        typeof parsed.configTemplate === "string" && parsed.configTemplate.trim() &&
+        typeof parsed.pot === "number" && Number.isFinite(parsed.pot) &&
+        typeof parsed.effectiveStack === "number" && Number.isFinite(parsed.effectiveStack)
+      ) {
+        return {
+          id: parsed.id,
+          label: parsed.label,
+          rangeFolderPaths: Array.isArray(parsed.rangeFolderPaths)
+            ? parsed.rangeFolderPaths.filter((path): path is string => typeof path === "string")
+            : typeof parsed.rangeSubdir === "string" && parsed.rangeSubdir.trim()
+              ? [parsed.rangeSubdir]
+              : [],
+          rangeSubdir: typeof parsed.rangeSubdir === "string" ? parsed.rangeSubdir : "",
+          configTemplate: parsed.configTemplate,
+          pot: parsed.pot,
+          effectiveStack: parsed.effectiveStack,
+          parameters: parsed.parameters && Array.isArray(parsed.parameters.betSizeRules)
+            ? parsed.parameters
+            : solverSettingParametersFromTemplate(parsed.configTemplate),
+          ...(typeof parsed.description === "string" ? { description: parsed.description } : {})
+        };
+      }
+    } catch {
+      // Fall back to the legacy scenario column below.
+    }
+  }
+  const matched = DEFAULT_SOLVER_SETTING_LIBRARY.find((setting) => setting.id === legacyScenario);
+  if (matched) return { ...matched };
+  const fallback = DEFAULT_SOLVER_SETTING_LIBRARY[0]!;
+  return {
+    ...fallback,
+    id: legacyScenario,
+    label: legacyScenario,
+    rangeFolderPaths: [legacyScenario],
+    rangeSubdir: legacyScenario,
+    description: "Recovered from a legacy solver task without a Setting snapshot."
   };
 }
 

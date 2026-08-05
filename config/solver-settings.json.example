@@ -1,0 +1,1687 @@
+{
+  "version": 2,
+  "updatedAt": "2026-08-04T16:15:00.185Z",
+  "settings": [
+    {
+      "id": "sia-sod",
+      "label": "SIA vs SOD",
+      "rangeFolderPaths": [
+        "SIA"
+      ],
+      "rangeSubdir": "SIA",
+      "configTemplate": "set_pot {pot}\nset_effective_stack {effective_stack}\nset_board {board}\nset_range_oop {range_oop}\nset_range_ip {range_ip}\nset_bet_sizes oop,flop,bet,33\nset_bet_sizes oop,flop,raise,50,100\nset_bet_sizes oop,flop,allin\nset_bet_sizes oop,turn,bet,25,50,75,150\nset_bet_sizes oop,turn,raise,150\nset_bet_sizes oop,turn,donk,33\nset_bet_sizes oop,turn,allin\nset_bet_sizes oop,river,bet,30,50,75,125,200\nset_bet_sizes oop,river,raise,75,175\nset_bet_sizes oop,river,donk,33\nset_bet_sizes oop,river,allin\nset_bet_sizes ip,flop,bet,30,50,70\nset_bet_sizes ip,flop,raise,50\nset_bet_sizes ip,flop,allin\nset_bet_sizes ip,turn,bet,50,80,150\nset_bet_sizes ip,turn,raise,75\nset_bet_sizes ip,turn,allin\nset_bet_sizes ip,river,bet,30,50,75,125,200\nset_bet_sizes ip,river,raise,75,175\nset_bet_sizes ip,river,allin\nset_allin_threshold 0.5\nset_raise_limit 3\nbuild_tree\n{estimate_memory_line}\nset_thread_num {thread_num}\nset_accuracy 1\nset_max_iteration 300\nset_print_interval 10\nset_use_isomorphism 1\nset_enable_range 1\nstart_solve\nset_dump_format {dump_format}\nset_dump_rounds 1\ndump_result {output_file}\n",
+      "pot": 5,
+      "effectiveStack": 98,
+      "parameters": {
+        "betSizeRules": [
+          {
+            "position": "oop",
+            "street": "flop",
+            "action": "bet",
+            "enabled": true,
+            "sizes": [
+              33
+            ]
+          },
+          {
+            "position": "oop",
+            "street": "flop",
+            "action": "raise",
+            "enabled": true,
+            "sizes": [
+              50,
+              100
+            ]
+          },
+          {
+            "position": "oop",
+            "street": "flop",
+            "action": "allin",
+            "enabled": true,
+            "sizes": []
+          },
+          {
+            "position": "oop",
+            "street": "turn",
+            "action": "bet",
+            "enabled": true,
+            "sizes": [
+              25,
+              50,
+              75,
+              150
+            ]
+          },
+          {
+            "position": "oop",
+            "street": "turn",
+            "action": "raise",
+            "enabled": true,
+            "sizes": [
+              150
+            ]
+          },
+          {
+            "position": "oop",
+            "street": "turn",
+            "action": "donk",
+            "enabled": true,
+            "sizes": [
+              33
+            ]
+          },
+          {
+            "position": "oop",
+            "street": "turn",
+            "action": "allin",
+            "enabled": true,
+            "sizes": []
+          },
+          {
+            "position": "oop",
+            "street": "river",
+            "action": "bet",
+            "enabled": true,
+            "sizes": [
+              30,
+              50,
+              75,
+              125,
+              200
+            ]
+          },
+          {
+            "position": "oop",
+            "street": "river",
+            "action": "raise",
+            "enabled": true,
+            "sizes": [
+              75,
+              175
+            ]
+          },
+          {
+            "position": "oop",
+            "street": "river",
+            "action": "donk",
+            "enabled": true,
+            "sizes": [
+              33
+            ]
+          },
+          {
+            "position": "oop",
+            "street": "river",
+            "action": "allin",
+            "enabled": true,
+            "sizes": []
+          },
+          {
+            "position": "ip",
+            "street": "flop",
+            "action": "bet",
+            "enabled": true,
+            "sizes": [
+              30,
+              50,
+              70
+            ]
+          },
+          {
+            "position": "ip",
+            "street": "flop",
+            "action": "raise",
+            "enabled": true,
+            "sizes": [
+              50
+            ]
+          },
+          {
+            "position": "ip",
+            "street": "flop",
+            "action": "allin",
+            "enabled": true,
+            "sizes": []
+          },
+          {
+            "position": "ip",
+            "street": "turn",
+            "action": "bet",
+            "enabled": true,
+            "sizes": [
+              50,
+              80,
+              150
+            ]
+          },
+          {
+            "position": "ip",
+            "street": "turn",
+            "action": "raise",
+            "enabled": true,
+            "sizes": [
+              75
+            ]
+          },
+          {
+            "position": "ip",
+            "street": "turn",
+            "action": "allin",
+            "enabled": true,
+            "sizes": []
+          },
+          {
+            "position": "ip",
+            "street": "river",
+            "action": "bet",
+            "enabled": true,
+            "sizes": [
+              30,
+              50,
+              75,
+              125,
+              200
+            ]
+          },
+          {
+            "position": "ip",
+            "street": "river",
+            "action": "raise",
+            "enabled": true,
+            "sizes": [
+              75,
+              175
+            ]
+          },
+          {
+            "position": "ip",
+            "street": "river",
+            "action": "allin",
+            "enabled": true,
+            "sizes": []
+          }
+        ],
+        "allinThreshold": 0.5,
+        "raiseLimit": 3,
+        "accuracy": 1,
+        "maxIteration": 300,
+        "printInterval": 10,
+        "useIsomorphism": true,
+        "enableRange": true
+      },
+      "description": "Default single-raised SIA/SOD setting."
+    },
+    {
+      "id": "sia-sod-open2",
+      "label": "SIA vs SOD Open 2",
+      "rangeFolderPaths": [
+        "SOD/2BB"
+      ],
+      "rangeSubdir": "SOD/2BB",
+      "configTemplate": "set_pot {pot}\nset_effective_stack {effective_stack}\nset_board {board}\nset_range_oop {range_oop}\nset_range_ip {range_ip}\nset_bet_sizes oop,flop,bet,33\nset_bet_sizes oop,flop,raise,50,100\nset_bet_sizes oop,flop,allin\nset_bet_sizes oop,turn,bet,25,50,75,150\nset_bet_sizes oop,turn,raise,150\nset_bet_sizes oop,turn,donk,33\nset_bet_sizes oop,turn,allin\nset_bet_sizes oop,river,bet,30,50,75,125,200\nset_bet_sizes oop,river,raise,75,175\nset_bet_sizes oop,river,donk,33\nset_bet_sizes oop,river,allin\nset_bet_sizes ip,flop,bet,30,50,70\nset_bet_sizes ip,flop,raise,50\nset_bet_sizes ip,flop,allin\nset_bet_sizes ip,turn,bet,50,80,150\nset_bet_sizes ip,turn,raise,75\nset_bet_sizes ip,turn,allin\nset_bet_sizes ip,river,bet,30,50,75,125,200\nset_bet_sizes ip,river,raise,75,175\nset_bet_sizes ip,river,allin\nset_allin_threshold 0.5\nset_raise_limit 3\nbuild_tree\n{estimate_memory_line}\nset_thread_num {thread_num}\nset_accuracy 1\nset_max_iteration 300\nset_print_interval 10\nset_use_isomorphism 1\nset_enable_range 1\nstart_solve\nset_dump_format {dump_format}\nset_dump_rounds 1\ndump_result {output_file}\n",
+      "pot": 4,
+      "effectiveStack": 98,
+      "parameters": {
+        "betSizeRules": [
+          {
+            "position": "oop",
+            "street": "flop",
+            "action": "bet",
+            "enabled": true,
+            "sizes": [
+              33
+            ]
+          },
+          {
+            "position": "oop",
+            "street": "flop",
+            "action": "raise",
+            "enabled": true,
+            "sizes": [
+              50,
+              100
+            ]
+          },
+          {
+            "position": "oop",
+            "street": "flop",
+            "action": "allin",
+            "enabled": true,
+            "sizes": []
+          },
+          {
+            "position": "oop",
+            "street": "turn",
+            "action": "bet",
+            "enabled": true,
+            "sizes": [
+              25,
+              50,
+              75,
+              150
+            ]
+          },
+          {
+            "position": "oop",
+            "street": "turn",
+            "action": "raise",
+            "enabled": true,
+            "sizes": [
+              150
+            ]
+          },
+          {
+            "position": "oop",
+            "street": "turn",
+            "action": "donk",
+            "enabled": true,
+            "sizes": [
+              33
+            ]
+          },
+          {
+            "position": "oop",
+            "street": "turn",
+            "action": "allin",
+            "enabled": true,
+            "sizes": []
+          },
+          {
+            "position": "oop",
+            "street": "river",
+            "action": "bet",
+            "enabled": true,
+            "sizes": [
+              30,
+              50,
+              75,
+              125,
+              200
+            ]
+          },
+          {
+            "position": "oop",
+            "street": "river",
+            "action": "raise",
+            "enabled": true,
+            "sizes": [
+              75,
+              175
+            ]
+          },
+          {
+            "position": "oop",
+            "street": "river",
+            "action": "donk",
+            "enabled": true,
+            "sizes": [
+              33
+            ]
+          },
+          {
+            "position": "oop",
+            "street": "river",
+            "action": "allin",
+            "enabled": true,
+            "sizes": []
+          },
+          {
+            "position": "ip",
+            "street": "flop",
+            "action": "bet",
+            "enabled": true,
+            "sizes": [
+              30,
+              50,
+              70
+            ]
+          },
+          {
+            "position": "ip",
+            "street": "flop",
+            "action": "raise",
+            "enabled": true,
+            "sizes": [
+              50
+            ]
+          },
+          {
+            "position": "ip",
+            "street": "flop",
+            "action": "allin",
+            "enabled": true,
+            "sizes": []
+          },
+          {
+            "position": "ip",
+            "street": "turn",
+            "action": "bet",
+            "enabled": true,
+            "sizes": [
+              50,
+              80,
+              150
+            ]
+          },
+          {
+            "position": "ip",
+            "street": "turn",
+            "action": "raise",
+            "enabled": true,
+            "sizes": [
+              75
+            ]
+          },
+          {
+            "position": "ip",
+            "street": "turn",
+            "action": "allin",
+            "enabled": true,
+            "sizes": []
+          },
+          {
+            "position": "ip",
+            "street": "river",
+            "action": "bet",
+            "enabled": true,
+            "sizes": [
+              30,
+              50,
+              75,
+              125,
+              200
+            ]
+          },
+          {
+            "position": "ip",
+            "street": "river",
+            "action": "raise",
+            "enabled": true,
+            "sizes": [
+              75,
+              175
+            ]
+          },
+          {
+            "position": "ip",
+            "street": "river",
+            "action": "allin",
+            "enabled": true,
+            "sizes": []
+          }
+        ],
+        "allinThreshold": 0.5,
+        "raiseLimit": 3,
+        "accuracy": 1,
+        "maxIteration": 300,
+        "printInterval": 10,
+        "useIsomorphism": true,
+        "enableRange": true
+      },
+      "description": "SIA/SOD open-size setting using open2 defaults."
+    },
+    {
+      "id": "sia-sod-open2.5",
+      "label": "SIA vs SOD Open 2.5",
+      "rangeFolderPaths": [
+        "SOD/2.5BB"
+      ],
+      "rangeSubdir": "SOD/2.5BB",
+      "configTemplate": "set_pot {pot}\nset_effective_stack {effective_stack}\nset_board {board}\nset_range_oop {range_oop}\nset_range_ip {range_ip}\nset_bet_sizes oop,flop,bet,33\nset_bet_sizes oop,flop,raise,50,100\nset_bet_sizes oop,flop,allin\nset_bet_sizes oop,turn,bet,25,50,75,150\nset_bet_sizes oop,turn,raise,150\nset_bet_sizes oop,turn,donk,33\nset_bet_sizes oop,turn,allin\nset_bet_sizes oop,river,bet,30,50,75,125,200\nset_bet_sizes oop,river,raise,75,175\nset_bet_sizes oop,river,donk,33\nset_bet_sizes oop,river,allin\nset_bet_sizes ip,flop,bet,30,50,70\nset_bet_sizes ip,flop,raise,50\nset_bet_sizes ip,flop,allin\nset_bet_sizes ip,turn,bet,50,80,150\nset_bet_sizes ip,turn,raise,75\nset_bet_sizes ip,turn,allin\nset_bet_sizes ip,river,bet,30,50,75,125,200\nset_bet_sizes ip,river,raise,75,175\nset_bet_sizes ip,river,allin\nset_allin_threshold 0.5\nset_raise_limit 3\nbuild_tree\n{estimate_memory_line}\nset_thread_num {thread_num}\nset_accuracy 1\nset_max_iteration 300\nset_print_interval 10\nset_use_isomorphism 1\nset_enable_range 1\nstart_solve\nset_dump_format {dump_format}\nset_dump_rounds 1\ndump_result {output_file}\n",
+      "pot": 5,
+      "effectiveStack": 98,
+      "parameters": {
+        "betSizeRules": [
+          {
+            "position": "oop",
+            "street": "flop",
+            "action": "bet",
+            "enabled": true,
+            "sizes": [
+              33
+            ]
+          },
+          {
+            "position": "oop",
+            "street": "flop",
+            "action": "raise",
+            "enabled": true,
+            "sizes": [
+              50,
+              100
+            ]
+          },
+          {
+            "position": "oop",
+            "street": "flop",
+            "action": "allin",
+            "enabled": true,
+            "sizes": []
+          },
+          {
+            "position": "oop",
+            "street": "turn",
+            "action": "bet",
+            "enabled": true,
+            "sizes": [
+              25,
+              50,
+              75,
+              150
+            ]
+          },
+          {
+            "position": "oop",
+            "street": "turn",
+            "action": "raise",
+            "enabled": true,
+            "sizes": [
+              150
+            ]
+          },
+          {
+            "position": "oop",
+            "street": "turn",
+            "action": "donk",
+            "enabled": true,
+            "sizes": [
+              33
+            ]
+          },
+          {
+            "position": "oop",
+            "street": "turn",
+            "action": "allin",
+            "enabled": true,
+            "sizes": []
+          },
+          {
+            "position": "oop",
+            "street": "river",
+            "action": "bet",
+            "enabled": true,
+            "sizes": [
+              30,
+              50,
+              75,
+              125,
+              200
+            ]
+          },
+          {
+            "position": "oop",
+            "street": "river",
+            "action": "raise",
+            "enabled": true,
+            "sizes": [
+              75,
+              175
+            ]
+          },
+          {
+            "position": "oop",
+            "street": "river",
+            "action": "donk",
+            "enabled": true,
+            "sizes": [
+              33
+            ]
+          },
+          {
+            "position": "oop",
+            "street": "river",
+            "action": "allin",
+            "enabled": true,
+            "sizes": []
+          },
+          {
+            "position": "ip",
+            "street": "flop",
+            "action": "bet",
+            "enabled": true,
+            "sizes": [
+              30,
+              50,
+              70
+            ]
+          },
+          {
+            "position": "ip",
+            "street": "flop",
+            "action": "raise",
+            "enabled": true,
+            "sizes": [
+              50
+            ]
+          },
+          {
+            "position": "ip",
+            "street": "flop",
+            "action": "allin",
+            "enabled": true,
+            "sizes": []
+          },
+          {
+            "position": "ip",
+            "street": "turn",
+            "action": "bet",
+            "enabled": true,
+            "sizes": [
+              50,
+              80,
+              150
+            ]
+          },
+          {
+            "position": "ip",
+            "street": "turn",
+            "action": "raise",
+            "enabled": true,
+            "sizes": [
+              75
+            ]
+          },
+          {
+            "position": "ip",
+            "street": "turn",
+            "action": "allin",
+            "enabled": true,
+            "sizes": []
+          },
+          {
+            "position": "ip",
+            "street": "river",
+            "action": "bet",
+            "enabled": true,
+            "sizes": [
+              30,
+              50,
+              75,
+              125,
+              200
+            ]
+          },
+          {
+            "position": "ip",
+            "street": "river",
+            "action": "raise",
+            "enabled": true,
+            "sizes": [
+              75,
+              175
+            ]
+          },
+          {
+            "position": "ip",
+            "street": "river",
+            "action": "allin",
+            "enabled": true,
+            "sizes": []
+          }
+        ],
+        "allinThreshold": 0.5,
+        "raiseLimit": 3,
+        "accuracy": 1,
+        "maxIteration": 300,
+        "printInterval": 10,
+        "useIsomorphism": true,
+        "enableRange": true
+      },
+      "description": "SIA/SOD open-size setting using open2.5 defaults."
+    },
+    {
+      "id": "sia-sod-open3",
+      "label": "SIA vs SOD Open 3",
+      "rangeFolderPaths": [
+        "SOD/3BB"
+      ],
+      "rangeSubdir": "SOD/3BB",
+      "configTemplate": "set_pot {pot}\nset_effective_stack {effective_stack}\nset_board {board}\nset_range_oop {range_oop}\nset_range_ip {range_ip}\nset_bet_sizes oop,flop,bet,33\nset_bet_sizes oop,flop,raise,50,100\nset_bet_sizes oop,flop,allin\nset_bet_sizes oop,turn,bet,25,50,75,150\nset_bet_sizes oop,turn,raise,150\nset_bet_sizes oop,turn,donk,33\nset_bet_sizes oop,turn,allin\nset_bet_sizes oop,river,bet,30,50,75,125,200\nset_bet_sizes oop,river,raise,75,175\nset_bet_sizes oop,river,donk,33\nset_bet_sizes oop,river,allin\nset_bet_sizes ip,flop,bet,30,50,70\nset_bet_sizes ip,flop,raise,50\nset_bet_sizes ip,flop,allin\nset_bet_sizes ip,turn,bet,50,80,150\nset_bet_sizes ip,turn,raise,75\nset_bet_sizes ip,turn,allin\nset_bet_sizes ip,river,bet,30,50,75,125,200\nset_bet_sizes ip,river,raise,75,175\nset_bet_sizes ip,river,allin\nset_allin_threshold 0.5\nset_raise_limit 3\nbuild_tree\n{estimate_memory_line}\nset_thread_num {thread_num}\nset_accuracy 1\nset_max_iteration 300\nset_print_interval 10\nset_use_isomorphism 1\nset_enable_range 1\nstart_solve\nset_dump_format {dump_format}\nset_dump_rounds 1\ndump_result {output_file}\n",
+      "pot": 6,
+      "effectiveStack": 97,
+      "parameters": {
+        "betSizeRules": [
+          {
+            "position": "oop",
+            "street": "flop",
+            "action": "bet",
+            "enabled": true,
+            "sizes": [
+              33
+            ]
+          },
+          {
+            "position": "oop",
+            "street": "flop",
+            "action": "raise",
+            "enabled": true,
+            "sizes": [
+              50,
+              100
+            ]
+          },
+          {
+            "position": "oop",
+            "street": "flop",
+            "action": "allin",
+            "enabled": true,
+            "sizes": []
+          },
+          {
+            "position": "oop",
+            "street": "turn",
+            "action": "bet",
+            "enabled": true,
+            "sizes": [
+              25,
+              50,
+              75,
+              150
+            ]
+          },
+          {
+            "position": "oop",
+            "street": "turn",
+            "action": "raise",
+            "enabled": true,
+            "sizes": [
+              150
+            ]
+          },
+          {
+            "position": "oop",
+            "street": "turn",
+            "action": "donk",
+            "enabled": true,
+            "sizes": [
+              33
+            ]
+          },
+          {
+            "position": "oop",
+            "street": "turn",
+            "action": "allin",
+            "enabled": true,
+            "sizes": []
+          },
+          {
+            "position": "oop",
+            "street": "river",
+            "action": "bet",
+            "enabled": true,
+            "sizes": [
+              30,
+              50,
+              75,
+              125,
+              200
+            ]
+          },
+          {
+            "position": "oop",
+            "street": "river",
+            "action": "raise",
+            "enabled": true,
+            "sizes": [
+              75,
+              175
+            ]
+          },
+          {
+            "position": "oop",
+            "street": "river",
+            "action": "donk",
+            "enabled": true,
+            "sizes": [
+              33
+            ]
+          },
+          {
+            "position": "oop",
+            "street": "river",
+            "action": "allin",
+            "enabled": true,
+            "sizes": []
+          },
+          {
+            "position": "ip",
+            "street": "flop",
+            "action": "bet",
+            "enabled": true,
+            "sizes": [
+              30,
+              50,
+              70
+            ]
+          },
+          {
+            "position": "ip",
+            "street": "flop",
+            "action": "raise",
+            "enabled": true,
+            "sizes": [
+              50
+            ]
+          },
+          {
+            "position": "ip",
+            "street": "flop",
+            "action": "allin",
+            "enabled": true,
+            "sizes": []
+          },
+          {
+            "position": "ip",
+            "street": "turn",
+            "action": "bet",
+            "enabled": true,
+            "sizes": [
+              50,
+              80,
+              150
+            ]
+          },
+          {
+            "position": "ip",
+            "street": "turn",
+            "action": "raise",
+            "enabled": true,
+            "sizes": [
+              75
+            ]
+          },
+          {
+            "position": "ip",
+            "street": "turn",
+            "action": "allin",
+            "enabled": true,
+            "sizes": []
+          },
+          {
+            "position": "ip",
+            "street": "river",
+            "action": "bet",
+            "enabled": true,
+            "sizes": [
+              30,
+              50,
+              75,
+              125,
+              200
+            ]
+          },
+          {
+            "position": "ip",
+            "street": "river",
+            "action": "raise",
+            "enabled": true,
+            "sizes": [
+              75,
+              175
+            ]
+          },
+          {
+            "position": "ip",
+            "street": "river",
+            "action": "allin",
+            "enabled": true,
+            "sizes": []
+          }
+        ],
+        "allinThreshold": 0.5,
+        "raiseLimit": 3,
+        "accuracy": 1,
+        "maxIteration": 300,
+        "printInterval": 10,
+        "useIsomorphism": true,
+        "enableRange": true
+      },
+      "description": "SIA/SOD open-size setting using open3 defaults."
+    },
+    {
+      "id": "soa-sid",
+      "label": "SOA vs SID",
+      "rangeFolderPaths": [
+        "SID",
+        "SOA"
+      ],
+      "rangeSubdir": "SID",
+      "configTemplate": "set_pot {pot}\nset_effective_stack {effective_stack}\nset_board {board}\nset_range_oop {range_oop}\nset_range_ip {range_ip}\nset_bet_sizes oop,flop,bet,25,50,75\nset_bet_sizes oop,flop,raise,50,100\nset_bet_sizes oop,flop,allin\nset_bet_sizes oop,turn,bet,25,50,75,125\nset_bet_sizes oop,turn,raise,50,100\nset_bet_sizes oop,turn,donk,33\nset_bet_sizes oop,turn,allin\nset_bet_sizes oop,river,bet,25,50,75,125,200\nset_bet_sizes oop,river,raise,75,150\nset_bet_sizes oop,river,donk,33\nset_bet_sizes oop,river,allin\nset_bet_sizes ip,flop,bet,25,50,75\nset_bet_sizes ip,flop,raise,50,100\nset_bet_sizes ip,flop,allin\nset_bet_sizes ip,turn,bet,25,50,75,125\nset_bet_sizes ip,turn,raise,50,100\nset_bet_sizes ip,turn,allin\nset_bet_sizes ip,river,bet,25,50,75,125,200\nset_bet_sizes ip,river,raise,75,150\nset_bet_sizes ip,river,allin\nset_allin_threshold 0.67\nset_raise_limit 3\nbuild_tree\n{estimate_memory_line}\nset_thread_num {thread_num}\nset_accuracy 1\nset_max_iteration 300\nset_print_interval 10\nset_use_isomorphism 1\nset_enable_range 1\nstart_solve\nset_dump_format {dump_format}\nset_dump_rounds 1\ndump_result {output_file}\n",
+      "pot": 5,
+      "effectiveStack": 98,
+      "parameters": {
+        "betSizeRules": [
+          {
+            "position": "oop",
+            "street": "flop",
+            "action": "bet",
+            "enabled": true,
+            "sizes": [
+              25,
+              50,
+              75
+            ]
+          },
+          {
+            "position": "oop",
+            "street": "flop",
+            "action": "raise",
+            "enabled": true,
+            "sizes": [
+              50,
+              100
+            ]
+          },
+          {
+            "position": "oop",
+            "street": "flop",
+            "action": "allin",
+            "enabled": true,
+            "sizes": []
+          },
+          {
+            "position": "oop",
+            "street": "turn",
+            "action": "bet",
+            "enabled": true,
+            "sizes": [
+              25,
+              50,
+              75,
+              125
+            ]
+          },
+          {
+            "position": "oop",
+            "street": "turn",
+            "action": "raise",
+            "enabled": true,
+            "sizes": [
+              50,
+              100
+            ]
+          },
+          {
+            "position": "oop",
+            "street": "turn",
+            "action": "donk",
+            "enabled": true,
+            "sizes": [
+              33
+            ]
+          },
+          {
+            "position": "oop",
+            "street": "turn",
+            "action": "allin",
+            "enabled": true,
+            "sizes": []
+          },
+          {
+            "position": "oop",
+            "street": "river",
+            "action": "bet",
+            "enabled": true,
+            "sizes": [
+              25,
+              50,
+              75,
+              125,
+              200
+            ]
+          },
+          {
+            "position": "oop",
+            "street": "river",
+            "action": "raise",
+            "enabled": true,
+            "sizes": [
+              75,
+              150
+            ]
+          },
+          {
+            "position": "oop",
+            "street": "river",
+            "action": "donk",
+            "enabled": true,
+            "sizes": [
+              33
+            ]
+          },
+          {
+            "position": "oop",
+            "street": "river",
+            "action": "allin",
+            "enabled": true,
+            "sizes": []
+          },
+          {
+            "position": "ip",
+            "street": "flop",
+            "action": "bet",
+            "enabled": true,
+            "sizes": [
+              25,
+              50,
+              75
+            ]
+          },
+          {
+            "position": "ip",
+            "street": "flop",
+            "action": "raise",
+            "enabled": true,
+            "sizes": [
+              50,
+              100
+            ]
+          },
+          {
+            "position": "ip",
+            "street": "flop",
+            "action": "allin",
+            "enabled": true,
+            "sizes": []
+          },
+          {
+            "position": "ip",
+            "street": "turn",
+            "action": "bet",
+            "enabled": true,
+            "sizes": [
+              25,
+              50,
+              75,
+              125
+            ]
+          },
+          {
+            "position": "ip",
+            "street": "turn",
+            "action": "raise",
+            "enabled": true,
+            "sizes": [
+              50,
+              100
+            ]
+          },
+          {
+            "position": "ip",
+            "street": "turn",
+            "action": "allin",
+            "enabled": true,
+            "sizes": []
+          },
+          {
+            "position": "ip",
+            "street": "river",
+            "action": "bet",
+            "enabled": true,
+            "sizes": [
+              25,
+              50,
+              75,
+              125,
+              200
+            ]
+          },
+          {
+            "position": "ip",
+            "street": "river",
+            "action": "raise",
+            "enabled": true,
+            "sizes": [
+              75,
+              150
+            ]
+          },
+          {
+            "position": "ip",
+            "street": "river",
+            "action": "allin",
+            "enabled": true,
+            "sizes": []
+          }
+        ],
+        "allinThreshold": 0.67,
+        "raiseLimit": 3,
+        "accuracy": 1,
+        "maxIteration": 300,
+        "printInterval": 10,
+        "useIsomorphism": true,
+        "enableRange": true
+      },
+      "description": "SOA/SID setting."
+    },
+    {
+      "id": "3ia-3od",
+      "label": "3IA vs 3OD",
+      "rangeFolderPaths": [
+        "3IA -EP",
+        "3IA-BB",
+        "3OD - EP",
+        "3OD-BB-10bb"
+      ],
+      "rangeSubdir": "3IA -EP",
+      "configTemplate": "set_pot {pot}\nset_effective_stack {effective_stack}\nset_board {board}\nset_range_oop {range_oop}\nset_range_ip {range_ip}\nset_bet_sizes oop,flop,bet,33\nset_bet_sizes oop,flop,raise,35,55,75\nset_bet_sizes oop,flop,allin\nset_bet_sizes oop,turn,bet,33,50,75,150\nset_bet_sizes oop,turn,raise,33,50,75\nset_bet_sizes oop,turn,donk,33\nset_bet_sizes oop,turn,allin\nset_bet_sizes oop,river,bet,33,50,75,150\nset_bet_sizes oop,river,raise,33,50,75\nset_bet_sizes oop,river,donk,33\nset_bet_sizes oop,river,allin\nset_bet_sizes ip,flop,bet,20,33,50,75\nset_bet_sizes ip,flop,raise,35,75\nset_bet_sizes ip,flop,allin\nset_bet_sizes ip,turn,bet,33,50,75,125\nset_bet_sizes ip,turn,raise,33,50,75\nset_bet_sizes ip,turn,allin\nset_bet_sizes ip,river,bet,33,50,75,125\nset_bet_sizes ip,river,raise,33,50,75\nset_bet_sizes ip,river,allin\nset_allin_threshold 0.67\nset_raise_limit 3\nbuild_tree\n{estimate_memory_line}\nset_thread_num {thread_num}\nset_accuracy 1\nset_max_iteration 300\nset_print_interval 10\nset_use_isomorphism 1\nset_enable_range 1\nstart_solve\nset_dump_format {dump_format}\nset_dump_rounds 1\ndump_result {output_file}\n",
+      "pot": 16,
+      "effectiveStack": 92,
+      "parameters": {
+        "betSizeRules": [
+          {
+            "position": "oop",
+            "street": "flop",
+            "action": "bet",
+            "enabled": true,
+            "sizes": [
+              33
+            ]
+          },
+          {
+            "position": "oop",
+            "street": "flop",
+            "action": "raise",
+            "enabled": true,
+            "sizes": [
+              35,
+              55,
+              75
+            ]
+          },
+          {
+            "position": "oop",
+            "street": "flop",
+            "action": "allin",
+            "enabled": true,
+            "sizes": []
+          },
+          {
+            "position": "oop",
+            "street": "turn",
+            "action": "bet",
+            "enabled": true,
+            "sizes": [
+              33,
+              50,
+              75,
+              150
+            ]
+          },
+          {
+            "position": "oop",
+            "street": "turn",
+            "action": "raise",
+            "enabled": true,
+            "sizes": [
+              33,
+              50,
+              75
+            ]
+          },
+          {
+            "position": "oop",
+            "street": "turn",
+            "action": "donk",
+            "enabled": true,
+            "sizes": [
+              33
+            ]
+          },
+          {
+            "position": "oop",
+            "street": "turn",
+            "action": "allin",
+            "enabled": true,
+            "sizes": []
+          },
+          {
+            "position": "oop",
+            "street": "river",
+            "action": "bet",
+            "enabled": true,
+            "sizes": [
+              33,
+              50,
+              75,
+              150
+            ]
+          },
+          {
+            "position": "oop",
+            "street": "river",
+            "action": "raise",
+            "enabled": true,
+            "sizes": [
+              33,
+              50,
+              75
+            ]
+          },
+          {
+            "position": "oop",
+            "street": "river",
+            "action": "donk",
+            "enabled": true,
+            "sizes": [
+              33
+            ]
+          },
+          {
+            "position": "oop",
+            "street": "river",
+            "action": "allin",
+            "enabled": true,
+            "sizes": []
+          },
+          {
+            "position": "ip",
+            "street": "flop",
+            "action": "bet",
+            "enabled": true,
+            "sizes": [
+              20,
+              33,
+              50,
+              75
+            ]
+          },
+          {
+            "position": "ip",
+            "street": "flop",
+            "action": "raise",
+            "enabled": true,
+            "sizes": [
+              35,
+              75
+            ]
+          },
+          {
+            "position": "ip",
+            "street": "flop",
+            "action": "allin",
+            "enabled": true,
+            "sizes": []
+          },
+          {
+            "position": "ip",
+            "street": "turn",
+            "action": "bet",
+            "enabled": true,
+            "sizes": [
+              33,
+              50,
+              75,
+              125
+            ]
+          },
+          {
+            "position": "ip",
+            "street": "turn",
+            "action": "raise",
+            "enabled": true,
+            "sizes": [
+              33,
+              50,
+              75
+            ]
+          },
+          {
+            "position": "ip",
+            "street": "turn",
+            "action": "allin",
+            "enabled": true,
+            "sizes": []
+          },
+          {
+            "position": "ip",
+            "street": "river",
+            "action": "bet",
+            "enabled": true,
+            "sizes": [
+              33,
+              50,
+              75,
+              125
+            ]
+          },
+          {
+            "position": "ip",
+            "street": "river",
+            "action": "raise",
+            "enabled": true,
+            "sizes": [
+              33,
+              50,
+              75
+            ]
+          },
+          {
+            "position": "ip",
+            "street": "river",
+            "action": "allin",
+            "enabled": true,
+            "sizes": []
+          }
+        ],
+        "allinThreshold": 0.67,
+        "raiseLimit": 3,
+        "accuracy": 1,
+        "maxIteration": 300,
+        "printInterval": 10,
+        "useIsomorphism": true,
+        "enableRange": true
+      },
+      "description": "3-bet 3IA/3OD setting."
+    },
+    {
+      "id": "1",
+      "label": "4BP-ALL",
+      "rangeFolderPaths": [
+        "4ID-21-BB"
+      ],
+      "rangeSubdir": "4ID-21-BB",
+      "configTemplate": "set_pot {pot}\nset_effective_stack {effective_stack}\nset_board {board}\nset_range_oop {range_oop}\nset_range_ip {range_ip}\nset_bet_sizes oop,flop,bet,10,25,50,75\nset_bet_sizes oop,flop,raise,33\nset_bet_sizes oop,flop,allin\nset_bet_sizes oop,turn,bet,10,25,50,75\nset_bet_sizes oop,turn,raise,33\nset_bet_sizes oop,turn,donk,25\nset_bet_sizes oop,turn,allin\nset_bet_sizes oop,river,bet,10,25,50,75\nset_bet_sizes oop,river,raise,33\nset_bet_sizes oop,river,donk,25\nset_bet_sizes oop,river,allin\nset_bet_sizes ip,flop,bet,25,50,75\nset_bet_sizes ip,flop,raise,33\nset_bet_sizes ip,flop,allin\nset_bet_sizes ip,turn,bet,25,50,75\nset_bet_sizes ip,turn,raise,33\nset_bet_sizes ip,turn,allin\nset_bet_sizes ip,river,bet,25,50,75\nset_bet_sizes ip,river,raise,33\nset_bet_sizes ip,river,allin\nset_allin_threshold 0.5\nset_raise_limit 3\nbuild_tree\n{estimate_memory_line}\nset_thread_num {thread_num}\nset_accuracy 1\nset_max_iteration 300\nset_print_interval 10\nset_use_isomorphism 1\nset_enable_range 1\nstart_solve\nset_dump_format {dump_format}\nset_dump_rounds 1\ndump_result {output_file}\n",
+      "pot": 45,
+      "effectiveStack": 90,
+      "parameters": {
+        "betSizeRules": [
+          {
+            "position": "oop",
+            "street": "flop",
+            "action": "bet",
+            "enabled": true,
+            "sizes": [
+              10,
+              25,
+              50,
+              75
+            ]
+          },
+          {
+            "position": "oop",
+            "street": "flop",
+            "action": "raise",
+            "enabled": true,
+            "sizes": [
+              33
+            ]
+          },
+          {
+            "position": "oop",
+            "street": "flop",
+            "action": "allin",
+            "enabled": true,
+            "sizes": []
+          },
+          {
+            "position": "oop",
+            "street": "turn",
+            "action": "bet",
+            "enabled": true,
+            "sizes": [
+              10,
+              25,
+              50,
+              75
+            ]
+          },
+          {
+            "position": "oop",
+            "street": "turn",
+            "action": "raise",
+            "enabled": true,
+            "sizes": [
+              33
+            ]
+          },
+          {
+            "position": "oop",
+            "street": "turn",
+            "action": "donk",
+            "enabled": true,
+            "sizes": [
+              25
+            ]
+          },
+          {
+            "position": "oop",
+            "street": "turn",
+            "action": "allin",
+            "enabled": true,
+            "sizes": []
+          },
+          {
+            "position": "oop",
+            "street": "river",
+            "action": "bet",
+            "enabled": true,
+            "sizes": [
+              10,
+              25,
+              50,
+              75
+            ]
+          },
+          {
+            "position": "oop",
+            "street": "river",
+            "action": "raise",
+            "enabled": true,
+            "sizes": [
+              33
+            ]
+          },
+          {
+            "position": "oop",
+            "street": "river",
+            "action": "donk",
+            "enabled": true,
+            "sizes": [
+              25
+            ]
+          },
+          {
+            "position": "oop",
+            "street": "river",
+            "action": "allin",
+            "enabled": true,
+            "sizes": []
+          },
+          {
+            "position": "ip",
+            "street": "flop",
+            "action": "bet",
+            "enabled": true,
+            "sizes": [
+              25,
+              50,
+              75
+            ]
+          },
+          {
+            "position": "ip",
+            "street": "flop",
+            "action": "raise",
+            "enabled": true,
+            "sizes": [
+              33
+            ]
+          },
+          {
+            "position": "ip",
+            "street": "flop",
+            "action": "allin",
+            "enabled": true,
+            "sizes": []
+          },
+          {
+            "position": "ip",
+            "street": "turn",
+            "action": "bet",
+            "enabled": true,
+            "sizes": [
+              25,
+              50,
+              75
+            ]
+          },
+          {
+            "position": "ip",
+            "street": "turn",
+            "action": "raise",
+            "enabled": true,
+            "sizes": [
+              33
+            ]
+          },
+          {
+            "position": "ip",
+            "street": "turn",
+            "action": "allin",
+            "enabled": true,
+            "sizes": []
+          },
+          {
+            "position": "ip",
+            "street": "river",
+            "action": "bet",
+            "enabled": true,
+            "sizes": [
+              25,
+              50,
+              75
+            ]
+          },
+          {
+            "position": "ip",
+            "street": "river",
+            "action": "raise",
+            "enabled": true,
+            "sizes": [
+              33
+            ]
+          },
+          {
+            "position": "ip",
+            "street": "river",
+            "action": "allin",
+            "enabled": true,
+            "sizes": []
+          }
+        ],
+        "allinThreshold": 0.5,
+        "raiseLimit": 3,
+        "accuracy": 1,
+        "maxIteration": 300,
+        "printInterval": 10,
+        "useIsomorphism": true,
+        "enableRange": true
+      }
+    },
+    {
+      "id": "2",
+      "label": "SOA EP",
+      "rangeFolderPaths": [
+        "SOA EP"
+      ],
+      "rangeSubdir": "SOA EP",
+      "configTemplate": "set_pot {pot}\nset_effective_stack {effective_stack}\nset_board {board}\nset_range_oop {range_oop}\nset_range_ip {range_ip}\nset_bet_sizes oop,flop,bet,33\nset_bet_sizes oop,flop,raise,75\nset_bet_sizes oop,flop,allin\nset_bet_sizes oop,turn,bet,25,50,75,150\nset_bet_sizes oop,turn,raise,150\nset_bet_sizes oop,turn,allin\nset_bet_sizes oop,river,bet,30,50,75,125,200\nset_bet_sizes oop,river,raise,75,175\nset_bet_sizes oop,river,allin\nset_bet_sizes ip,flop,bet,30,50,70\nset_bet_sizes ip,flop,raise,50\nset_bet_sizes ip,flop,allin\nset_bet_sizes ip,turn,bet,33,50,80,150\nset_bet_sizes ip,turn,raise,75\nset_bet_sizes ip,turn,allin\nset_bet_sizes ip,river,bet,30,50,75,125,200\nset_bet_sizes ip,river,raise,75\nset_bet_sizes ip,river,allin\nset_allin_threshold 0.5\nset_raise_limit 3\nbuild_tree\n{estimate_memory_line}\nset_thread_num {thread_num}\nset_accuracy 1\nset_max_iteration 300\nset_print_interval 10\nset_use_isomorphism 1\nset_enable_range 1\nstart_solve\nset_dump_format {dump_format}\nset_dump_rounds 1\ndump_result {output_file}\n",
+      "pot": 5,
+      "effectiveStack": 98,
+      "parameters": {
+        "betSizeRules": [
+          {
+            "position": "oop",
+            "street": "flop",
+            "action": "bet",
+            "enabled": true,
+            "sizes": [
+              33
+            ]
+          },
+          {
+            "position": "oop",
+            "street": "flop",
+            "action": "raise",
+            "enabled": true,
+            "sizes": [
+              75
+            ]
+          },
+          {
+            "position": "oop",
+            "street": "flop",
+            "action": "allin",
+            "enabled": true,
+            "sizes": []
+          },
+          {
+            "position": "oop",
+            "street": "turn",
+            "action": "bet",
+            "enabled": true,
+            "sizes": [
+              25,
+              50,
+              75,
+              150
+            ]
+          },
+          {
+            "position": "oop",
+            "street": "turn",
+            "action": "raise",
+            "enabled": true,
+            "sizes": [
+              150
+            ]
+          },
+          {
+            "position": "oop",
+            "street": "turn",
+            "action": "donk",
+            "enabled": false,
+            "sizes": []
+          },
+          {
+            "position": "oop",
+            "street": "turn",
+            "action": "allin",
+            "enabled": true,
+            "sizes": []
+          },
+          {
+            "position": "oop",
+            "street": "river",
+            "action": "bet",
+            "enabled": true,
+            "sizes": [
+              30,
+              50,
+              75,
+              125,
+              200
+            ]
+          },
+          {
+            "position": "oop",
+            "street": "river",
+            "action": "raise",
+            "enabled": true,
+            "sizes": [
+              75,
+              175
+            ]
+          },
+          {
+            "position": "oop",
+            "street": "river",
+            "action": "donk",
+            "enabled": false,
+            "sizes": []
+          },
+          {
+            "position": "oop",
+            "street": "river",
+            "action": "allin",
+            "enabled": true,
+            "sizes": []
+          },
+          {
+            "position": "ip",
+            "street": "flop",
+            "action": "bet",
+            "enabled": true,
+            "sizes": [
+              30,
+              50,
+              70
+            ]
+          },
+          {
+            "position": "ip",
+            "street": "flop",
+            "action": "raise",
+            "enabled": true,
+            "sizes": [
+              50
+            ]
+          },
+          {
+            "position": "ip",
+            "street": "flop",
+            "action": "allin",
+            "enabled": true,
+            "sizes": []
+          },
+          {
+            "position": "ip",
+            "street": "turn",
+            "action": "bet",
+            "enabled": true,
+            "sizes": [
+              33,
+              50,
+              80,
+              150
+            ]
+          },
+          {
+            "position": "ip",
+            "street": "turn",
+            "action": "raise",
+            "enabled": true,
+            "sizes": [
+              75
+            ]
+          },
+          {
+            "position": "ip",
+            "street": "turn",
+            "action": "allin",
+            "enabled": true,
+            "sizes": []
+          },
+          {
+            "position": "ip",
+            "street": "river",
+            "action": "bet",
+            "enabled": true,
+            "sizes": [
+              30,
+              50,
+              75,
+              125,
+              200
+            ]
+          },
+          {
+            "position": "ip",
+            "street": "river",
+            "action": "raise",
+            "enabled": true,
+            "sizes": [
+              75
+            ]
+          },
+          {
+            "position": "ip",
+            "street": "river",
+            "action": "allin",
+            "enabled": true,
+            "sizes": []
+          }
+        ],
+        "allinThreshold": 0.5,
+        "raiseLimit": 3,
+        "accuracy": 1,
+        "maxIteration": 300,
+        "printInterval": 10,
+        "useIsomorphism": true,
+        "enableRange": true
+      },
+      "description": "SOA EP"
+    }
+  ]
+}

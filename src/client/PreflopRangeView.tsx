@@ -3,6 +3,7 @@ import {
   ChevronLeft,
   ChevronDown,
   ChevronRight,
+  ChevronUp,
   ChevronsLeft,
   ChevronsRight,
   Check,
@@ -16,6 +17,7 @@ import {
   Lock,
   Pencil,
   Play,
+  Plus,
   RefreshCw,
   RotateCcw,
   Save,
@@ -51,7 +53,6 @@ import {
 } from "../shared/preflopRange";
 import {
   DEFAULT_SOLVER_JOB_SETTINGS,
-  DEFAULT_SOLVER_SCENARIO_LIBRARY,
   SOLVER_EXPORT_FORMATS,
   SOLVER_UPLOAD_FORMATS,
   type ParallelServerSelectionScope,
@@ -71,11 +72,25 @@ import {
   type SolverJobPreviewRequest,
   type SolverJobSettings,
   type SolverJobsResponse,
-  type SolverScenario,
-  type SolverScenarioLibraryItem,
-  type SolverScenarioLibraryResponse,
   type SolverUploadFormat
 } from "../shared/solverJobs";
+import {
+  DEFAULT_SOLVER_SETTING_LIBRARY as DEFAULT_SOLVER_SCENARIO_LIBRARY,
+  SOLVER_SETTING_ACTIONS,
+  SOLVER_SETTING_POSITIONS,
+  SOLVER_SETTING_STREETS,
+  buildSolverSettingConfigTemplate,
+  linkedSolverSettingsForRangePath,
+  normalizeSolverSettingRangeFolderPaths,
+  solverBetSizeRuleKey,
+  solverBetSizeRuleIsSupported,
+  solverRangePathIsInsideFolder,
+  solverSettingRangeFolderPaths,
+  type SolverBetSizeRule,
+  type SolverSettingId as SolverScenario,
+  type SolverSettingLibraryItem as SolverScenarioLibraryItem,
+  type SolverSettingLibraryResponse
+} from "../shared/solverSettings";
 import type {
   ServerOperation,
   ServerOperationsResponse,
@@ -94,6 +109,10 @@ import type {
   ServerRow,
   ServerTierUpdateResponse
 } from "../shared/types";
+import {
+  connectionDisplayStatus,
+  serverIsJobReady
+} from "../shared/serverReadiness";
 import { displayDatasetName } from "./datasetDisplay";
 
 type SelectedRangePath =
@@ -112,6 +131,11 @@ type DropTarget = {
   mode: "inside" | "before" | "after";
 };
 
+type RangeFolderLinkOption = {
+  path: string;
+  hasDirectCheckedFiles: boolean;
+};
+
 type PendingStatusChange = {
   path: string;
   name: string;
@@ -119,7 +143,18 @@ type PendingStatusChange = {
   to: PreflopReviewStatus;
 };
 
+type PendingRangeMutation =
+  | { action: "rename"; itemType: "folder" | "file"; path: string; nextName: string; nextPath: string }
+  | { action: "move"; itemType: "folder" | "file"; path: string; targetFolder: string; nextPath: string; orderedNames?: string[] };
+
+type RangeMutationResponse = {
+  ok: boolean;
+  path?: string;
+  settingLibrary?: (SolverSettingLibraryResponse & { changes?: Array<{ id: string; label: string }> }) | null;
+};
+
 type RangeStatusView = "labeling" | "already";
+export type RangeProgressView = "total" | "remote";
 type ParallelServerStatusTab = "all" | "available" | "unavailable";
 export type ParallelServerTierMode = ParallelServerSelectionScope;
 type ParallelHistoryFilter = "all" | "completed" | "completed_with_failures";
@@ -193,7 +228,24 @@ type RangeProgressRefreshSummary = {
 };
 
 const EXPANDED_FOLDERS_KEY = "preflop-range-expanded-folders";
+const RANGE_PROGRESS_VIEW_KEY = "preflop-range-progress-view";
+const PARALLEL_JOBS_CACHE_DB_NAME = "poker-server-monitor-ui-cache";
+const PARALLEL_JOBS_CACHE_STORE_NAME = "snapshots";
+const PARALLEL_JOBS_CACHE_KEY = "parallel-jobs";
+const PARALLEL_JOBS_CACHE_VERSION = 1;
+const PARALLEL_JOBS_CACHE_WRITE_INTERVAL_MS = 15_000;
 const DEFAULT_SELECTED_HAND = "AA";
+type ParallelJobsCacheRecord = {
+  version: number;
+  cachedAt: string;
+  snapshotAt: string | null;
+  response: ParallelSolverJobsResponse;
+};
+let parallelJobsMemoryCache: ParallelJobsCacheRecord | null = null;
+let pendingParallelJobsCacheWrite: ParallelJobsCacheRecord | null = null;
+let parallelJobsCacheWriteTimer: number | null = null;
+let parallelJobsCacheLastWriteAt = 0;
+let parallelJobsCachePersistedFingerprint = "";
 const REVIEW_STATUS_LABELS: Record<PreflopReviewStatus, string> = {
   under_review: "Under review",
   has_problem: "Has problem",
@@ -207,6 +259,8 @@ const RUN_STATUS_LABELS: Record<PreflopRunStatus, string> = {
 };
 
 export function PreflopRangeView({ onBack }: { onBack: () => void }) {
+  const initialParallelJobsCache = useRef(parallelJobsMemoryCache).current;
+  const [rangeLibraryExpanded, setRangeLibraryExpanded] = useState(true);
   const [tree, setTree] = useState<PreflopRangeTreeItem[]>([]);
   const [currentFolderPath, setCurrentFolderPath] = useState("");
   const [selectedPath, setSelectedPath] = useState<SelectedRangePath | null>(null);
@@ -222,6 +276,9 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
   const [renamingName, setRenamingName] = useState("");
   const [rangeManageMode, setRangeManageMode] = useState(false);
   const [rangeStatusView, setRangeStatusView] = useState<RangeStatusView>("labeling");
+  const [rangeProgressView, setRangeProgressView] = useState<RangeProgressView>(
+    () => readRangeProgressViewPreference()
+  );
   const [visibleReviewStatuses, setVisibleReviewStatuses] = useState<Set<PreflopReviewStatus>>(
     () => new Set(PREFLOP_REVIEW_STATUSES)
   );
@@ -229,6 +286,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
     () => new Set(PREFLOP_RUN_STATUSES)
   );
   const [deleteTarget, setDeleteTarget] = useState<SelectedRangePath | null>(null);
+  const [pendingRangeMutation, setPendingRangeMutation] = useState<PendingRangeMutation | null>(null);
   const [pendingStatusChange, setPendingStatusChange] = useState<PendingStatusChange | null>(null);
   const [approveAllPending, setApproveAllPending] = useState(false);
   const [rangeTextCopied, setRangeTextCopied] = useState(false);
@@ -241,8 +299,9 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
   const [servers, setServers] = useState<ServerRow[]>([]);
   const [jobs, setJobs] = useState<SolverJob[]>([]);
   const [jobEvents, setJobEvents] = useState<SolverJobEvent[]>([]);
-  const [parallelRuns, setParallelRuns] = useState<ParallelSolverRun[]>([]);
-  const [failurePool, setFailurePool] = useState<ParallelFailurePoolEntry[]>([]);
+  const [parallelRuns, setParallelRuns] = useState<ParallelSolverRun[]>(() => initialParallelJobsCache?.response.runs ?? []);
+  const [failurePool, setFailurePool] = useState<ParallelFailurePoolEntry[]>(() => initialParallelJobsCache?.response.failurePool ?? []);
+  const [parallelContextLoaded, setParallelContextLoaded] = useState(Boolean(initialParallelJobsCache));
   const [parallelPreview, setParallelPreview] = useState<ParallelSolverJobPreview | null>(null);
   const [selectedParallelServerIds, setSelectedParallelServerIds] = useState<string[]>([]);
   const [parallelChunkCount, setParallelChunkCount] = useState(1);
@@ -250,7 +309,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
   const [activeParallelRunId, setActiveParallelRunId] = useState<string | null>(null);
   const [parallelServerTab, setParallelServerTab] = useState<ParallelServerStatusTab>("all");
   const [parallelServerTierMode, setParallelServerTierMode] = useState<ParallelServerTierMode>("all");
-  const [activeSolverJobTab, setActiveSolverJobTab] = useState<"single" | "parallel" | "operations">("single");
+  const [activeSolverJobTab, setActiveSolverJobTab] = useState<"single" | "parallel" | "operations">("parallel");
   const [selectedServerId, setSelectedServerId] = useState("");
   const [serverOperations, setServerOperations] = useState<ServerOperation[]>([]);
   const [networkSyncConfigured, setNetworkSyncConfigured] = useState(false);
@@ -266,7 +325,12 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
   const [jobContextLoaded, setJobContextLoaded] = useState(false);
   const [jobRefreshActive, setJobRefreshActive] = useState(false);
   const [jobRefreshState, setJobRefreshState] = useState<RefreshState | null>(null);
+  const [jobStatusSnapshotAt, setJobStatusSnapshotAt] = useState<string | null>(
+    initialParallelJobsCache?.snapshotAt ?? initialParallelJobsCache?.cachedAt ?? null
+  );
   const jobRefreshGeneration = useRef(0);
+  const parallelContextLoadedRef = useRef(Boolean(initialParallelJobsCache));
+  const jobStatusSnapshotAtRef = useRef(jobStatusSnapshotAt);
   const [scenarioLibrary, setScenarioLibrary] = useState<SolverScenarioLibraryItem[]>(DEFAULT_SOLVER_SCENARIO_LIBRARY);
   const [scenarioLibraryUpdatedAt, setScenarioLibraryUpdatedAt] = useState<string | null>(null);
   const [selectedScenarioLibraryId, setSelectedScenarioLibraryId] = useState<string>(DEFAULT_SOLVER_SCENARIO_LIBRARY[0]?.id ?? "");
@@ -274,7 +338,6 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
   const [scenarioDraft, setScenarioDraft] = useState<SolverScenarioLibraryItem>(
     DEFAULT_SOLVER_SCENARIO_LIBRARY[0] ?? emptyScenarioLibraryItem()
   );
-  const [scenarioCopied, setScenarioCopied] = useState(false);
   const [pendingScenarioAction, setPendingScenarioAction] = useState<PendingScenarioLibraryAction | null>(null);
   const [pendingParallelReportsAction, setPendingParallelReportsAction] = useState<PendingParallelReportsAction | null>(null);
   const [pendingFailurePoolClearAction, setPendingFailurePoolClearAction] = useState<PendingFailurePoolClearAction | null>(null);
@@ -338,6 +401,13 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
   }, [loadTree]);
 
   const applyOverviewResponse = useCallback((overviewResponse: OverviewResponse) => {
+    const snapshotAt = overviewResponse.refresh.lastRun?.finishedAt ?? overviewResponse.generatedAt;
+    setJobStatusSnapshotAt(snapshotAt);
+    jobStatusSnapshotAtRef.current = snapshotAt;
+    if (parallelJobsMemoryCache) {
+      parallelJobsMemoryCache = { ...parallelJobsMemoryCache, snapshotAt };
+      scheduleParallelJobsCacheWrite(parallelJobsMemoryCache.response, snapshotAt);
+    }
     setServers(overviewResponse.servers);
     setJobContextLoaded(true);
     const targetServers = parallelServersForTier(overviewResponse.servers, parallelServerTierMode);
@@ -352,30 +422,51 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
     );
   }, [parallelChunkCountTouched, parallelServerTierMode]);
 
+  const applyParallelJobsResponse = useCallback((
+    response: ParallelSolverJobsResponse,
+    persist = true,
+    snapshotAt = jobStatusSnapshotAtRef.current
+  ) => {
+    setParallelRuns(response.runs);
+    setFailurePool(response.failurePool);
+    setParallelContextLoaded(true);
+    parallelContextLoadedRef.current = true;
+    if (snapshotAt) {
+      setJobStatusSnapshotAt(snapshotAt);
+      jobStatusSnapshotAtRef.current = snapshotAt;
+    }
+    parallelJobsMemoryCache = {
+      version: PARALLEL_JOBS_CACHE_VERSION,
+      cachedAt: new Date().toISOString(),
+      snapshotAt,
+      response
+    };
+    if (persist) scheduleParallelJobsCacheWrite(response, snapshotAt);
+  }, []);
+
   const loadJobContext = useCallback(async (options: { reconcileParallel?: boolean } = {}) => {
     setJobError(null);
     const parallelJobsPath = options.reconcileParallel ? "/api/parallel-jobs?reconcile=1" : "/api/parallel-jobs";
+    const overviewRequest = fetchPreflopJson<OverviewResponse>("/api/overview");
+    const jobsRequest = fetchPreflopJson<SolverJobsResponse>("/api/jobs");
+    const parallelRequest = fetchPreflopJson<ParallelSolverJobsResponse>(parallelJobsPath);
+    const operationsRequest = fetchPreflopJson<ServerOperationsResponse>("/api/server-operations");
+    void overviewRequest.then(applyOverviewResponse, () => undefined);
+    void jobsRequest.then((response) => {
+      setJobs(response.jobs);
+      setJobEvents(response.events);
+    }, () => undefined);
+    void parallelRequest.then((response) => applyParallelJobsResponse(response), () => undefined);
+    void operationsRequest.then((response) => {
+      setServerOperations(response.operations);
+      setNetworkSyncConfigured(Boolean(response.capabilities?.networkSyncConfigured));
+    }, () => undefined);
     const [overviewResult, jobsResult, parallelResult, operationsResult] = await Promise.allSettled([
-      fetchPreflopJson<OverviewResponse>("/api/overview"),
-      fetchPreflopJson<SolverJobsResponse>("/api/jobs"),
-      fetchPreflopJson<ParallelSolverJobsResponse>(parallelJobsPath),
-      fetchPreflopJson<ServerOperationsResponse>("/api/server-operations")
+      overviewRequest,
+      jobsRequest,
+      parallelRequest,
+      operationsRequest
     ] as const);
-
-    if (overviewResult.status === "fulfilled") applyOverviewResponse(overviewResult.value);
-    if (jobsResult.status === "fulfilled") {
-      setJobs(jobsResult.value.jobs);
-      setJobEvents(jobsResult.value.events);
-    }
-    if (parallelResult.status === "fulfilled") {
-      setParallelRuns(parallelResult.value.runs);
-      setFailurePool(parallelResult.value.failurePool);
-    }
-    if (operationsResult.status === "fulfilled") {
-      const operationsResponse = operationsResult.value;
-      setServerOperations(operationsResponse.operations);
-      setNetworkSyncConfigured(Boolean(operationsResponse.capabilities?.networkSyncConfigured));
-    }
 
     const failures = [
       ["Overview", overviewResult],
@@ -389,7 +480,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
     );
     if (messages.length > 0) setJobError(messages.join(" · "));
     return parallelResult.status === "fulfilled" ? parallelResult.value : null;
-  }, [applyOverviewResponse]);
+  }, [applyOverviewResponse, applyParallelJobsResponse]);
 
   const refreshJobContext = useCallback(() => {
     if (jobRefreshActive) return;
@@ -427,6 +518,19 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
   }, [jobRefreshActive, loadJobContext]);
 
   useEffect(() => {
+    let canceled = false;
+    if (parallelContextLoadedRef.current) return undefined;
+    void readParallelJobsCache().then((cached) => {
+      if (!canceled && cached && !parallelContextLoadedRef.current) {
+        applyParallelJobsResponse(cached.response, false, cached.snapshotAt ?? cached.cachedAt);
+      }
+    });
+    return () => {
+      canceled = true;
+    };
+  }, [applyParallelJobsResponse]);
+
+  useEffect(() => {
     void loadJobContext();
   }, [loadJobContext]);
 
@@ -440,13 +544,13 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
 
   const loadScenarioLibrary = useCallback(async () => {
     try {
-      const response = await fetchPreflopJson<SolverScenarioLibraryResponse>("/api/scenarios");
-      setScenarioLibrary(response.scenarios);
+      const response = await fetchPreflopJson<SolverSettingLibraryResponse>("/api/solver-settings");
+      setScenarioLibrary(response.settings);
       setScenarioLibraryUpdatedAt(response.updatedAt);
       setSelectedScenarioLibraryId((current) =>
-        current && response.scenarios.some((scenario) => scenario.id === current)
+        current && response.settings.some((scenario) => scenario.id === current)
           ? current
-          : response.scenarios[0]?.id ?? ""
+          : response.settings[0]?.id ?? ""
       );
     } catch (caught) {
       setJobError(caught instanceof Error ? caught.message : String(caught));
@@ -464,6 +568,10 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
       // ignore storage failures
     }
   }, [expandedFolders]);
+
+  useEffect(() => {
+    writeRangeProgressViewPreference(rangeProgressView);
+  }, [rangeProgressView]);
 
   useEffect(() => {
     setJobPreview(null);
@@ -512,6 +620,38 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
   const statusScopeCount = rangeStatusView === "labeling" ? countFiles(tree) : countApprovedFiles(tree);
   const selectedRangePathForJob = selectedPath?.type === "file" ? selectedPath.path : "";
   const selectedRangeNameForJob = selectedPath?.type === "file" ? displayRangeName(selectedPath.name) : "";
+  const rangeFolderOptions = useMemo(() => rangeFolderLinkOptionsFromTree(tree), [tree]);
+  const linkedJobSettings = useMemo(
+    () => selectedRangePathForJob
+      ? linkedSolverSettingsForRangePath(scenarioLibrary, selectedRangePathForJob)
+      : [],
+    [scenarioLibrary, selectedRangePathForJob]
+  );
+  const linkedJobSetting = linkedJobSettings.length === 1 ? linkedJobSettings[0]! : null;
+  const effectiveSelectedJobScenario = linkedJobSetting?.id ?? selectedJobScenario;
+  const pendingRangeMutationSourceSettings = pendingRangeMutation
+    ? settingsAffectedByRangePath(scenarioLibrary, pendingRangeMutation.path, pendingRangeMutation.itemType)
+    : [];
+  const pendingRangeMutationDestinationSettings = pendingRangeMutation
+    ? settingsAffectedByRangePath(scenarioLibrary, pendingRangeMutation.nextPath, pendingRangeMutation.itemType)
+    : [];
+  const pendingRangeMutationSettings = uniqueSettings([
+    ...pendingRangeMutationSourceSettings,
+    ...pendingRangeMutationDestinationSettings
+  ]);
+  const pendingDirectLinkChanges = pendingRangeMutation?.itemType === "folder"
+    ? scenarioLibrary.filter((setting) => solverSettingRangeFolderPaths(setting).some((folderPath) =>
+        solverRangePathIsInsideFolder(folderPath, pendingRangeMutation.path)
+      ))
+    : [];
+  const deleteTargetSettings = deleteTarget
+    ? settingsAffectedByRangePath(scenarioLibrary, deleteTarget.path, deleteTarget.type)
+    : [];
+  const deleteDirectLinkChanges = deleteTarget?.type === "folder"
+    ? scenarioLibrary.filter((setting) => solverSettingRangeFolderPaths(setting).some((folderPath) =>
+        solverRangePathIsInsideFolder(folderPath, deleteTarget.path)
+      ))
+    : [];
   const solverRangeText = useMemo(() => summary ? formatSolverRangeText(summary) : "", [summary]);
   const selectedScenarioLibraryItem = useMemo(
     () => scenarioLibrary.find((scenario) => scenario.id === selectedScenarioLibraryId) ?? scenarioLibrary[0] ?? null,
@@ -746,33 +886,16 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
       cancelRenaming();
       return;
     }
-    setError(null);
-    setSaving(true);
-    try {
-      const response = await fetchPreflopJson<{ path: string }>("/api/preflop-ranges/rename", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path: pathToRename, newName: normalizedName })
-      });
-      if (currentFolderPath === pathToRename || currentFolderPath.startsWith(`${pathToRename}/`)) {
-        setCurrentFolderPath(replacePathPrefix(currentFolderPath, pathToRename, response.path));
-      }
-      if (selectedPath?.path === pathToRename) {
-        setSelectedPath({ ...selectedPath, path: response.path, name: normalizedName });
-      } else if (selectedPath?.path.startsWith(`${pathToRename}/`)) {
-        setSelectedPath({
-          ...selectedPath,
-          path: replacePathPrefix(selectedPath.path, pathToRename, response.path)
-        });
-      }
-      setExpandedFolders((current) => renameExpandedFolderPaths(current, pathToRename, response.path));
-      cancelRenaming();
-      await loadTree();
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : String(caught));
-    } finally {
-      setSaving(false);
-    }
+    const parent = parentPath(pathToRename);
+    const nextPath = parent ? `${parent}/${normalizedName}` : normalizedName;
+    setPendingRangeMutation({
+      action: "rename",
+      itemType: isRangeFilePath(pathToRename) ? "file" : "folder",
+      path: pathToRename,
+      nextName: normalizedName,
+      nextPath
+    });
+    cancelRenaming();
   };
 
   const requestDeleteSelected = () => {
@@ -785,14 +908,72 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
     setDeleteTarget(target);
   };
 
+  const applyRangeMutationSettingLibrary = (response: RangeMutationResponse) => {
+    if (!response.settingLibrary) return;
+    setScenarioLibrary(response.settingLibrary.settings);
+    setScenarioLibraryUpdatedAt(response.settingLibrary.updatedAt);
+  };
+
+  const confirmPendingRangeMutation = async () => {
+    if (!pendingRangeMutation) return;
+    setError(null);
+    setSaving(true);
+    try {
+      const response = pendingRangeMutation.action === "rename"
+        ? await fetchPreflopJson<RangeMutationResponse>("/api/preflop-ranges/rename", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ path: pendingRangeMutation.path, newName: pendingRangeMutation.nextName })
+          })
+        : await fetchPreflopJson<RangeMutationResponse>("/api/preflop-ranges/move", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ path: pendingRangeMutation.path, targetFolder: pendingRangeMutation.targetFolder })
+          });
+      const nextPath = response.path;
+      if (!nextPath) throw new Error("Range operation did not return the new path.");
+      applyRangeMutationSettingLibrary(response);
+      if (currentFolderPath === pendingRangeMutation.path || currentFolderPath.startsWith(`${pendingRangeMutation.path}/`)) {
+        setCurrentFolderPath(replacePathPrefix(currentFolderPath, pendingRangeMutation.path, nextPath));
+      }
+      if (selectedPath?.path === pendingRangeMutation.path) {
+        setSelectedPath({ ...selectedPath, path: nextPath, name: pathBasename(nextPath) });
+      } else if (selectedPath?.path.startsWith(`${pendingRangeMutation.path}/`)) {
+        setSelectedPath({ ...selectedPath, path: replacePathPrefix(selectedPath.path, pendingRangeMutation.path, nextPath) });
+      }
+      if (pendingRangeMutation.itemType === "folder") {
+        setExpandedFolders((current) => renameExpandedFolderPaths(current, pendingRangeMutation.path, nextPath));
+      }
+      if (pendingRangeMutation.action === "move" && pendingRangeMutation.orderedNames) {
+        const previousName = pathBasename(pendingRangeMutation.path);
+        const nextName = pathBasename(nextPath);
+        await fetchPreflopJson<{ ok: boolean }>("/api/preflop-ranges/reorder", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            folder: pendingRangeMutation.targetFolder,
+            orderedNames: pendingRangeMutation.orderedNames.map((name) => name === previousName ? nextName : name)
+          })
+        });
+      }
+      setPendingRangeMutation(null);
+      await loadTree();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const confirmDeleteSelected = async () => {
     if (!deleteTarget || deleteTarget.path === "") return;
     setError(null);
     setSaving(true);
     try {
-      await fetchPreflopJson<{ ok: boolean }>(`/api/preflop-ranges/path?path=${encodeURIComponent(deleteTarget.path)}`, {
+      const response = await fetchPreflopJson<RangeMutationResponse>(`/api/preflop-ranges/path?path=${encodeURIComponent(deleteTarget.path)}`, {
         method: "DELETE"
       });
+      applyRangeMutationSettingLibrary(response);
       if (selectedPath && pathIsSameOrInside(selectedPath.path, deleteTarget.path)) {
         setSelectedPath(null);
         setSelectedFile(null);
@@ -865,37 +1046,42 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
     }
   };
 
-  const moveItem = async (path: string, targetFolder: string) => {
-    await fetchPreflopJson<{ path: string }>("/api/preflop-ranges/move", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ path, targetFolder })
+  const requestMoveItem = (item: DragItem, targetFolder: string, orderedNames?: string[]) => {
+    const nextPath = targetFolder ? `${targetFolder}/${item.name}` : item.name;
+    setPendingRangeMutation({
+      action: "move",
+      itemType: item.type,
+      path: item.path,
+      targetFolder,
+      nextPath,
+      ...(orderedNames ? { orderedNames } : {})
     });
   };
 
-  const reorderAround = async (target: PreflopRangeTreeItem, mode: "before" | "after") => {
-    if (!dragItem) return;
+  const reorderAround = async (target: PreflopRangeTreeItem, mode: "before" | "after"): Promise<boolean> => {
+    if (!dragItem) return false;
     const targetParent = currentFolderPath;
-    if (dragItem.parent !== targetParent) {
-      await moveItem(dragItem.path, targetParent);
-    }
     const names = currentFolderItems.map((item) => item.name).filter((name) => name !== dragItem.name);
     const targetIndex = names.indexOf(target.name);
-    if (targetIndex === -1) return;
+    if (targetIndex === -1) return false;
     names.splice(mode === "before" ? targetIndex : targetIndex + 1, 0, dragItem.name);
+    if (dragItem.parent !== targetParent) {
+      requestMoveItem(dragItem, targetParent, names);
+      return false;
+    }
     await fetchPreflopJson<{ ok: boolean }>("/api/preflop-ranges/reorder", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ folder: targetParent, orderedNames: names })
     });
+    return true;
   };
 
   const handleDropOnFolder = async (folderPath: string) => {
     if (!dragItem || dragItem.path === folderPath) return;
     setError(null);
     try {
-      await moveItem(dragItem.path, folderPath);
-      await loadTree();
+      requestMoveItem(dragItem, folderPath);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     } finally {
@@ -909,11 +1095,11 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
     setError(null);
     try {
       if (dropTarget.mode === "inside" && item.type === "folder") {
-        await moveItem(dragItem.path, item.path);
+        requestMoveItem(dragItem, item.path);
       } else if (dropTarget.mode === "before" || dropTarget.mode === "after") {
-        await reorderAround(item, dropTarget.mode);
+        const reordered = await reorderAround(item, dropTarget.mode);
+        if (reordered) await loadTree();
       }
-      await loadTree();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     } finally {
@@ -965,19 +1151,19 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
     }
   };
 
-  const solverJobRequest = (scenarioOverride = selectedJobScenario): SolverJobPreviewRequest | null => {
+  const solverJobRequest = (scenarioOverride = effectiveSelectedJobScenario): SolverJobPreviewRequest | null => {
     if (!selectedRangePathForJob || !selectedServerId) return null;
     return {
       serverId: selectedServerId,
       rangePath: selectedRangePathForJob,
-      scenario: scenarioOverride || undefined,
+      settingId: scenarioOverride || undefined,
       datasetName: jobDatasetNameTouched ? jobDatasetName.trim() || undefined : undefined,
       settings: jobSettings,
       confirmUnstudied
     };
   };
 
-  const parallelJobRequest = (scenarioOverride = selectedJobScenario): ParallelSolverJobPreviewRequest | null => {
+  const parallelJobRequest = (scenarioOverride = effectiveSelectedJobScenario): ParallelSolverJobPreviewRequest | null => {
     if (!selectedRangePathForJob || selectedParallelServerIds.length === 0) return null;
     const chunkCount = Math.max(
       1,
@@ -985,7 +1171,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
     );
     return {
       rangePath: selectedRangePathForJob,
-      scenario: scenarioOverride || undefined,
+      settingId: scenarioOverride || undefined,
       datasetName: jobDatasetNameTouched ? jobDatasetName.trim() || undefined : undefined,
       serverIds: selectedParallelServerIds,
       autoIncludeNewServers: parallelServerTierMode === "all",
@@ -1006,7 +1192,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
     return {
       serverId,
       rangePath: requestPayload.rangePath,
-      scenario: requestPayload.scenario,
+      settingId: requestPayload.settingId,
       datasetName: requestPayload.datasetName,
       settings: requestPayload.settings,
       confirmUnstudied: requestPayload.confirmUnstudied
@@ -1159,8 +1345,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ runIds })
       });
-      setParallelRuns(response.runs);
-      setFailurePool(response.failurePool);
+      applyParallelJobsResponse(response);
       return true;
     } catch (caught) {
       setJobError(caught instanceof Error ? caught.message : String(caught));
@@ -1213,8 +1398,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
       const response = await fetchPreflopJson<ParallelSolverJobsResponse>(`/api/parallel-jobs/${encodeURIComponent(runId)}`, {
         method: "DELETE"
       });
-      setParallelRuns(response.runs);
-      setFailurePool(response.failurePool);
+      applyParallelJobsResponse(response);
       setPendingParallelQueueDeleteAction(null);
       setActiveParallelRunId((current) => current === runId
         ? parallelQueueRuns(response.runs)[0]?.id ?? parallelHistoryRuns(response.runs)[0]?.id ?? null
@@ -1261,8 +1445,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
       const response = await fetchPreflopJson<ParallelSolverReportsClearResponse>("/api/parallel-jobs/reports", {
         method: "DELETE"
       });
-      setParallelRuns(response.runs);
-      setFailurePool(response.failurePool);
+      applyParallelJobsResponse(response);
       setPendingParallelReportsAction(null);
     } catch (caught) {
       setJobError(caught instanceof Error ? caught.message : String(caught));
@@ -1297,8 +1480,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
       const response = await fetchPreflopJson<ParallelFailurePoolClearResponse>(`/api/parallel-jobs/failure-pool?${query}`, {
         method: "DELETE"
       });
-      setParallelRuns(response.runs);
-      setFailurePool(response.failurePool);
+      applyParallelJobsResponse(response);
       setPendingFailurePoolClearAction(null);
     } catch (caught) {
       setJobError(caught instanceof Error ? caught.message : String(caught));
@@ -1351,11 +1533,24 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
     }
   };
 
-  const requestSyncOperations = () => {
+  const requestSyncOperations = (serverIds?: string[]) => {
+    const requestedServerIds = serverIds
+      ? [...new Set(serverIds.map((serverId) => serverId.trim()).filter(Boolean))]
+      : null;
     const targetServers = servers
       .slice()
       .sort(compareServersByNaturalId)
-      .filter((server) => server.enabled && serverIsOnlineForJob(server));
+      .filter((server) => (
+        server.enabled &&
+        serverIsOnlineForJob(server) &&
+        (!requestedServerIds || requestedServerIds.includes(server.id))
+      ));
+    if (requestedServerIds && targetServers.length !== requestedServerIds.length) {
+      const targetServerIds = new Set(targetServers.map((server) => server.id));
+      const unavailableServerIds = requestedServerIds.filter((serverId) => !targetServerIds.has(serverId));
+      setJobError(`Server ${unavailableServerIds.join(", ")} ${unavailableServerIds.length === 1 ? "is" : "are"} not online and enabled.`);
+      return;
+    }
     if (targetServers.length === 0) {
       setJobError("No online enabled servers are available for sync.");
       return;
@@ -1403,11 +1598,24 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
     });
   };
 
-  const requestNetworkCheckOperations = () => {
+  const requestNetworkCheckOperations = (serverIds?: string[]) => {
+    const requestedServerIds = serverIds
+      ? [...new Set(serverIds.map((serverId) => serverId.trim()).filter(Boolean))]
+      : null;
     const targetServers = servers
       .slice()
       .sort(compareServersByNaturalId)
-      .filter((server) => server.enabled && serverIsOnlineForJob(server));
+      .filter((server) => (
+        server.enabled &&
+        serverIsOnlineForJob(server) &&
+        (!requestedServerIds || requestedServerIds.includes(server.id))
+      ));
+    if (requestedServerIds && targetServers.length !== requestedServerIds.length) {
+      const targetServerIds = new Set(targetServers.map((server) => server.id));
+      const unavailableServerIds = requestedServerIds.filter((serverId) => !targetServerIds.has(serverId));
+      setJobError(`Server ${unavailableServerIds.join(", ")} ${unavailableServerIds.length === 1 ? "is" : "are"} not online and enabled.`);
+      return;
+    }
     if (targetServers.length === 0) {
       setJobError("No online enabled servers are available for network checks.");
       return;
@@ -1420,19 +1628,33 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
     });
   };
 
-  const requestUploadOperation = () => {
+  const requestUploadOperation = (serverIds?: string[]) => {
+    const requestedServerIds = serverIds
+      ? [...new Set(serverIds.map((serverId) => serverId.trim()).filter(Boolean))]
+      : null;
     const targetServers = servers
       .slice()
       .sort(compareServersByNaturalId)
-      .filter((server) => server.enabled && serverIsOnlineForJob(server));
+      .filter((server) => (
+        server.enabled &&
+        serverIsOnlineForJob(server) &&
+        (!requestedServerIds || requestedServerIds.includes(server.id))
+      ));
+    if (requestedServerIds && targetServers.length !== requestedServerIds.length) {
+      const targetServerIds = new Set(targetServers.map((server) => server.id));
+      const unavailableServerIds = requestedServerIds.filter((serverId) => !targetServerIds.has(serverId));
+      setJobError(`Server ${unavailableServerIds.join(", ")} ${unavailableServerIds.length === 1 ? "is" : "are"} not online and enabled.`);
+      return;
+    }
     if (targetServers.length === 0) {
       setJobError("No online enabled servers are available for upload.");
       return;
     }
+    const targetServerIds = new Set(targetServers.map((server) => server.id));
     setPendingServerOperationAction({
       action: "upload",
       serverCount: targetServers.length,
-      itemCount: uploadCandidates.length,
+      itemCount: uploadCandidates.filter((candidate) => targetServerIds.has(candidate.serverId)).length,
       serverIds: targetServers.map((server) => server.id)
     });
   };
@@ -1644,7 +1866,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
     return status;
   };
 
-  const previewJob = async (scenarioOverride = selectedJobScenario) => {
+  const previewJob = async (scenarioOverride = effectiveSelectedJobScenario) => {
     const requestPayload = solverJobRequest(scenarioOverride);
     if (!requestPayload) return;
     setJobBusy("preview");
@@ -1797,22 +2019,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
     if (!scenario) return;
     setSelectedScenarioLibraryId(scenario.id);
     setScenarioDraft(scenario);
-    onScenarioLibrarySelect(scenario.id);
-  };
-
-  const onScenarioLibrarySelect = (scenarioId: string) => {
-    changeJobScenario(scenarioId);
-  };
-
-  const copyScenarioSettings = async () => {
-    if (!selectedScenarioLibraryItem) return;
-    try {
-      await navigator.clipboard.writeText(formatScenarioLibraryText(selectedScenarioLibraryItem));
-      setScenarioCopied(true);
-      window.setTimeout(() => setScenarioCopied(false), 1400);
-    } catch {
-      setJobError("Unable to copy scenario settings.");
-    }
+    setScenarioManageMode(false);
   };
 
   const startAddScenario = () => {
@@ -1824,7 +2031,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
   const requestScenarioAdd = () => {
     const scenario = normalizeScenarioDraft(scenarioDraft);
     if (!scenario) {
-      setJobError("Scenario id, label, config template, pot and effective stack are required.");
+      setJobError("Setting id, label, pot and effective stack are required.");
       return;
     }
     setPendingScenarioAction({ action: "add", scenario });
@@ -1833,7 +2040,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
   const requestScenarioUpdate = () => {
     const scenario = normalizeScenarioDraft(scenarioDraft);
     if (!scenario || !selectedScenarioLibraryId) {
-      setJobError("Select a scenario before updating.");
+      setJobError("Select a setting before updating.");
       return;
     }
     setPendingScenarioAction({ action: "update", scenario, previousId: selectedScenarioLibraryId });
@@ -1844,40 +2051,72 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
     setPendingScenarioAction({ action: "delete", scenario: selectedScenarioLibraryItem });
   };
 
+  const duplicateScenarioSetting = async () => {
+    if (!selectedScenarioLibraryItem) return;
+    const baseId = `${selectedScenarioLibraryItem.id}-copy`;
+    let duplicateId = baseId;
+    let suffix = 2;
+    while (scenarioLibrary.some((setting) => setting.id === duplicateId)) {
+      duplicateId = `${baseId}-${suffix++}`;
+    }
+    setJobBusy("scenario:duplicate");
+    setJobError(null);
+    try {
+      const response = await fetchPreflopJson<SolverSettingLibraryResponse>(
+        `/api/solver-settings/${encodeURIComponent(selectedScenarioLibraryItem.id)}/duplicate`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id: duplicateId })
+        }
+      );
+      const duplicate = response.settings.find((setting) => setting.id === duplicateId);
+      setScenarioLibrary(response.settings);
+      setScenarioLibraryUpdatedAt(response.updatedAt);
+      setSelectedScenarioLibraryId(duplicateId);
+      setScenarioDraft(duplicate ?? emptyScenarioLibraryItem());
+      setScenarioManageMode(true);
+    } catch (caught) {
+      setJobError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setJobBusy(null);
+    }
+  };
+
   const confirmScenarioLibraryAction = async () => {
     if (!pendingScenarioAction) return;
     setJobBusy(`scenario:${pendingScenarioAction.action}`);
     setJobError(null);
     try {
-      let response: SolverScenarioLibraryResponse;
+      let response: SolverSettingLibraryResponse;
       if (pendingScenarioAction.action === "add") {
-        response = await fetchPreflopJson<SolverScenarioLibraryResponse>("/api/scenarios", {
+        response = await fetchPreflopJson<SolverSettingLibraryResponse>("/api/solver-settings", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ scenario: pendingScenarioAction.scenario })
+          body: JSON.stringify({ setting: solverSettingSavePayload(pendingScenarioAction.scenario) })
         });
       } else if (pendingScenarioAction.action === "update") {
-        response = await fetchPreflopJson<SolverScenarioLibraryResponse>(
-          `/api/scenarios/${encodeURIComponent(pendingScenarioAction.previousId ?? pendingScenarioAction.scenario.id)}`,
+        response = await fetchPreflopJson<SolverSettingLibraryResponse>(
+          `/api/solver-settings/${encodeURIComponent(pendingScenarioAction.previousId ?? pendingScenarioAction.scenario.id)}`,
           {
             method: "PATCH",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ scenario: pendingScenarioAction.scenario })
+            body: JSON.stringify({ setting: solverSettingSavePayload(pendingScenarioAction.scenario) })
           }
         );
       } else {
-        response = await fetchPreflopJson<SolverScenarioLibraryResponse>(
-          `/api/scenarios/${encodeURIComponent(pendingScenarioAction.scenario.id)}`,
+        response = await fetchPreflopJson<SolverSettingLibraryResponse>(
+          `/api/solver-settings/${encodeURIComponent(pendingScenarioAction.scenario.id)}`,
           { method: "DELETE" }
         );
       }
-      setScenarioLibrary(response.scenarios);
+      setScenarioLibrary(response.settings);
       setScenarioLibraryUpdatedAt(response.updatedAt);
       const nextSelectedId = pendingScenarioAction.action === "delete"
-        ? response.scenarios[0]?.id ?? ""
+        ? response.settings[0]?.id ?? ""
         : pendingScenarioAction.scenario.id;
       setSelectedScenarioLibraryId(nextSelectedId);
-      const nextScenario = response.scenarios.find((scenario) => scenario.id === nextSelectedId) ?? response.scenarios[0];
+      const nextScenario = response.settings.find((scenario) => scenario.id === nextSelectedId) ?? response.settings[0];
       setScenarioDraft(nextScenario ?? emptyScenarioLibraryItem());
       if (
         pendingScenarioAction.action === "update" &&
@@ -1885,7 +2124,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
         pendingScenarioAction.previousId !== pendingScenarioAction.scenario.id
       ) {
         changeJobScenario(pendingScenarioAction.scenario.id);
-      } else if (selectedJobScenario && !response.scenarios.some((scenario) => scenario.id === selectedJobScenario)) {
+      } else if (selectedJobScenario && !response.settings.some((scenario) => scenario.id === selectedJobScenario)) {
         changeJobScenario("");
       }
       setPendingScenarioAction(null);
@@ -1962,21 +2201,36 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
       <section className="section-heading preflop-heading">
         <div>
           <h2>Range Library</h2>
+          {!rangeLibraryExpanded ? (
+            <p className="library-collapsed-summary">{countFiles(tree)} ranges · {countApprovedFiles(tree)} checked</p>
+          ) : null}
         </div>
         <div className="preflop-heading-actions">
+          {rangeLibraryExpanded ? (
+            <button
+              className="icon-button"
+              onClick={() => void (rangeStatusView === "already" ? refreshRangeProgress() : loadTree())}
+              disabled={loading || saving}
+            >
+              <RefreshCw size={16} />
+              Refresh
+            </button>
+          ) : null}
           <button
-            className="icon-button"
-            onClick={() => void (rangeStatusView === "already" ? refreshRangeProgress() : loadTree())}
-            disabled={loading || saving}
+            className="icon-button library-collapse-button"
+            type="button"
+            aria-expanded={rangeLibraryExpanded}
+            aria-controls="range-library-content"
+            onClick={() => setRangeLibraryExpanded((expanded) => !expanded)}
           >
-            <RefreshCw size={16} />
-            Refresh
+            {rangeLibraryExpanded ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+            {rangeLibraryExpanded ? "Collapse" : "Expand"}
           </button>
         </div>
       </section>
 
       {error ? <div className="notice error">{error}</div> : null}
-      {rangeStatusView === "already" && rangeProgressRefreshSummary ? (
+      {rangeLibraryExpanded && rangeStatusView === "already" && rangeProgressRefreshSummary ? (
         <div
           className={`notice compact-notice ${rangeProgressRefreshSummary.failed > 0 ? "warning" : "success"}`}
           role="status"
@@ -1991,6 +2245,8 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
       ) : null}
 
       <section className="preflop-flow">
+        {rangeLibraryExpanded ? (
+        <div id="range-library-content" className="range-library-content">
         <section className="panel preflop-library">
           <div className="preflop-library-header">
             <div className="panel-title">
@@ -2157,6 +2413,9 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
                 activePath={currentFolderPath}
                 expandedFolders={expandedFolders}
                 query={query}
+                statusView={rangeStatusView}
+                visibleReviewStatuses={visibleReviewStatuses}
+                visibleRunStatuses={visibleRunStatuses}
                 dropTarget={dropTarget}
                 onToggle={(path) => toggleFolder(path, setExpandedFolders)}
                 onSelect={selectFolder}
@@ -2173,6 +2432,9 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
                     activePath={currentFolderPath}
                     expandedFolders={expandedFolders}
                     query={query}
+                    statusView={rangeStatusView}
+                    visibleReviewStatuses={visibleReviewStatuses}
+                    visibleRunStatuses={visibleRunStatuses}
                     dropTarget={dropTarget}
                     onToggle={(path) => toggleFolder(path, setExpandedFolders)}
                     onSelect={selectFolder}
@@ -2224,17 +2486,37 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
                   )}
                   <span>{currentItems.length} items</span>
                 </div>
-                {rangeManageMode && currentFolderPath ? (
+                {rangeStatusView === "already" || (rangeManageMode && currentFolderPath) ? (
                   <div className="preflop-current-folder-actions">
-                    <button
-                      className="inventory-action-button danger"
-                      aria-label={`Delete folder ${folderName(currentFolderPath)}`}
-                      title="Delete folder"
-                      onClick={() => requestDeletePath({ type: "folder", path: currentFolderPath, name: folderName(currentFolderPath) })}
-                      disabled={saving}
-                    >
-                      <Trash2 size={15} />
-                    </button>
+                    {rangeStatusView === "already" ? (
+                      <div className="preflop-progress-mode-switch" aria-label="Range progress source">
+                        <button
+                          className={rangeProgressView === "total" ? "active" : ""}
+                          aria-pressed={rangeProgressView === "total"}
+                          onClick={() => setRangeProgressView("total")}
+                        >
+                          Total
+                        </button>
+                        <button
+                          className={rangeProgressView === "remote" ? "active" : ""}
+                          aria-pressed={rangeProgressView === "remote"}
+                          onClick={() => setRangeProgressView("remote")}
+                        >
+                          Remote
+                        </button>
+                      </div>
+                    ) : null}
+                    {rangeManageMode && currentFolderPath ? (
+                      <button
+                        className="inventory-action-button danger"
+                        aria-label={`Delete folder ${folderName(currentFolderPath)}`}
+                        title="Delete folder"
+                        onClick={() => requestDeletePath({ type: "folder", path: currentFolderPath, name: folderName(currentFolderPath) })}
+                        disabled={saving}
+                      >
+                        <Trash2 size={15} />
+                      </button>
+                    ) : null}
                   </div>
                 ) : null}
               </div>
@@ -2341,18 +2623,13 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
                             ) : (
                               <strong>{item.name}</strong>
                             )}
-                            <span>{countFolderFiles(item)} items</span>
+                            <span>{countVisibleFiles(item.children, rangeStatusView, visibleReviewStatuses, visibleRunStatuses)} items</span>
                           </>
                         )
                       )}
                     </span>
                     {item.type === "file" && rangeStatusView === "already" ? (
-                      <span
-                        className={`preflop-progress-pill ${rangeProgressClass(item.progress?.ratio)}`}
-                        title={rangeProgressTitle(item)}
-                      >
-                        {formatRangeProgress(item.progress)}
-                      </span>
+                      <RangeProgressPill item={item} view={rangeProgressView} />
                     ) : null}
                     {item.type === "folder" ? null : (
                       <span
@@ -2512,6 +2789,29 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
             </section>
           )}
         </section>
+        </div>
+        ) : null}
+
+        <SettingLibrarySection
+          settings={scenarioLibrary}
+          rangeFolders={rangeFolderOptions}
+          updatedAt={scenarioLibraryUpdatedAt}
+          selectedSettingId={selectedScenarioLibraryId}
+          manageMode={scenarioManageMode}
+          draft={scenarioDraft}
+          busy={jobBusy}
+          onSelect={selectScenarioLibraryItem}
+          onManageModeChange={(manage) => {
+            setScenarioManageMode(manage);
+            if (!manage && selectedScenarioLibraryItem) setScenarioDraft(selectedScenarioLibraryItem);
+          }}
+          onDraftChange={(patch) => setScenarioDraft((current) => ({ ...current, ...patch }))}
+          onNew={startAddScenario}
+          onAdd={requestScenarioAdd}
+          onUpdate={requestScenarioUpdate}
+          onDelete={requestScenarioDelete}
+          onDuplicate={() => void duplicateScenarioSetting()}
+        />
 
         <SolverJobPanel
           servers={servers}
@@ -2520,6 +2820,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
           parallelRuns={parallelRuns}
           failurePool={failurePool}
           parallelPreview={parallelPreview}
+          parallelContextLoaded={parallelContextLoaded}
           selectedParallelServerIds={selectedParallelServerIds}
           parallelChunkCount={parallelChunkCount}
           activeParallelRunId={activeParallelRunId}
@@ -2537,18 +2838,15 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
           uploadCandidates={uploadCandidates}
           datasetName={jobDatasetName}
           datasetRepoStatus={datasetRepoStatus}
-          selectedScenario={selectedJobScenario}
+          selectedScenario={effectiveSelectedJobScenario}
+          linkedSetting={linkedJobSetting}
           scenarioLibrary={scenarioLibrary}
-          scenarioLibraryUpdatedAt={scenarioLibraryUpdatedAt}
-          selectedScenarioLibraryId={selectedScenarioLibraryId}
-          scenarioManageMode={scenarioManageMode}
-          scenarioDraft={scenarioDraft}
-          scenarioCopied={scenarioCopied}
           confirmUnstudied={confirmUnstudied}
           busy={jobBusy}
           inventoryLoaded={jobContextLoaded}
           refreshActive={jobRefreshActive}
           refreshState={jobRefreshState}
+          lastRefreshTime={jobStatusSnapshotAt}
           error={jobError}
           onRefresh={() => void refreshJobContext()}
           onServerChange={(serverId) => {
@@ -2597,16 +2895,6 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
             clearDatasetRepoGate();
           }}
           onScenarioChange={changeJobScenario}
-          onScenarioLibrarySelect={selectScenarioLibraryItem}
-          onScenarioManageModeChange={(manage) => {
-            setScenarioManageMode(manage);
-            if (!manage && selectedScenarioLibraryItem) setScenarioDraft(selectedScenarioLibraryItem);
-          }}
-          onScenarioDraftChange={(patch) => setScenarioDraft((current) => ({ ...current, ...patch }))}
-          onScenarioAdd={requestScenarioAdd}
-          onScenarioUpdate={requestScenarioUpdate}
-          onScenarioDelete={requestScenarioDelete}
-          onScenarioCopy={() => void copyScenarioSettings()}
           onPreview={() => void previewJob()}
           onStartNow={() => void createSolverJob("manual", true)}
           onQueueNext={() => void createSolverJob("queue_next", false)}
@@ -2680,8 +2968,8 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
                   <dd>{displayDatasetName(datasetRepoDialog.repoId)}</dd>
                 </div>
                 <div>
-                  <dt>Scenario</dt>
-                  <dd>{datasetRepoDialog.preview.scenario}</dd>
+                  <dt>Setting</dt>
+                  <dd>{datasetRepoDialog.preview.setting.label}</dd>
                 </div>
                 <div>
                   <dt>URL</dt>
@@ -2744,7 +3032,12 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
             <div>
               <h3 id="scenario-confirm-title">{scenarioActionTitle(pendingScenarioAction.action)}</h3>
               <p>{pendingScenarioAction.scenario.id}</p>
-              <pre className="scenario-confirm-preview">{formatScenarioLibraryText(pendingScenarioAction.scenario)}</pre>
+              <div className="scenario-confirm-summary">
+                <span>Pot <strong>{pendingScenarioAction.scenario.pot}</strong></span>
+                <span>Stack <strong>{pendingScenarioAction.scenario.effectiveStack}</strong></span>
+                <span>Accuracy <strong>{pendingScenarioAction.scenario.parameters.accuracy}</strong></span>
+                <span>Iterations <strong>{pendingScenarioAction.scenario.parameters.maxIteration}</strong></span>
+              </div>
             </div>
             <div className="preflop-confirm-actions">
               <button className="icon-button compact" onClick={() => setPendingScenarioAction(null)} disabled={jobBusy?.startsWith("scenario:")}>
@@ -2903,7 +3196,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
       {pendingServerOperationAction ? (
         <div className="modal-backdrop preflop-confirm-backdrop" role="presentation" onClick={() => setPendingServerOperationAction(null)}>
           <section
-            className={`preflop-confirm-dialog ${pendingServerOperationAction.candidate || pendingServerOperationAction.candidates || pendingServerOperationAction.action === "network_sync" ? "server-operation-confirm-dialog" : ""}`}
+            className={`preflop-confirm-dialog ${pendingServerOperationAction.candidate || pendingServerOperationAction.candidates || pendingServerOperationAction.serverIds?.length ? "server-operation-confirm-dialog" : ""}`}
             role="dialog"
             aria-modal="true"
             aria-labelledby="server-operation-confirm-title"
@@ -2923,7 +3216,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
                 {serverOperationConfirmTitle(pendingServerOperationAction.action)}
               </h3>
               <p>{serverOperationConfirmCopy(pendingServerOperationAction)}</p>
-              {pendingServerOperationAction.action === "network_sync" && pendingServerOperationAction.serverIds?.length ? (
+              {pendingServerOperationAction.serverIds?.length && !pendingServerOperationAction.candidate && !pendingServerOperationAction.candidates ? (
                 <dl className="server-operation-confirm-details">
                   <div className="wide">
                     <dt>Target servers</dt>
@@ -3042,6 +3335,41 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
         </div>
       ) : null}
 
+      {pendingRangeMutation ? (
+        <div className="modal-backdrop preflop-confirm-backdrop" role="presentation" onClick={() => setPendingRangeMutation(null)}>
+          <section
+            className="preflop-confirm-dialog range-link-impact-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="range-link-impact-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="preflop-confirm-icon">
+              {pendingRangeMutation.action === "rename" ? <Pencil size={18} /> : <Folder size={18} />}
+            </div>
+            <div>
+              <h3 id="range-link-impact-title">
+                {pendingRangeMutation.action === "rename" ? "Rename Range Library item?" : "Move Range Library item?"}
+              </h3>
+              <p><strong>{pendingRangeMutation.path}</strong> → <strong>{pendingRangeMutation.nextPath}</strong></p>
+              <RangeSettingLinkImpact
+                settings={pendingRangeMutationSettings}
+                directChanges={pendingDirectLinkChanges}
+                action={pendingRangeMutation.action}
+                itemType={pendingRangeMutation.itemType}
+              />
+            </div>
+            <div className="preflop-confirm-actions">
+              <button className="icon-button compact" onClick={() => setPendingRangeMutation(null)} disabled={saving}>Cancel</button>
+              <button className="icon-button compact primary" onClick={() => void confirmPendingRangeMutation()} disabled={saving}>
+                <Check size={15} />
+                {pendingRangeMutation.action === "rename" ? "Rename & Sync" : "Move & Sync"}
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
       {deleteTarget ? (
         <div className="modal-backdrop preflop-delete-backdrop" role="presentation" onClick={() => setDeleteTarget(null)}>
           <section
@@ -3062,6 +3390,12 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
                 <strong>{deleteTarget.type === "file" ? displayRangeName(deleteTarget.name) : deleteTarget.name}</strong>
                 {deleteTarget.type === "folder" ? " and everything inside will be removed." : " will be removed."}
               </p>
+              <RangeSettingLinkImpact
+                settings={deleteTargetSettings}
+                directChanges={deleteDirectLinkChanges}
+                action="delete"
+                itemType={deleteTarget.type}
+              />
             </div>
             <div className="preflop-delete-actions">
               <button className="icon-button compact" onClick={() => setDeleteTarget(null)} disabled={saving}>
@@ -3069,13 +3403,47 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
               </button>
               <button className="icon-button compact danger" onClick={() => void confirmDeleteSelected()} disabled={saving}>
                 <Trash2 size={15} />
-                Delete
+                Delete & Sync
               </button>
             </div>
           </section>
         </div>
       ) : null}
     </>
+  );
+}
+
+function RangeSettingLinkImpact({
+  settings,
+  directChanges,
+  action,
+  itemType
+}: {
+  settings: SolverScenarioLibraryItem[];
+  directChanges: SolverScenarioLibraryItem[];
+  action: "rename" | "move" | "delete";
+  itemType: "folder" | "file";
+}) {
+  return (
+    <div className="range-setting-link-impact">
+      <strong>Setting Library impact</strong>
+      {settings.length > 0 ? (
+        <div className="range-setting-impact-chips">
+          {settings.map((setting) => <span key={setting.id}>{setting.label}</span>)}
+        </div>
+      ) : <p>No linked Setting is affected.</p>}
+      {itemType === "folder" && directChanges.length > 0 ? (
+        <p>
+          {action === "delete"
+            ? "Links pointing to this folder or its descendants will be removed automatically."
+            : "Links pointing to this folder or its descendants will be rewritten automatically."}
+        </p>
+      ) : itemType === "file" && settings.length > 0 ? (
+        <p>Folder Links stay unchanged; this file’s automatic Setting association follows its folder.</p>
+      ) : itemType === "folder" && settings.length > 0 ? (
+        <p>Parent Folder Links stay unchanged; items under this folder may enter or leave their automatic Setting association.</p>
+      ) : null}
+    </div>
   );
 }
 
@@ -3092,7 +3460,7 @@ const JOB_ACTION_LABELS: Record<SolverJobAction, string> = {
 };
 
 function serverIsOnlineForJob(server: ServerRow | null | undefined): boolean {
-  return server?.latest?.connectionStatus === "online";
+  return serverIsJobReady(server);
 }
 
 function compareServersByNaturalId(left: ServerRow, right: ServerRow): number {
@@ -3129,8 +3497,8 @@ function parallelServerIsAvailable(server: ServerRow): boolean {
 
 function parallelServerUnavailableReason(server: ServerRow): string {
   if (!server.enabled) return "Disabled";
-  const status = server.latest?.connectionStatus ?? "unknown";
-  if (status !== "online") return status;
+  const status = connectionDisplayStatus(server.latest, server.pipeline);
+  if (!serverIsJobReady(server)) return status === "online" ? "SSH unavailable" : status;
   if (pipelineIsActiveForClient(server.pipeline)) return server.pipeline?.displayStatus ?? "Busy";
   return "Not idle";
 }
@@ -3153,6 +3521,7 @@ function SolverJobPanel({
   parallelRuns,
   failurePool,
   parallelPreview,
+  parallelContextLoaded,
   selectedParallelServerIds,
   parallelChunkCount,
   activeParallelRunId,
@@ -3171,17 +3540,14 @@ function SolverJobPanel({
   datasetName,
   datasetRepoStatus,
   selectedScenario,
+  linkedSetting,
   scenarioLibrary,
-  scenarioLibraryUpdatedAt,
-  selectedScenarioLibraryId,
-  scenarioManageMode,
-  scenarioDraft,
-  scenarioCopied,
   confirmUnstudied,
   busy,
   inventoryLoaded,
   refreshActive,
   refreshState,
+  lastRefreshTime,
   error,
   onRefresh,
   onServerChange,
@@ -3205,13 +3571,6 @@ function SolverJobPanel({
   onDatasetNameChange,
   onSettingsChange,
   onScenarioChange,
-  onScenarioLibrarySelect,
-  onScenarioManageModeChange,
-  onScenarioDraftChange,
-  onScenarioAdd,
-  onScenarioUpdate,
-  onScenarioDelete,
-  onScenarioCopy,
   onConfirmUnstudiedChange,
   onPreview,
   onStartNow,
@@ -3236,6 +3595,7 @@ function SolverJobPanel({
   parallelRuns: ParallelSolverRun[];
   failurePool: ParallelFailurePoolEntry[];
   parallelPreview: ParallelSolverJobPreview | null;
+  parallelContextLoaded: boolean;
   selectedParallelServerIds: string[];
   parallelChunkCount: number;
   activeParallelRunId: string | null;
@@ -3254,25 +3614,22 @@ function SolverJobPanel({
   datasetName: string;
   datasetRepoStatus: SolverDatasetRepoStatus | null;
   selectedScenario: SolverScenario | "";
+  linkedSetting: SolverScenarioLibraryItem | null;
   scenarioLibrary: SolverScenarioLibraryItem[];
-  scenarioLibraryUpdatedAt: string | null;
-  selectedScenarioLibraryId: string;
-  scenarioManageMode: boolean;
-  scenarioDraft: SolverScenarioLibraryItem;
-  scenarioCopied: boolean;
   confirmUnstudied: boolean;
   busy: string | null;
   inventoryLoaded: boolean;
   refreshActive: boolean;
   refreshState: RefreshState | null;
+  lastRefreshTime: string | null;
   error: string | null;
   onRefresh: () => void;
   onServerChange: (serverId: string) => void;
   onOperationScanUploads: () => void;
-  onOperationSync: () => void;
+  onOperationSync: (serverIds?: string[]) => void;
   onOperationNetworkSync: (serverIds?: string[]) => void;
-  onOperationNetworkCheck: () => void;
-  onOperationUpload: () => void;
+  onOperationNetworkCheck: (serverIds?: string[]) => void;
+  onOperationUpload: (serverIds?: string[]) => void;
   onOperationUploadCandidate: (candidate: ServerUploadCandidate) => void;
   onOperationUploadCandidates: (candidates: ServerUploadCandidate[]) => void;
   onOperationDeleteCandidate: (candidate: ServerUploadCandidate) => void;
@@ -3288,13 +3645,6 @@ function SolverJobPanel({
   onDatasetNameChange: (datasetName: string) => void;
   onSettingsChange: (patch: Partial<SolverJobSettings>) => void;
   onScenarioChange: (scenario: SolverScenario | "") => void;
-  onScenarioLibrarySelect: (scenarioId: string) => void;
-  onScenarioManageModeChange: (manage: boolean) => void;
-  onScenarioDraftChange: (patch: Partial<SolverScenarioLibraryItem>) => void;
-  onScenarioAdd: () => void;
-  onScenarioUpdate: () => void;
-  onScenarioDelete: () => void;
-  onScenarioCopy: () => void;
   onConfirmUnstudiedChange: (checked: boolean) => void;
   onPreview: () => void;
   onStartNow: () => void;
@@ -3322,10 +3672,11 @@ function SolverJobPanel({
     .slice(0, 5);
   const latestEventByJobId = useMemo(() => latestJobEvents(events), [events]);
   const requiresApproval = Boolean(selectedRangePath && !selectedRangeLearned) || Boolean(preview?.requiresConfirmation);
-  const canSubmit = Boolean(selectedRangePath && selectedServerId && selectedServer);
+  const canSubmit = Boolean(selectedRangePath && selectedServerId && selectedServer && selectedScenario);
   const submitDisabled = !canSubmit || requiresApproval || busy != null;
   const warnings = [
     ...(!selectedRangePath ? ["Select a range file before creating a job."] : []),
+    ...(selectedRangePath && !selectedScenario ? ["This Range has no Folder Link. Select a Setting manually."] : []),
     ...(requiresApproval ? ["Approve this range before creating a solver job."] : []),
     ...(datasetRepoStatus && !datasetRepoStatus.exists ? ["Dataset repo must be confirmed and created before submission."] : []),
     ...(preview?.warnings ?? [])
@@ -3338,10 +3689,15 @@ function SolverJobPanel({
           <ClipboardList size={16} />
           <h3>Solver Jobs</h3>
         </div>
-        <button className="icon-button compact" onClick={onRefresh} disabled={refreshActive}>
-          <RefreshCw size={15} />
-          {refreshActive ? formatRefreshStatusLabel(refreshState) : "Refresh Status"}
-        </button>
+        <div className="solver-job-refresh-control">
+          <button className="icon-button compact" onClick={onRefresh} disabled={refreshActive}>
+            <RefreshCw size={15} />
+            {refreshActive ? formatRefreshStatusLabel(refreshState) : "Refresh Status"}
+          </button>
+          <small title={lastRefreshTime ? formatTimestamp(lastRefreshTime) : "No status snapshot has loaded yet."}>
+            Last refresh: {lastRefreshTime ? formatTimestamp(lastRefreshTime) : "Not available"}
+          </small>
+        </div>
       </div>
 
       {error ? <div className="notice error compact-notice">{error}</div> : null}
@@ -3389,6 +3745,15 @@ function SolverJobPanel({
                 onChange={(event) => onDatasetNameChange(event.target.value)}
               />
             </label>
+            <label className="solver-job-field wide">
+              <span>Setting{linkedSetting ? <em className="solver-setting-link-label"> (manually linked)</em> : null}</span>
+              <select value={selectedScenario} onChange={(event) => onScenarioChange(event.target.value as SolverScenario | "")} disabled={Boolean(linkedSetting)}>
+                {!linkedSetting ? <option value="">Select Setting</option> : null}
+                {(linkedSetting ? [linkedSetting] : scenarioLibrary).map((setting) => (
+                  <option key={setting.id} value={setting.id}>{setting.label} ({setting.id})</option>
+                ))}
+              </select>
+            </label>
             <label className="solver-job-field">
               <span>Range Expr</span>
               <input
@@ -3414,17 +3779,6 @@ function SolverJobPanel({
                 value={settings.threadNum}
                 onChange={(event) => onSettingsChange({
                   threadNum: integerFromInput(event.target.value, settings.threadNum)
-                })}
-              />
-            </label>
-            <label className="solver-job-field">
-              <span>Max Iteration</span>
-              <input
-                type="number"
-                min="1"
-                value={settings.maxIteration}
-                onChange={(event) => onSettingsChange({
-                  maxIteration: positiveNumberFromInput(event.target.value, settings.maxIteration)
                 })}
               />
             </label>
@@ -3473,14 +3827,6 @@ function SolverJobPanel({
               />
               <span>Upload</span>
             </label>
-            <label>
-              <input
-                type="checkbox"
-                checked={settings.useIsomorphism === 1}
-                onChange={(event) => onSettingsChange({ useIsomorphism: event.target.checked ? 1 : 0 })}
-              />
-              <span>Use isomorphism</span>
-            </label>
           </div>
 
           <div className="solver-job-advanced-grid">
@@ -3510,25 +3856,6 @@ function SolverJobPanel({
             </label>
           </div>
 
-          <ScenarioLibraryPanel
-            scenarios={scenarioLibrary}
-            updatedAt={scenarioLibraryUpdatedAt}
-            selectedScenarioId={selectedScenarioLibraryId}
-            explicitScenarioId={selectedScenario}
-            manageMode={scenarioManageMode}
-            draft={scenarioDraft}
-            copied={scenarioCopied}
-            busy={busy}
-            onSelect={onScenarioLibrarySelect}
-            onAutoSelect={() => onScenarioChange("")}
-            onManageModeChange={onScenarioManageModeChange}
-            onDraftChange={onScenarioDraftChange}
-            onAdd={onScenarioAdd}
-            onUpdate={onScenarioUpdate}
-            onDelete={onScenarioDelete}
-            onCopy={onScenarioCopy}
-          />
-
           {warnings.length > 0 ? (
             <div className="solver-job-warnings">
               {warnings.map((warning) => <span key={warning}>{warning}</span>)}
@@ -3536,7 +3863,7 @@ function SolverJobPanel({
           ) : null}
 
           <div className="solver-job-actions">
-            <button className="icon-button compact" onClick={onPreview} disabled={!selectedRangePath || !selectedServerId || busy != null}>
+            <button className="icon-button compact" onClick={onPreview} disabled={!selectedRangePath || !selectedServerId || !selectedScenario || busy != null}>
               <Search size={15} />
               Preview
             </button>
@@ -3562,16 +3889,16 @@ function SolverJobPanel({
                   <dd>{displayDatasetName(preview.repoId)}</dd>
                 </div>
                 <div>
-                  <dt>Scenario</dt>
+                  <dt>Setting{linkedSetting ? <em className="solver-setting-link-label"> (manually linked)</em> : null}</dt>
                   <dd className="solver-job-scenario-cell">
                     <select
                       value={selectedScenario}
                       onChange={(event) => onScenarioChange(event.target.value as SolverScenario | "")}
-                      disabled={busy != null}
+                      disabled={busy != null || Boolean(linkedSetting)}
                     >
-                      <option value="">Auto: {preview.scenario}</option>
-                      {scenarioLibrary.map((scenario) => (
-                        <option key={scenario.id} value={scenario.id}>{scenario.id}</option>
+                      {!linkedSetting ? <option value="">Select Setting</option> : null}
+                      {(linkedSetting ? [linkedSetting] : scenarioLibrary).map((scenario) => (
+                        <option key={scenario.id} value={scenario.id}>{scenario.label} ({scenario.id})</option>
                       ))}
                     </select>
                   </dd>
@@ -3650,8 +3977,10 @@ function SolverJobPanel({
           selectedRangeLearned={selectedRangeLearned}
           settings={settings}
           preview={parallelPreview}
+          contextLoaded={parallelContextLoaded}
           datasetName={datasetName}
           selectedScenario={selectedScenario}
+          linkedSetting={linkedSetting}
           scenarioLibrary={scenarioLibrary}
           runs={parallelRuns}
           failurePool={failurePool}
@@ -3703,151 +4032,390 @@ function SolverJobPanel({
   );
 }
 
-function ScenarioLibraryPanel({
-  scenarios,
+export function SettingLibrarySection({
+  settings,
+  rangeFolders,
   updatedAt,
-  selectedScenarioId,
-  explicitScenarioId,
+  selectedSettingId,
   manageMode,
   draft,
-  copied,
   busy,
   onSelect,
-  onAutoSelect,
   onManageModeChange,
   onDraftChange,
+  onNew,
   onAdd,
   onUpdate,
   onDelete,
-  onCopy
+  onDuplicate
 }: {
-  scenarios: SolverScenarioLibraryItem[];
+  settings: SolverScenarioLibraryItem[];
+  rangeFolders: RangeFolderLinkOption[];
   updatedAt: string | null;
-  selectedScenarioId: string;
-  explicitScenarioId: SolverScenario | "";
+  selectedSettingId: string;
   manageMode: boolean;
   draft: SolverScenarioLibraryItem;
-  copied: boolean;
   busy: string | null;
-  onSelect: (scenarioId: string) => void;
-  onAutoSelect: () => void;
+  onSelect: (settingId: string) => void;
   onManageModeChange: (manage: boolean) => void;
   onDraftChange: (patch: Partial<SolverScenarioLibraryItem>) => void;
+  onNew: () => void;
   onAdd: () => void;
   onUpdate: () => void;
   onDelete: () => void;
-  onCopy: () => void;
+  onDuplicate: () => void;
 }) {
-  const selectedScenario = scenarios.find((scenario) => scenario.id === selectedScenarioId) ?? scenarios[0] ?? null;
+  const [query, setQuery] = useState("");
+  const [expanded, setExpanded] = useState(true);
+  const selectedSetting = settings.find((setting) => setting.id === selectedSettingId) ?? null;
+  const normalizedQuery = query.trim().toLowerCase();
+  const visibleSettings = settings.filter((setting) =>
+    !normalizedQuery || [setting.id, setting.label, ...solverSettingRangeFolderPaths(setting), setting.description ?? ""]
+      .some((value) => value.toLowerCase().includes(normalizedQuery))
+  );
+  const displayedSetting = manageMode ? draft : selectedSetting;
   const disabled = busy != null;
+  const displayedFolderPaths = displayedSetting ? solverSettingRangeFolderPaths(displayedSetting) : [];
+  const availableFolderPaths = rangeFolders.map((folder) => folder.path);
+  const folderOptions = [...new Set([...availableFolderPaths, ...displayedFolderPaths])];
+  const settingsWithDraft = displayedSetting
+    ? selectedSetting
+      ? settings.map((setting) => setting.id === selectedSetting.id ? displayedSetting : setting)
+      : [...settings, displayedSetting]
+    : settings;
+  const updateFolderLinks = (folderPath: string, checked: boolean) => {
+    const current = solverSettingRangeFolderPaths(draft);
+    const rangeFolderPaths = normalizeSolverSettingRangeFolderPaths(
+      checked ? [...current, folderPath] : current.filter((path) => path !== folderPath)
+    );
+    onDraftChange({ rangeFolderPaths, rangeSubdir: rangeFolderPaths[0] ?? "" });
+  };
+  const updateParameters = (patch: Partial<SolverScenarioLibraryItem["parameters"]>) => {
+    const parameters = { ...draft.parameters, ...patch };
+    onDraftChange({ parameters });
+  };
+  const updateRule = (nextRule: SolverBetSizeRule) => {
+    const key = solverBetSizeRuleKey(nextRule.position, nextRule.street, nextRule.action);
+    updateParameters({
+      betSizeRules: draft.parameters.betSizeRules.map((rule) =>
+        solverBetSizeRuleKey(rule.position, rule.street, rule.action) === key ? nextRule : rule
+      )
+    });
+  };
+
   return (
-    <section className="solver-scenario-library">
-      <div className="solver-scenario-head">
+    <section className="setting-library-section">
+      <div className="section-heading setting-library-heading">
         <div>
-          <strong>Scenario Library</strong>
-          <span>{updatedAt ? `Updated ${formatShortDateTime(updatedAt)}` : `${scenarios.length} defaults`}</span>
+          <h2>Setting Library</h2>
+          <p>{expanded
+            ? "Saved solver tree and convergence settings. Runtime board, ranges, memory estimation and threads are filled by each job."
+            : `${settings.length} saved settings${selectedSetting ? ` · ${selectedSetting.label} selected` : ""}`}
+          </p>
         </div>
-        <div className="solver-scenario-actions">
-          <button className="icon-button compact" type="button" onClick={onCopy} disabled={!selectedScenario || disabled}>
-            <Copy size={14} />
-            {copied ? "Copied" : "Copy"}
-          </button>
+        <div className="setting-library-heading-actions">
+          {expanded ? (
+            <>
+              <button className="icon-button" type="button" onClick={onDuplicate} disabled={!selectedSetting || disabled}>
+                <Copy size={15} />
+                Duplicate
+              </button>
+              <button
+                className={`icon-button ${manageMode ? "primary" : ""}`}
+                type="button"
+                onClick={() => onManageModeChange(!manageMode)}
+                disabled={(!selectedSetting && !manageMode) || disabled}
+              >
+                <Pencil size={15} />
+                {manageMode ? "Cancel Edit" : "Edit Setting"}
+              </button>
+            </>
+          ) : null}
           <button
-            className={`icon-button compact ${manageMode ? "primary" : ""}`}
+            className="icon-button library-collapse-button"
             type="button"
-            onClick={() => onManageModeChange(!manageMode)}
-            disabled={disabled}
+            aria-expanded={expanded}
+            aria-controls="setting-library-content"
+            onClick={() => setExpanded((current) => !current)}
           >
-            <Pencil size={14} />
-            {manageMode ? "Done" : "Manage"}
+            {expanded ? <ChevronUp size={15} /> : <ChevronDown size={15} />}
+            {expanded ? "Collapse" : "Expand"}
           </button>
         </div>
       </div>
 
-      <div className="solver-scenario-selector">
-        <button
-          type="button"
-          className={!explicitScenarioId ? "active auto" : "auto"}
-          onClick={onAutoSelect}
-          disabled={disabled}
-        >
-          Auto
-        </button>
-        {scenarios.map((scenario) => (
-          <button
-            key={scenario.id}
-            type="button"
-            className={explicitScenarioId && selectedScenarioId === scenario.id ? "active" : ""}
-            onClick={() => onSelect(scenario.id)}
-            disabled={disabled}
-          >
-            {scenario.id}
-          </button>
-        ))}
-      </div>
-
-      {manageMode ? (
-        <div className="solver-scenario-editor">
-          <label>
-            <span>ID</span>
-            <input value={draft.id} onChange={(event) => onDraftChange({ id: event.target.value })} />
-          </label>
-          <label>
-            <span>Label</span>
-            <input value={draft.label} onChange={(event) => onDraftChange({ label: event.target.value })} />
-          </label>
-          <label>
-            <span>Range Subdir</span>
-            <input value={draft.rangeSubdir} onChange={(event) => onDraftChange({ rangeSubdir: event.target.value })} />
-          </label>
-          <label>
-            <span>Config Template</span>
-            <input value={draft.configTemplate} onChange={(event) => onDraftChange({ configTemplate: event.target.value })} />
-          </label>
-          <label>
-            <span>Pot</span>
-            <input
-              type="number"
-              min="1"
-              value={draft.pot}
-              onChange={(event) => onDraftChange({ pot: Number(event.target.value) })}
-            />
-          </label>
-          <label>
-            <span>Effective Stack</span>
-            <input
-              type="number"
-              min="1"
-              value={draft.effectiveStack}
-              onChange={(event) => onDraftChange({ effectiveStack: Number(event.target.value) })}
-            />
-          </label>
-          <label className="wide">
-            <span>Description</span>
-            <input
-              value={draft.description ?? ""}
-              onChange={(event) => onDraftChange({ description: event.target.value })}
-            />
-          </label>
-          <div className="solver-scenario-editor-actions">
-            <button className="icon-button compact" type="button" onClick={onAdd} disabled={disabled}>
-              <FolderPlus size={14} />
-              Add
-            </button>
-            <button className="icon-button compact primary" type="button" onClick={onUpdate} disabled={!selectedScenario || disabled}>
-              <Check size={14} />
-              Update
-            </button>
-            <button className="icon-button compact danger" type="button" onClick={onDelete} disabled={!selectedScenario || disabled}>
-              <Trash2 size={14} />
-              Delete
-            </button>
+      {expanded ? (
+      <section id="setting-library-content" className="panel setting-library-panel">
+        <aside className="setting-library-sidebar">
+          <div className="setting-library-sidebar-head">
+            <strong>Saved Settings</strong>
+            <span>{settings.length}</span>
           </div>
+          <label className="preflop-search">
+            <Search size={15} />
+            <input
+              value={query}
+              placeholder="Search settings"
+              onChange={(event) => setQuery(event.target.value)}
+            />
+          </label>
+          <button className="icon-button compact setting-library-new" type="button" onClick={onNew} disabled={disabled}>
+            <Plus size={15} />
+            New Setting
+          </button>
+          <div className="setting-library-list">
+            {visibleSettings.map((setting) => (
+              <button
+                key={setting.id}
+                type="button"
+                className={setting.id === selectedSettingId ? "active" : ""}
+                onClick={() => onSelect(setting.id)}
+                disabled={disabled}
+              >
+                <span>
+                  <strong>{setting.label}</strong>
+                  <small>{setting.id}</small>
+                </span>
+                <em>{setting.pot}bb / {setting.effectiveStack}bb</em>
+              </button>
+            ))}
+            {visibleSettings.length === 0 ? <p>No saved settings match this search.</p> : null}
+          </div>
+        </aside>
+
+        <div className="setting-library-content">
+          {displayedSetting ? (
+            <>
+              <div className="setting-library-content-head">
+                <div>
+                  <span>{manageMode ? (selectedSetting ? "Editing Setting" : "New Setting") : "Selected Setting"}</span>
+                  <h3>{displayedSetting.label || "Untitled Setting"}</h3>
+                  <p>{displayedSetting.description || "No description."}</p>
+                </div>
+                {!manageMode ? (
+                  <div className="setting-library-summary-chips">
+                    <span>Pot <strong>{displayedSetting.pot}</strong></span>
+                    <span>Stack <strong>{displayedSetting.effectiveStack}</strong></span>
+                    <span>Accuracy <strong>{displayedSetting.parameters.accuracy}</strong></span>
+                    <span>Iterations <strong>{displayedSetting.parameters.maxIteration}</strong></span>
+                  </div>
+                ) : null}
+              </div>
+
+              <div className={`setting-library-editor ${manageMode ? "editing" : "preview"}`}>
+                <section className="setting-editor-card">
+                  <div className="setting-editor-card-head">
+                    <div>
+                      <strong>Identity & Stack</strong>
+                      <span>Used for library display, automatic Range matching and tree defaults.</span>
+                    </div>
+                  </div>
+                  <div className="setting-editor-fields">
+                    <label><span>ID</span><input value={displayedSetting.id} onChange={(event) => onDraftChange({ id: event.target.value })} disabled={!manageMode || disabled} /></label>
+                    <label><span>Label</span><input value={displayedSetting.label} onChange={(event) => onDraftChange({ label: event.target.value })} disabled={!manageMode || disabled} /></label>
+                    <label><span>Pot</span><input type="number" min="0.01" step="0.01" value={displayedSetting.pot} onChange={(event) => onDraftChange({ pot: Number(event.target.value) })} disabled={!manageMode || disabled} /></label>
+                    <label><span>Effective Stack</span><input type="number" min="0.01" step="0.01" value={displayedSetting.effectiveStack} onChange={(event) => onDraftChange({ effectiveStack: Number(event.target.value) })} disabled={!manageMode || disabled} /></label>
+                    <label className="wide"><span>Description</span><input value={displayedSetting.description ?? ""} onChange={(event) => onDraftChange({ description: event.target.value })} disabled={!manageMode || disabled} /></label>
+                  </div>
+                  <div className={`setting-folder-links ${manageMode ? "editing" : "preview"}`}>
+                    <div className="setting-folder-links-head">
+                      <div>
+                        <strong>Range Folder Links</strong>
+                        <span>A parent folder includes every nested folder and Range file. Multiple folders are supported.</span>
+                      </div>
+                      <em>{displayedFolderPaths.length} linked</em>
+                    </div>
+                    {manageMode ? (
+                      <div className="setting-folder-link-options">
+                        {folderOptions.map((folderPath) => {
+                          const coveringParent = displayedFolderPaths.find((linkedPath) =>
+                            linkedPath !== folderPath && solverRangePathIsInsideFolder(folderPath, linkedPath)
+                          );
+                          const linkedOwner = settings.find((setting) =>
+                            setting.id !== (selectedSetting?.id ?? displayedSetting.id) && solverSettingRangeFolderPaths(setting).some((linkedPath) =>
+                              solverRangePathIsInsideFolder(folderPath, linkedPath) && solverRangePathIsInsideFolder(linkedPath, folderPath)
+                            )
+                          );
+                          const allSubfoldersLinked = !displayedFolderPaths.includes(folderPath) &&
+                            rangeFolderIsFullyCoveredByDescendantLinks(folderPath, rangeFolders, settingsWithDraft);
+                          const missing = !availableFolderPaths.includes(folderPath);
+                          return (
+                            <label key={folderPath} className={coveringParent ? "covered" : linkedOwner ? "linked-elsewhere" : allSubfoldersLinked ? "fully-linked" : missing ? "missing" : ""}>
+                              <input
+                                type="checkbox"
+                                checked={displayedFolderPaths.includes(folderPath)}
+                                onChange={(event) => updateFolderLinks(folderPath, event.target.checked)}
+                                disabled={disabled || Boolean(coveringParent) || Boolean(linkedOwner) || allSubfoldersLinked}
+                              />
+                              <Folder size={13} />
+                              <span>{folderPath}</span>
+                              {coveringParent
+                                ? <small>Covered by {coveringParent}</small>
+                                : linkedOwner
+                                  ? <small>Linked to {linkedOwner.label}</small>
+                                  : allSubfoldersLinked
+                                    ? <small>All subfolders linked</small>
+                                  : missing
+                                    ? <small>Not in Range Library</small>
+                                    : null}
+                            </label>
+                          );
+                        })}
+                        {folderOptions.length === 0 ? <p>No Range folders are available.</p> : null}
+                      </div>
+                    ) : (
+                      <div className="setting-folder-link-chips">
+                        {displayedFolderPaths.map((folderPath) => <span key={folderPath}><Folder size={12} />{folderPath}</span>)}
+                        {displayedFolderPaths.length === 0 ? <p>No folders linked; jobs must select this Setting manually.</p> : null}
+                      </div>
+                    )}
+                  </div>
+                </section>
+
+                <section className="setting-editor-card">
+                  <div className="setting-editor-card-head">
+                    <div>
+                      <strong>Solver Parameters</strong>
+                      <span>Convergence and tree behavior stored with this Setting.</span>
+                    </div>
+                  </div>
+                  <div className="setting-editor-fields parameters">
+                    <label><span>All-in Threshold</span><input type="number" min="0" max="1" step="0.01" value={displayedSetting.parameters.allinThreshold} onChange={(event) => updateParameters({ allinThreshold: Number(event.target.value) })} disabled={!manageMode || disabled} /></label>
+                    <label><span>Raise Limit</span><input type="number" min="1" step="1" value={displayedSetting.parameters.raiseLimit} onChange={(event) => updateParameters({ raiseLimit: Number(event.target.value) })} disabled={!manageMode || disabled} /></label>
+                    <label><span>Accuracy</span><input type="number" min="0.000001" step="0.01" value={displayedSetting.parameters.accuracy} onChange={(event) => updateParameters({ accuracy: Number(event.target.value) })} disabled={!manageMode || disabled} /></label>
+                    <label><span>Max Iteration</span><input type="number" min="1" step="1" value={displayedSetting.parameters.maxIteration} onChange={(event) => updateParameters({ maxIteration: Number(event.target.value) })} disabled={!manageMode || disabled} /></label>
+                    <label><span>Print Interval</span><input type="number" min="1" step="1" value={displayedSetting.parameters.printInterval} onChange={(event) => updateParameters({ printInterval: Number(event.target.value) })} disabled={!manageMode || disabled} /></label>
+                  </div>
+                  <div className="setting-editor-toggles">
+                    <label><input type="checkbox" checked={displayedSetting.parameters.useIsomorphism} onChange={(event) => updateParameters({ useIsomorphism: event.target.checked })} disabled={!manageMode || disabled} /><span>Use Isomorphism</span></label>
+                    <label><input type="checkbox" checked={displayedSetting.parameters.enableRange} onChange={(event) => updateParameters({ enableRange: event.target.checked })} disabled={!manageMode || disabled} /><span>Enable Range</span></label>
+                  </div>
+                </section>
+
+                <section className="setting-editor-card">
+                  <div className="setting-editor-card-head">
+                    <div>
+                      <strong>Bet Sizes</strong>
+                      <span>{manageMode ? "Sizes are percentages of the pot. Enable an action, then add or remove sizes." : "Sizes are percentages of the pot. Select Edit Setting to make changes."}</span>
+                    </div>
+                  </div>
+                  <div className="setting-bet-size-grid">
+                    {SOLVER_SETTING_STREETS.flatMap((street) =>
+                      (["ip", "oop"] as const).map((position) => (
+                        <section className="setting-bet-size-group" key={`${position}-${street}`}>
+                          <h4>{position.toUpperCase()} · {street}</h4>
+                          {SOLVER_SETTING_ACTIONS
+                            .filter((action) => solverBetSizeRuleIsSupported(position, street, action))
+                            .map((action) => {
+                              const rule = displayedSetting.parameters.betSizeRules.find((candidate) =>
+                                candidate.position === position && candidate.street === street && candidate.action === action
+                              ) ?? { position, street, action, enabled: false, sizes: [] };
+                              return <SettingBetSizeRuleEditor key={action} rule={rule} onChange={updateRule} disabled={disabled || !manageMode} editable={manageMode} />;
+                            })}
+                        </section>
+                      ))
+                    )}
+                  </div>
+                </section>
+
+                {manageMode ? (
+                  <div className="setting-library-editor-actions">
+                    {!selectedSetting ? (
+                      <button className="icon-button primary" type="button" onClick={onAdd} disabled={disabled}><Check size={15} />Create Setting</button>
+                    ) : (
+                      <button className="icon-button primary" type="button" onClick={onUpdate} disabled={disabled}><Save size={15} />Save Changes</button>
+                    )}
+                    <button className="icon-button danger" type="button" onClick={onDelete} disabled={!selectedSetting || disabled}><Trash2 size={15} />Delete</button>
+                  </div>
+                ) : null}
+              </div>
+            </>
+          ) : (
+            <div className="preflop-empty"><p>Select a saved Setting or create a new one.</p></div>
+          )}
         </div>
-      ) : (
-        <pre className="solver-scenario-text">{selectedScenario ? formatScenarioLibraryText(selectedScenario) : ""}</pre>
-      )}
+      </section>
+      ) : null}
     </section>
+  );
+}
+
+function SettingBetSizeRuleEditor({
+  rule,
+  onChange,
+  disabled,
+  editable
+}: {
+  rule: SolverBetSizeRule;
+  onChange: (rule: SolverBetSizeRule) => void;
+  disabled: boolean;
+  editable: boolean;
+}) {
+  const [nextSize, setNextSize] = useState("");
+  const addSize = () => {
+    const size = Number(nextSize);
+    if (!Number.isFinite(size) || size <= 0) return;
+    onChange({ ...rule, enabled: true, sizes: [...new Set([...rule.sizes, size])].sort((left, right) => left - right) });
+    setNextSize("");
+  };
+  return (
+    <div className={`setting-bet-size-rule ${rule.enabled ? "enabled" : ""}`}>
+      <label className="setting-rule-toggle">
+        <input
+          type="checkbox"
+          checked={rule.enabled}
+          onChange={(event) => onChange({
+            ...rule,
+            enabled: event.target.checked && (rule.action === "allin" || rule.sizes.length > 0)
+          })}
+          disabled={disabled}
+        />
+        <span>{rule.action === "allin" ? "All-in" : rule.action}</span>
+      </label>
+      {rule.action !== "allin" ? (
+        <div className="setting-size-controls">
+          <div className="setting-size-chips">
+            {rule.sizes.map((size) => (
+              editable ? (
+                <button
+                  key={size}
+                  type="button"
+                  onClick={() => {
+                    const sizes = rule.sizes.filter((candidate) => candidate !== size);
+                    onChange({ ...rule, sizes, enabled: sizes.length > 0 && rule.enabled });
+                  }}
+                  disabled={disabled}
+                  title={`Remove ${size}`}
+                  aria-label={`Remove size ${size}`}
+                >
+                  {size}<X size={11} />
+                </button>
+              ) : <span key={size}>{size}</span>
+            ))}
+          </div>
+          {editable ? (
+            <div className="setting-size-add">
+              <input
+                type="number"
+                min="0.01"
+                step="0.01"
+                value={nextSize}
+                placeholder="Size"
+                onChange={(event) => setNextSize(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    addSize();
+                  }
+                }}
+                disabled={disabled}
+              />
+              <button type="button" onClick={addSize} disabled={disabled || !nextSize} aria-label={`Add ${rule.position} ${rule.street} ${rule.action} size`}><Plus size={12} /></button>
+            </div>
+          ) : null}
+        </div>
+      ) : <span className="setting-allin-note">No size required</span>}
+    </div>
   );
 }
 
@@ -3862,8 +4430,10 @@ function ParallelSolverJobPanel({
   selectedRangeLearned,
   settings,
   preview,
+  contextLoaded,
   datasetName,
   selectedScenario,
+  linkedSetting,
   scenarioLibrary,
   runs,
   failurePool,
@@ -3898,8 +4468,10 @@ function ParallelSolverJobPanel({
   selectedRangeLearned: boolean;
   settings: SolverJobSettings;
   preview: ParallelSolverJobPreview | null;
+  contextLoaded: boolean;
   datasetName: string;
   selectedScenario: SolverScenario | "";
+  linkedSetting: SolverScenarioLibraryItem | null;
   scenarioLibrary: SolverScenarioLibraryItem[];
   runs: ParallelSolverRun[];
   failurePool: ParallelFailurePoolEntry[];
@@ -3947,7 +4519,7 @@ function ParallelSolverJobPanel({
     (!activeFailurePoolDatasetName || entry.datasetName === activeFailurePoolDatasetName) &&
     entry.status !== "solved"
   );
-  const baseSubmitDisabled = !selectedRangePath || !selectedRangeLearned || busy != null;
+  const baseSubmitDisabled = !selectedRangePath || !selectedRangeLearned || !selectedScenario || busy != null;
   const submitDisabled = baseSubmitDisabled || !hasTargetServers;
   const parallelPreviewReady = preview?.sourceType === "parallel";
   const failurePoolPreviewReady = preview?.sourceType === "failure_pool";
@@ -3979,6 +4551,7 @@ function ParallelSolverJobPanel({
     <div className="parallel-job-shell">
       <ParallelQueueBoard
         runs={runs}
+        loaded={contextLoaded}
         activeRunId={activeInspectionRun?.id ?? null}
         busy={busy}
         onRunSelect={onRunSelect}
@@ -3987,6 +4560,7 @@ function ParallelSolverJobPanel({
       />
       <ParallelHistoryBoard
         runs={runs}
+        loaded={contextLoaded}
         activeRunId={activeInspectionRun?.id ?? null}
         busy={busy}
         onRunSelect={onRunSelect}
@@ -4081,7 +4655,7 @@ function ParallelSolverJobPanel({
                   ].filter(Boolean).join(" ")}
                 >
                   <strong className="parallel-server-id">{server.id}</strong>
-                  <ConnectionBadge status={server.latest?.connectionStatus ?? "unknown"} />
+                  <ConnectionBadge server={server} />
                   {performance ? <small className="parallel-server-tier-badge">Performance</small> : null}
                   <em>{available ? "Idle" : parallelServerUnavailableReason(server)}</em>
                 </div>
@@ -4104,13 +4678,6 @@ function ParallelSolverJobPanel({
               onChange={(event) => onChunkCountChange(positiveNumberFromInput(event.target.value, chunkCount))}
             />
           </label>
-          <label className="solver-job-field wide">
-            <span>Scenario</span>
-            <select value={selectedScenario} onChange={(event) => onScenarioChange(event.target.value as SolverScenario | "")}>
-              <option value="">Auto</option>
-              {scenarioLibrary.map((scenario) => <option key={scenario.id} value={scenario.id}>{scenario.id}</option>)}
-            </select>
-          </label>
           <label className="solver-job-field">
             <span>Batch Size Per Chunk</span>
             <input
@@ -4121,20 +4688,20 @@ function ParallelSolverJobPanel({
             />
           </label>
           <label className="solver-job-field">
+            <span>Setting{linkedSetting ? <em className="solver-setting-link-label"> (manually linked)</em> : null}</span>
+            <select value={selectedScenario} onChange={(event) => onScenarioChange(event.target.value as SolverScenario | "")} disabled={Boolean(linkedSetting)}>
+              {!linkedSetting ? <option value="">Select Setting</option> : null}
+              {(linkedSetting ? [linkedSetting] : scenarioLibrary).map((scenario) => (
+                <option key={scenario.id} value={scenario.id}>{scenario.label} ({scenario.id})</option>
+              ))}
+            </select>
+          </label>
+          <label className="solver-job-field">
             <span>Threads</span>
             <input
               type="number"
               value={settings.threadNum}
               onChange={(event) => onSettingsChange({ threadNum: integerFromInput(event.target.value, settings.threadNum) })}
-            />
-          </label>
-          <label className="solver-job-field">
-            <span>Max Iteration</span>
-            <input
-              type="number"
-              min="1"
-              value={settings.maxIteration}
-              onChange={(event) => onSettingsChange({ maxIteration: positiveNumberFromInput(event.target.value, settings.maxIteration) })}
             />
           </label>
           <label className="solver-job-field">
@@ -4404,6 +4971,7 @@ export function ParallelRunProgress({ assigned, done }: { assigned: number; done
 
 export function ParallelQueueBoard({
   runs,
+  loaded = true,
   activeRunId,
   busy,
   onRunSelect,
@@ -4411,6 +4979,7 @@ export function ParallelQueueBoard({
   onSaveOrder
 }: {
   runs: ParallelSolverRun[];
+  loaded?: boolean;
   activeRunId: string | null;
   busy: string | null;
   onRunSelect: (runId: string) => void;
@@ -4545,8 +5114,9 @@ export function ParallelQueueBoard({
         <div>
           <strong>Parallel Queue</strong>
           <span>
-            {committedQueueRuns.length} active / queued · {movableCount} movable ·
-            {" "}{mode === "edit" ? "editing draft" : "saved order"}
+            {loaded
+              ? `${committedQueueRuns.length} active / queued · ${movableCount} movable · ${mode === "edit" ? "editing draft" : "saved order"}`
+              : "Loading last saved queue…"}
           </span>
         </div>
         <div className="parallel-queue-editor">
@@ -4567,7 +5137,7 @@ export function ParallelQueueBoard({
               type="button"
               className={mode === "edit" ? "active" : ""}
               aria-pressed={mode === "edit"}
-              disabled={committedMovableIds.length === 0 || busy != null}
+              disabled={!loaded || committedMovableIds.length === 0 || busy != null}
               onClick={beginEdit}
             >
               <Pencil size={13} />
@@ -4666,7 +5236,7 @@ export function ParallelQueueBoard({
       ) : null}
 
       {committedQueueRuns.length === 0 ? (
-        <p className="solver-job-empty">No active or queued parallel run.</p>
+        <p className="solver-job-empty">{loaded ? "No active or queued parallel run." : "Loading last saved parallel queue…"}</p>
       ) : (
         <div
           className="parallel-queue-lane"
@@ -4753,14 +5323,16 @@ export function ParallelQueueBoard({
   );
 }
 
-function ParallelHistoryBoard({
+export function ParallelHistoryBoard({
   runs,
+  loaded = true,
   activeRunId,
   busy,
   onRunSelect,
   onRunDelete
 }: {
   runs: ParallelSolverRun[];
+  loaded?: boolean;
   activeRunId: string | null;
   busy: string | null;
   onRunSelect: (runId: string) => void;
@@ -4768,48 +5340,77 @@ function ParallelHistoryBoard({
 }) {
   const historyRuns = parallelHistoryRuns(runs);
   const [filter, setFilter] = useState<ParallelHistoryFilter>("all");
+  const [query, setQuery] = useState("");
+  const normalizedQuery = query.trim().toLocaleLowerCase();
   const completedCount = historyRuns.filter((run) => run.status === "completed").length;
   const completedWithFailuresCount = historyRuns.filter((run) => run.status === "completed_with_failures").length;
-  const visibleRuns = filter === "all" ? historyRuns : historyRuns.filter((run) => run.status === filter);
+  const statusRuns = filter === "all" ? historyRuns : historyRuns.filter((run) => run.status === filter);
+  const visibleRuns = normalizedQuery
+    ? statusRuns.filter((run) => parallelHistoryRunMatchesQuery(run, normalizedQuery))
+    : statusRuns;
+  const visibleRunIds = visibleRuns.map((run) => run.id).join("\n");
+
+  useEffect(() => {
+    if (!normalizedQuery || visibleRuns.length === 0 || visibleRuns.some((run) => run.id === activeRunId)) return;
+    onRunSelect(visibleRuns[0]!.id);
+  }, [activeRunId, normalizedQuery, onRunSelect, visibleRunIds]);
 
   return (
     <section className="parallel-history-board">
       <div className="parallel-section-title parallel-section-title-with-actions parallel-history-heading">
         <div>
           <strong>Parallel History</strong>
-          <span>{historyRuns.length} finished · select to inspect reports and failure pool</span>
+          <span>{loaded ? `${historyRuns.length} finished · select to inspect reports and failure pool` : "Loading last saved history…"}</span>
         </div>
-        <div className="parallel-history-filters" role="group" aria-label="Filter parallel history by completion status">
-          <button
-            type="button"
-            className={filter === "all" ? "active" : ""}
-            aria-pressed={filter === "all"}
-            onClick={() => setFilter("all")}
-          >
-            All <em>{historyRuns.length}</em>
-          </button>
-          <button
-            type="button"
-            className={`completed ${filter === "completed" ? "active" : ""}`}
-            aria-pressed={filter === "completed"}
-            onClick={() => setFilter("completed")}
-          >
-            Completed <small>All Successful</small> <em>{completedCount}</em>
-          </button>
-          <button
-            type="button"
-            className={`completed-with-failures ${filter === "completed_with_failures" ? "active" : ""}`}
-            aria-pressed={filter === "completed_with_failures"}
-            onClick={() => setFilter("completed_with_failures")}
-          >
-            Completed with Failures <em>{completedWithFailuresCount}</em>
-          </button>
-        </div>
+        {loaded ? <div className="parallel-history-controls">
+          <label className="parallel-history-search">
+            <Search size={13} aria-hidden="true" />
+            <input
+              type="search"
+              value={query}
+              aria-label="Search parallel history"
+              placeholder="Search history"
+              onChange={(event) => {
+                const nextQuery = event.target.value;
+                setQuery(nextQuery);
+                if (nextQuery.trim()) setFilter("all");
+              }}
+            />
+          </label>
+          <div className="parallel-history-filters" role="group" aria-label="Filter parallel history by completion status">
+            <button
+              type="button"
+              className={filter === "all" ? "active" : ""}
+              aria-pressed={filter === "all"}
+              onClick={() => setFilter("all")}
+            >
+              All <em>{historyRuns.length}</em>
+            </button>
+            <button
+              type="button"
+              className={`completed ${filter === "completed" ? "active" : ""}`}
+              aria-pressed={filter === "completed"}
+              onClick={() => setFilter("completed")}
+            >
+              Completed <small>All Successful</small> <em>{completedCount}</em>
+            </button>
+            <button
+              type="button"
+              className={`completed-with-failures ${filter === "completed_with_failures" ? "active" : ""}`}
+              aria-pressed={filter === "completed_with_failures"}
+              onClick={() => setFilter("completed_with_failures")}
+            >
+              Completed with Failures <em>{completedWithFailuresCount}</em>
+            </button>
+          </div>
+        </div> : null}
       </div>
       {historyRuns.length === 0 ? (
-        <p className="solver-job-empty">No finished parallel runs yet.</p>
+        <p className="solver-job-empty">{loaded ? "No finished parallel runs yet." : "Loading last saved parallel history…"}</p>
       ) : visibleRuns.length === 0 ? (
-        <p className="solver-job-empty">No parallel runs match this status.</p>
+        <p className="solver-job-empty">
+          {normalizedQuery ? `No parallel history matches “${query.trim()}”.` : "No parallel runs match this status."}
+        </p>
       ) : (
         <div className="parallel-history-lane" aria-label="Parallel run history">
           {visibleRuns.map((run) => {
@@ -4900,10 +5501,10 @@ export function ServerOperationsPanel({
   busy: string | null;
   inventoryLoaded: boolean;
   onScanUploads: () => void;
-  onSync: () => void;
+  onSync: (serverIds?: string[]) => void;
   onNetworkSync: (serverIds?: string[]) => void;
-  onNetworkCheck: () => void;
-  onUpload: () => void;
+  onNetworkCheck: (serverIds?: string[]) => void;
+  onUpload: (serverIds?: string[]) => void;
   onUploadCandidate: (candidate: ServerUploadCandidate) => void;
   onUploadCandidates: (candidates: ServerUploadCandidate[]) => void;
   onDeleteCandidate: (candidate: ServerUploadCandidate) => void;
@@ -5152,7 +5753,7 @@ export function ServerOperationsPanel({
                     <strong>{server.id}</strong>
                     <small>{server.name || server.host || "Unnamed server"}</small>
                   </span>
-                  <ConnectionBadge status={server.latest?.connectionStatus ?? "unknown"} />
+                  <ConnectionBadge server={server} />
                   {!server.enabled ? <em className="server-tier-disabled">Disabled</em> : null}
                 </label>
               ))}
@@ -5183,7 +5784,7 @@ export function ServerOperationsPanel({
                     <strong>{server.id}</strong>
                     <small>{server.name || server.host || "Unnamed server"}</small>
                   </span>
-                  <ConnectionBadge status={server.latest?.connectionStatus ?? "unknown"} />
+                  <ConnectionBadge server={server} />
                   {!server.enabled ? <em className="server-tier-disabled">Disabled</em> : null}
                 </label>
               ))}
@@ -5204,17 +5805,17 @@ export function ServerOperationsPanel({
               <strong>Sync Code</strong>
               <span>Manual Git update · {onlineServers.length} target{onlineServers.length === 1 ? "" : "s"}</span>
             </div>
-            <button className="icon-button compact primary" type="button" onClick={onSync} disabled={operationBusy || onlineServers.length === 0}>
+            <button className="icon-button compact primary" type="button" onClick={() => onSync()} disabled={operationBusy || onlineServers.length === 0}>
               <RefreshCw size={14} />
               New Sync Tmux
             </button>
           </div>
           <div className="server-ops-target-list">
-            {onlineServers.length === 0 ? <p className="solver-job-empty">No online enabled server.</p> : null}
+            {onlineServers.length === 0 ? <p className="solver-job-empty">No SSH-ready enabled server.</p> : null}
             {onlineServers.map((server) => (
               <span key={server.id} className="server-ops-target-chip">
                 <strong>{server.id}</strong>
-                <ConnectionBadge status={server.latest?.connectionStatus ?? "unknown"} />
+                <ConnectionBadge server={server} />
                 <em>{server.solverRoot || "~/solver"}</em>
               </span>
             ))}
@@ -5251,7 +5852,7 @@ export function ServerOperationsPanel({
               <strong>Scan + Upload</strong>
               <span>{candidateSummary.folders} folders · {candidateSummary.files} files found in last scan</span>
             </div>
-            <button className="icon-button compact primary" type="button" onClick={onUpload} disabled={operationBusy || onlineServers.length === 0}>
+            <button className="icon-button compact primary" type="button" onClick={() => onUpload()} disabled={operationBusy || onlineServers.length === 0}>
               <Upload size={14} />
               Scan + Upload All
             </button>
@@ -5423,7 +6024,7 @@ export function ServerOperationsPanel({
             <span>{enabledServers.length} enabled servers · latest state ordered by Server ID</span>
           </div>
           {inventoryTab === "network" ? (
-            <button className="icon-button compact primary" type="button" onClick={onNetworkCheck} disabled={operationBusy || onlineServers.length === 0}>
+            <button className="icon-button compact primary" type="button" onClick={() => onNetworkCheck()} disabled={operationBusy || onlineServers.length === 0}>
               <Search size={14} />
               Check All Online
             </button>
@@ -5532,6 +6133,9 @@ export function ServerOperationsPanel({
                               : null
                     }
                     onNetworkSelect={toggleNetworkServer}
+                    onSync={() => onSync([server.id])}
+                    onNetworkCheck={() => onNetworkCheck([server.id])}
+                    onUpload={() => onUpload([server.id])}
                     onStop={onStop}
                     onRetry={onRetry}
                     onDetails={setUploadDetailOperationId}
@@ -5560,6 +6164,9 @@ function ServerOperationRow({
   networkSelected,
   networkSelectionDisabledReason,
   onNetworkSelect,
+  onSync,
+  onNetworkCheck,
+  onUpload,
   onStop,
   onRetry,
   onDetails
@@ -5571,6 +6178,9 @@ function ServerOperationRow({
   networkSelected: boolean;
   networkSelectionDisabledReason: string | null;
   onNetworkSelect: (serverId: string) => void;
+  onSync: () => void;
+  onNetworkCheck: () => void;
+  onUpload: () => void;
   onStop: (operation: ServerOperation) => void;
   onRetry: (operation: ServerOperation) => void;
   onDetails: (operationId: string) => void;
@@ -5592,6 +6202,15 @@ function ServerOperationRow({
     : inventoryTab === "network"
       ? networkCheck
       : operations.get("upload") ?? null;
+  const startOperation = inventoryTab === "sync"
+    ? operations.get("sync") ?? null
+    : inventoryTab === "network"
+      ? networkCheck
+      : operations.get("upload") ?? null;
+  const startOperationActive = Boolean(startOperation && !serverOperationIsTerminal(startOperation));
+  const startDisabled = (busy?.startsWith("operation-") ?? false) || !serverIsOnlineForJob(server) || startOperationActive;
+  const startLabel = inventoryTab === "sync" ? "Code Sync" : inventoryTab === "network" ? "Check Online" : "Scan + Upload";
+  const startAction = inventoryTab === "sync" ? onSync : inventoryTab === "network" ? onNetworkCheck : onUpload;
   return (
     <tr className={`server-ops-history-row server-ops-inventory-row ${inventoryTab === "network" && networkSelected ? "selected" : ""}`}>
       <td>
@@ -5609,7 +6228,7 @@ function ServerOperationRow({
         ) : <strong>{server.id}</strong>}
       </td>
       <td>
-        <ConnectionBadge status={server.latest?.connectionStatus ?? "unknown"} />
+        <ConnectionBadge server={server} />
       </td>
       {inventoryTab === "sync" ? <td><ServerOperationState operation={operations.get("sync") ?? null} /></td> : null}
       {inventoryTab === "network" ? <><td><ServerOperationState operation={operations.get("network_sync") ?? null} /></td><td><ServerOperationState operation={networkCheck} /></td></> : null}
@@ -5617,6 +6236,17 @@ function ServerOperationRow({
       <td>{primaryOperation ? formatShortDateTime(primaryOperation.finishedAt ?? primaryOperation.updatedAt) : <span className="server-ops-never">Never</span>}</td>
       <td>
         <div className="server-ops-row-actions">
+          <button
+            className="inventory-confirm-button primary"
+            type="button"
+            aria-label={`${startLabel} on server ${server.id}`}
+            title={startOperationActive ? `${startLabel} is already active on server ${server.id}` : `${startLabel} only on server ${server.id}`}
+            onClick={startAction}
+            disabled={startDisabled}
+          >
+            {inventoryTab === "sync" ? <RefreshCw size={13} /> : inventoryTab === "network" ? <Search size={13} /> : <Upload size={13} />}
+            {startLabel}
+          </button>
           {actionable.map((operation) => {
             const active = !serverOperationIsTerminal(operation);
             const working = busy === `operation-stop:${operation.id}` || busy === "operation-retry";
@@ -5838,7 +6468,7 @@ function SolverServerSnapshot({ server }: { server: ServerRow | null }) {
           <span>{server.host}:{server.port}</span>
         </div>
         <div className="solver-server-badges">
-          <ConnectionBadge status={server.latest?.connectionStatus ?? "unknown"} />
+          <ConnectionBadge server={server} />
           {task ? <SolverTaskBadge status={task.displayStatus} /> : <span className="badge task-badge unavailable">no task</span>}
         </div>
       </div>
@@ -5869,7 +6499,8 @@ function SolverServerMetric({ label, value }: { label: string; value: string }) 
   );
 }
 
-function ConnectionBadge({ status }: { status: ConnectionStatus }) {
+function ConnectionBadge({ server }: { server: Pick<ServerRow, "latest" | "pipeline"> }) {
+  const status = connectionDisplayStatus(server.latest, server.pipeline);
   return <span className={`badge conn-badge ${status}`}>{status}</span>;
 }
 
@@ -6006,6 +6637,9 @@ function PreflopFolderBranch(props: {
   activePath: string;
   expandedFolders: Set<string>;
   query: string;
+  statusView: RangeStatusView;
+  visibleReviewStatuses: Set<PreflopReviewStatus>;
+  visibleRunStatuses: Set<PreflopRunStatus>;
   dropTarget: DropTarget | null;
   onToggle: (path: string) => void;
   onSelect: (path: string) => void;
@@ -6033,6 +6667,9 @@ function PreflopFolderRow({
   activePath,
   expandedFolders,
   query,
+  statusView,
+  visibleReviewStatuses,
+  visibleRunStatuses,
   dropTarget,
   onToggle,
   onSelect,
@@ -6045,6 +6682,9 @@ function PreflopFolderRow({
   activePath: string;
   expandedFolders: Set<string>;
   query: string;
+  statusView: RangeStatusView;
+  visibleReviewStatuses: Set<PreflopReviewStatus>;
+  visibleRunStatuses: Set<PreflopRunStatus>;
   dropTarget: DropTarget | null;
   onToggle: (path: string) => void;
   onSelect: (path: string) => void;
@@ -6091,7 +6731,9 @@ function PreflopFolderRow({
       </span>
       <Folder size={14} />
       <span>{item.name}</span>
-      <strong className="preflop-folder-count">{countFolderFiles(item)}</strong>
+      <strong className="preflop-folder-count">
+        {countVisibleFiles(item.children, statusView, visibleReviewStatuses, visibleRunStatuses)}
+      </strong>
     </button>
   );
 }
@@ -6465,6 +7107,12 @@ function serverOperationResultDetail(operation: ServerOperation): string | null 
     const output = typeof detail?.git_output === "string" ? detail.git_output.trim().split(/\r?\n/).filter(Boolean).at(-1) : "";
     return output ? `Git pull failed; existing Mihomo used: ${output}` : "Git pull failed; the existing Mihomo binary was used.";
   }
+  if (operation.type === "network_sync" && numericResult(operation.result?.summary.dns_retry_recovered) > 0) {
+    const repairCode = numericResult(operation.result?.details[0]?.dns_repair_code);
+    return repairCode === 0
+      ? "Config download recovered after the automatic DNS retry."
+      : `Config download recovered on retry; DNS repair returned exit ${repairCode}.`;
+  }
   if (operation.type === "upload" && operation.result) {
     const uploaded = numericResult(operation.result.summary.files_uploaded);
     const deleted = numericResult(operation.result.summary.files_deleted);
@@ -6505,8 +7153,25 @@ function serverOperationResultDetail(operation: ServerOperation): string | null 
     const output = typeof outputValue === "string" ? outputValue : null;
     const lastLine = output?.trim().split(/\r?\n/).filter(Boolean).at(-1);
     if (failedStage) {
-      const code = typeof failedStage[1] === "number" ? failedStage[1] : null;
+      const initialDownloadCode = typeof detail.download_initial_code === "number" ? detail.download_initial_code : null;
+      const retryDownloadCode = typeof detail.download_retry_code === "number" && detail.download_retry_code >= 0
+        ? detail.download_retry_code
+        : null;
+      const code = failedStage[0] === "Config download"
+        ? retryDownloadCode ?? initialDownloadCode ?? (typeof failedStage[1] === "number" ? failedStage[1] : null)
+        : typeof failedStage[1] === "number" ? failedStage[1] : null;
       const reason = code === 124 ? "timed out" : code != null ? `exit ${code}` : "failed";
+      if (failedStage[0] === "Config download" && numericResult(detail.dns_retry_attempted) > 0) {
+        const repairCode = numericResult(detail.dns_repair_code);
+        const initialReason = initialDownloadCode === 124
+          ? "initial timeout"
+          : initialDownloadCode != null
+            ? `initial exit ${initialDownloadCode}`
+            : "initial failure";
+        return repairCode === 0
+          ? `Config download retry ${reason} after ${initialReason} and automatic DNS repair.`
+          : `Config download retry ${reason} after ${initialReason}; DNS repair returned exit ${repairCode}.`;
+      }
       return lastLine ? `${failedStage[0]} ${reason}: ${lastLine}` : `${failedStage[0]} ${reason}`;
     }
   }
@@ -6648,6 +7313,26 @@ function parallelHistoryRuns(runs: ParallelSolverRun[]): ParallelSolverRun[] {
   return terminalParallelReportRuns(runs).sort(compareParallelHistoryRun);
 }
 
+function parallelHistoryRunMatchesQuery(run: ParallelSolverRun, normalizedQuery: string): boolean {
+  const searchText = [
+    run.datasetName,
+    displayDatasetName(run.datasetName),
+    run.rangeName,
+    run.rangePath,
+    run.repoId,
+    run.settingId,
+    run.setting?.label,
+    run.setting?.id,
+    run.sourceType,
+    run.status,
+    formatParallelRunStatus(run.status),
+    run.id,
+    ...run.serverIds,
+    ...run.slices.flatMap((slice) => [slice.serverId, ...slice.candidateServerIds])
+  ].filter(Boolean).join(" ").toLocaleLowerCase();
+  return searchText.includes(normalizedQuery);
+}
+
 function resolveInspectionRun(runs: ParallelSolverRun[], activeRunId: string | null): ParallelSolverRun | null {
   if (!activeRunId) return null;
   return runs.find((run) => run.id === activeRunId) ?? null;
@@ -6771,7 +7456,7 @@ function buildParallelReportsMarkdown(
       `- Status: ${formatParallelRunStatus(run.status)}`,
       `- Server Range: ${parallelServerScopeReportLabel(run.serverScope)}`,
       `- Repo: ${run.repoId}`,
-      `- Scenario: ${run.scenario}`,
+      `- Setting: ${run.setting?.label ?? run.scenario} (${run.settingId ?? run.scenario})`,
       `- Range: ${run.rangeName}`,
       `- Created: ${run.createdAt}`,
       `- Started: ${run.startedAt ?? "-"}`,
@@ -6985,11 +7670,21 @@ function normalizeRangeProgress(
   if (!value && !datasetName) return undefined;
   const totalRows = positiveNumber(value?.totalRows, 1755);
   const rows = Math.max(0, Math.floor(Number(value?.rows ?? 0)));
+  const localRows = Math.max(0, Math.floor(Number(value?.localRows ?? 0)));
+  const combinedRows = Math.max(rows, Math.floor(Number(value?.combinedRows ?? Math.max(rows, localRows))));
+  const localOverlapKnown = value?.localOverlapKnown ?? localRows === 0;
   return {
     datasetName: value?.datasetName || datasetName || "",
     rows,
     totalRows,
     ratio: clampProgressRatio(value?.ratio ?? rows / totalRows),
+    localRows,
+    combinedRows,
+    combinedRatio: clampProgressRatio(value?.combinedRatio ?? combinedRows / totalRows),
+    localOnlyRows: localOverlapKnown
+      ? Math.max(0, Math.floor(Number(value?.localOnlyRows ?? combinedRows - rows)))
+      : 0,
+    localOverlapKnown,
     checkedAt: value?.checkedAt,
     error: value?.error
   };
@@ -7019,7 +7714,6 @@ function filterTreeItems(
       return fileVisibleInStatusView(item, statusView, visibleReviewStatuses, visibleRunStatuses) &&
         (!normalized || fileMatchesQuery(item, normalized));
     }
-    if (!folderHasVisibleStatus(item, statusView, visibleReviewStatuses, visibleRunStatuses)) return false;
     return !normalized || folderHasMatch(item, query);
   });
 }
@@ -7039,8 +7733,18 @@ function countFiles(items: PreflopRangeTreeItem[]): number {
   return items.reduce((count, item) => item.type === "folder" ? count + countFiles(item.children) : count + 1, 0);
 }
 
-function countFolderFiles(item: PreflopRangeFolderItem): number {
-  return countFiles(item.children);
+function countVisibleFiles(
+  items: PreflopRangeTreeItem[],
+  statusView: RangeStatusView,
+  visibleReviewStatuses: Set<PreflopReviewStatus>,
+  visibleRunStatuses: Set<PreflopRunStatus>
+): number {
+  return items.reduce((count, item) => {
+    if (item.type === "folder") {
+      return count + countVisibleFiles(item.children, statusView, visibleReviewStatuses, visibleRunStatuses);
+    }
+    return count + Number(fileVisibleInStatusView(item, statusView, visibleReviewStatuses, visibleRunStatuses));
+  }, 0);
 }
 
 function countApprovedFiles(items: PreflopRangeTreeItem[]): number {
@@ -7048,6 +7752,71 @@ function countApprovedFiles(items: PreflopRangeTreeItem[]): number {
     if (item.type === "folder") return count + countApprovedFiles(item.children);
     return item.reviewStatus === "approved" ? count + 1 : count;
   }, 0);
+}
+
+function rangeFolderLinkOptionsFromTree(items: PreflopRangeTreeItem[]): RangeFolderLinkOption[] {
+  return items.flatMap((item) => {
+    if (item.type !== "folder") return [];
+    return [
+      {
+        path: item.path,
+        hasDirectCheckedFiles: item.children.some((child) => child.type === "file" && child.reviewStatus === "approved")
+      },
+      ...rangeFolderLinkOptionsFromTree(item.children)
+    ];
+  });
+}
+
+function rangeFolderIsFullyCoveredByDescendantLinks(
+  folderPath: string,
+  folders: RangeFolderLinkOption[],
+  settings: SolverScenarioLibraryItem[]
+): boolean {
+  const folder = folders.find((candidate) => sameRangeFolderPath(candidate.path, folderPath));
+  if (!folder || folder.hasDirectCheckedFiles) return false;
+
+  const childFolders = folders.filter((candidate) => parentPath(candidate.path) === folder.path);
+  return childFolders.length > 0 && childFolders.every((child) =>
+    rangeFolderIsCoveredByLinks(child.path, folders, settings)
+  );
+}
+
+function rangeFolderIsCoveredByLinks(
+  folderPath: string,
+  folders: RangeFolderLinkOption[],
+  settings: SolverScenarioLibraryItem[]
+): boolean {
+  const hasExactLink = settings.some((setting) => solverSettingRangeFolderPaths(setting).some((linkedPath) =>
+    sameRangeFolderPath(linkedPath, folderPath)
+  ));
+  if (hasExactLink) return true;
+
+  const folder = folders.find((candidate) => sameRangeFolderPath(candidate.path, folderPath));
+  if (!folder || folder.hasDirectCheckedFiles) return false;
+
+  const childFolders = folders.filter((candidate) => parentPath(candidate.path) === folder.path);
+  return childFolders.length > 0 && childFolders.every((child) =>
+    rangeFolderIsCoveredByLinks(child.path, folders, settings)
+  );
+}
+
+function sameRangeFolderPath(left: string, right: string): boolean {
+  return solverRangePathIsInsideFolder(left, right) && solverRangePathIsInsideFolder(right, left);
+}
+
+function settingsAffectedByRangePath(
+  settings: SolverScenarioLibraryItem[],
+  rangePath: string,
+  itemType: "folder" | "file"
+): SolverScenarioLibraryItem[] {
+  if (itemType === "file") return linkedSolverSettingsForRangePath(settings, rangePath);
+  return settings.filter((setting) => solverSettingRangeFolderPaths(setting).some((folderPath) =>
+    solverRangePathIsInsideFolder(rangePath, folderPath) || solverRangePathIsInsideFolder(folderPath, rangePath)
+  ));
+}
+
+function uniqueSettings(settings: SolverScenarioLibraryItem[]): SolverScenarioLibraryItem[] {
+  return [...new Map(settings.map((setting) => [setting.id, setting])).values()];
 }
 
 function countReviewStatuses(items: PreflopRangeTreeItem[]): Record<PreflopReviewStatus, number> {
@@ -7078,19 +7847,6 @@ function countRunStatuses(items: PreflopRangeTreeItem[]): Record<PreflopRunStatu
   };
   visit(items);
   return counts;
-}
-
-function folderHasVisibleStatus(
-  item: PreflopRangeFolderItem,
-  statusView: RangeStatusView,
-  visibleReviewStatuses: Set<PreflopReviewStatus>,
-  visibleRunStatuses: Set<PreflopRunStatus>
-): boolean {
-  return item.children.some((child) =>
-    child.type === "folder"
-      ? folderHasVisibleStatus(child, statusView, visibleReviewStatuses, visibleRunStatuses)
-      : fileVisibleInStatusView(child, statusView, visibleReviewStatuses, visibleRunStatuses)
-  );
 }
 
 function fileVisibleInStatusView(
@@ -7146,18 +7902,54 @@ function rangeDisplayStatusInitial(item: PreflopRangeFileItem, statusView: Range
   return statusView === "already" ? runStatusInitial(item.runStatus) : reviewStatusInitial(item.reviewStatus);
 }
 
-function formatRangeProgress(progress: PreflopRangeProgress | undefined): string {
-  const ratio = clampProgressRatio(progress?.ratio ?? 0);
+function formatRangeProgress(
+  progress: PreflopRangeProgress | undefined,
+  source: "remote" | "combined"
+): string {
+  const ratio = clampProgressRatio(source === "remote" ? progress?.ratio : progress?.combinedRatio);
   return `${Math.round(ratio * 100)}%`;
 }
 
-function rangeProgressTitle(item: PreflopRangeFileItem): string {
+export function RangeProgressPill({
+  item,
+  view
+}: {
+  item: PreflopRangeFileItem;
+  view: RangeProgressView;
+}) {
+  const source = view === "remote" ? "remote" : "combined";
+  const progress = formatRangeProgress(item.progress, source);
+  const combinedIsLowerBound = source === "combined" &&
+    item.progress?.localOverlapKnown === false &&
+    clampProgressRatio(item.progress?.combinedRatio) < 1;
+  return (
+    <span
+      className={`preflop-progress-pill ${rangeProgressClass(
+        source === "remote" ? item.progress?.ratio : item.progress?.combinedRatio
+      )}`}
+      title={rangeProgressTitle(item, source)}
+      aria-label={`${view === "remote" ? "Remote" : "Total"} progress ${combinedIsLowerBound ? "at least " : ""}${progress}`}
+    >
+      {combinedIsLowerBound ? "≥" : ""}{progress}
+    </span>
+  );
+}
+
+function rangeProgressTitle(item: PreflopRangeFileItem, source: "remote" | "combined"): string {
   const progress = item.progress;
-  const rows = Math.max(0, Math.floor(Number(progress?.rows ?? 0)));
+  const rows = Math.max(0, Math.floor(Number(
+    source === "remote" ? progress?.rows : progress?.combinedRows
+  )));
   const total = positiveNumber(progress?.totalRows, 1755);
   const checked = progress?.checkedAt ? ` · checked ${formatTimestamp(progress.checkedAt)}` : "";
   const error = progress?.error ? ` · ${progress.error}` : "";
-  return `${rows} / ${total} rows${checked}${error}`;
+  if (source === "remote") return `Remote: ${rows} / ${total} boards${checked}${error}`;
+  const localRows = Math.max(0, Math.floor(Number(progress?.localRows ?? 0)));
+  const localOnlyRows = Math.max(0, Math.floor(Number(progress?.localOnlyRows ?? 0)));
+  const localDetail = progress?.localOverlapKnown === false
+    ? `${localRows} in local history · remote overlap unavailable`
+    : `${localRows} in local history · ${localOnlyRows} awaiting remote upload`;
+  return `Remote + local: ${rows} / ${total} boards · ${localDetail}${checked}${error}`;
 }
 
 function rangeProgressClass(ratio: unknown): string {
@@ -7245,6 +8037,122 @@ function readExpandedFolders(): Set<string> {
   }
 }
 
+export function readRangeProgressViewPreference(): RangeProgressView {
+  try {
+    return localStorage.getItem(RANGE_PROGRESS_VIEW_KEY) === "remote" ? "remote" : "total";
+  } catch {
+    return "total";
+  }
+}
+
+export function writeRangeProgressViewPreference(view: RangeProgressView): void {
+  try {
+    localStorage.setItem(RANGE_PROGRESS_VIEW_KEY, view);
+  } catch {
+    // ignore storage failures
+  }
+}
+
+function scheduleParallelJobsCacheWrite(response: ParallelSolverJobsResponse, snapshotAt: string | null): void {
+  const fingerprint = parallelJobsCacheFingerprint(response, snapshotAt);
+  if (fingerprint === parallelJobsCachePersistedFingerprint) return;
+  pendingParallelJobsCacheWrite = {
+    version: PARALLEL_JOBS_CACHE_VERSION,
+    cachedAt: new Date().toISOString(),
+    snapshotAt,
+    response
+  };
+  if (parallelJobsCacheWriteTimer != null) return;
+  const delay = Math.max(0, PARALLEL_JOBS_CACHE_WRITE_INTERVAL_MS - (Date.now() - parallelJobsCacheLastWriteAt));
+  parallelJobsCacheWriteTimer = window.setTimeout(flushParallelJobsCacheWrite, delay);
+}
+
+function flushParallelJobsCacheWrite(): void {
+  parallelJobsCacheWriteTimer = null;
+  const record = pendingParallelJobsCacheWrite;
+  pendingParallelJobsCacheWrite = null;
+  if (!record) return;
+  const fingerprint = parallelJobsCacheFingerprint(record.response, record.snapshotAt);
+  parallelJobsCacheLastWriteAt = Date.now();
+  parallelJobsCachePersistedFingerprint = fingerprint;
+  void writeParallelJobsCache(record).catch(() => {
+    if (parallelJobsCachePersistedFingerprint === fingerprint) parallelJobsCachePersistedFingerprint = "";
+  });
+}
+
+async function readParallelJobsCache(): Promise<ParallelJobsCacheRecord | null> {
+  if (typeof indexedDB === "undefined") return null;
+  try {
+    const database = await openParallelJobsCacheDatabase();
+    const record = await new Promise<ParallelJobsCacheRecord | null>((resolve, reject) => {
+      const transaction = database.transaction(PARALLEL_JOBS_CACHE_STORE_NAME, "readonly");
+      const request = transaction.objectStore(PARALLEL_JOBS_CACHE_STORE_NAME).get(PARALLEL_JOBS_CACHE_KEY);
+      request.onsuccess = () => resolve((request.result as ParallelJobsCacheRecord | undefined) ?? null);
+      request.onerror = () => reject(request.error ?? new Error("Unable to read the Parallel Jobs cache."));
+    });
+    database.close();
+    if (
+      record?.version !== PARALLEL_JOBS_CACHE_VERSION ||
+      !Array.isArray(record.response?.runs) ||
+      !Array.isArray(record.response?.failurePool)
+    ) {
+      return null;
+    }
+    parallelJobsCachePersistedFingerprint = parallelJobsCacheFingerprint(record.response, record.snapshotAt ?? record.cachedAt);
+    parallelJobsCacheLastWriteAt = Date.now();
+    parallelJobsMemoryCache = record;
+    return record;
+  } catch {
+    return null;
+  }
+}
+
+async function writeParallelJobsCache(record: ParallelJobsCacheRecord): Promise<void> {
+  if (typeof indexedDB === "undefined") return;
+  const database = await openParallelJobsCacheDatabase();
+  await new Promise<void>((resolve, reject) => {
+    const transaction = database.transaction(PARALLEL_JOBS_CACHE_STORE_NAME, "readwrite");
+    transaction.objectStore(PARALLEL_JOBS_CACHE_STORE_NAME).put(record, PARALLEL_JOBS_CACHE_KEY);
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error ?? new Error("Unable to write the Parallel Jobs cache."));
+    transaction.onabort = () => reject(transaction.error ?? new Error("Parallel Jobs cache write was aborted."));
+  });
+  database.close();
+}
+
+function openParallelJobsCacheDatabase(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(PARALLEL_JOBS_CACHE_DB_NAME, 1);
+    request.onupgradeneeded = () => {
+      const database = request.result;
+      if (!database.objectStoreNames.contains(PARALLEL_JOBS_CACHE_STORE_NAME)) {
+        database.createObjectStore(PARALLEL_JOBS_CACHE_STORE_NAME);
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error ?? new Error("Unable to open the UI cache."));
+  });
+}
+
+function parallelJobsCacheFingerprint(response: ParallelSolverJobsResponse, snapshotAt: string | null): string {
+  const latestRunUpdate = response.runs.reduce(
+    (latest, run) => run.updatedAt > latest ? run.updatedAt : latest,
+    ""
+  );
+  const latestFailureUpdate = response.failurePool.reduce(
+    (latest, entry) => entry.updatedAt > latest ? entry.updatedAt : latest,
+    ""
+  );
+  return [
+    response.runs.length,
+    latestRunUpdate,
+    response.failurePool.length,
+    latestFailureUpdate,
+    Number(response.reconciling),
+    snapshotAt ?? ""
+  ].join(":");
+}
+
 function dropModeFromEvent(event: DragEvent<HTMLElement>, itemType: "folder" | "file"): DropTarget["mode"] {
   const rect = event.currentTarget.getBoundingClientRect();
   const y = event.clientY - rect.top;
@@ -7291,54 +8199,64 @@ function formatSolverRangeText(summary: PreflopRangeSummary): string {
   ].join("\n");
 }
 
-function formatScenarioLibraryText(scenario: SolverScenarioLibraryItem): string {
-  return [
-    `SCENARIO = "${scenario.id}"`,
-    `LABEL = "${scenario.label}"`,
-    `RANGE_SUBDIR = "${scenario.rangeSubdir}"`,
-    `CONFIG_TEMPLATE = "${scenario.configTemplate}"`,
-    `POT = ${scenario.pot}`,
-    `EFFECTIVE_STACK = ${scenario.effectiveStack}`,
-    scenario.description ? `DESCRIPTION = "${scenario.description}"` : ""
-  ].filter(Boolean).join("\n");
-}
-
 function emptyScenarioLibraryItem(): SolverScenarioLibraryItem {
+  const base = DEFAULT_SOLVER_SCENARIO_LIBRARY[0]!;
+  const parameters = {
+    ...base.parameters,
+    betSizeRules: base.parameters.betSizeRules.map((rule) => ({ ...rule, sizes: [...rule.sizes] }))
+  };
   return {
     id: "",
     label: "",
+    rangeFolderPaths: [],
     rangeSubdir: "",
-    configTemplate: "SIA_SOD_CONFIG",
+    configTemplate: buildSolverSettingConfigTemplate({ parameters }),
     pot: 5,
-    effectiveStack: 98
+    effectiveStack: 98,
+    parameters
   };
 }
 
 function normalizeScenarioDraft(draft: SolverScenarioLibraryItem): SolverScenarioLibraryItem | null {
   const id = draft.id.trim();
   const label = draft.label.trim();
-  const rangeSubdir = draft.rangeSubdir.trim() || id;
-  const configTemplate = draft.configTemplate.trim();
+  const rangeFolderPaths = normalizeSolverSettingRangeFolderPaths(draft.rangeFolderPaths ?? []);
   const pot = Number(draft.pot);
   const effectiveStack = Number(draft.effectiveStack);
-  if (!id || !label || !rangeSubdir || !configTemplate || !Number.isFinite(pot) || !Number.isFinite(effectiveStack)) {
+  if (!id || !label || !Number.isFinite(pot) || !Number.isFinite(effectiveStack)) {
     return null;
   }
+  const configTemplate = buildSolverSettingConfigTemplate(draft);
   return {
     id,
     label,
-    rangeSubdir,
+    rangeFolderPaths,
+    rangeSubdir: rangeFolderPaths[0] ?? "",
     configTemplate,
     pot,
     effectiveStack,
+    parameters: draft.parameters,
     ...(draft.description?.trim() ? { description: draft.description.trim() } : {})
   };
 }
 
+function solverSettingSavePayload(setting: SolverScenarioLibraryItem): Omit<SolverScenarioLibraryItem, "configTemplate"> {
+  return {
+    id: setting.id,
+    label: setting.label,
+    rangeFolderPaths: solverSettingRangeFolderPaths(setting),
+    rangeSubdir: setting.rangeSubdir,
+    pot: setting.pot,
+    effectiveStack: setting.effectiveStack,
+    parameters: setting.parameters,
+    ...(setting.description ? { description: setting.description } : {})
+  };
+}
+
 function scenarioActionTitle(action: PendingScenarioLibraryAction["action"]): string {
-  if (action === "add") return "Add scenario?";
-  if (action === "update") return "Update scenario?";
-  return "Delete scenario?";
+  if (action === "add") return "Create setting?";
+  if (action === "update") return "Save setting changes?";
+  return "Delete setting?";
 }
 
 function formatPlayerSolverRange(summary: PreflopRangeSummary, player: PreflopPlayerKey): string {
