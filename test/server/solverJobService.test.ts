@@ -88,7 +88,7 @@ describe("solver job helpers", () => {
     expect(command).toContain("PIPELINE_STATUS_FILE='~/run/status.json'");
   });
 
-  it("injects a custom Setting snapshot into the remote pipeline launcher", () => {
+  it("passes a custom Setting snapshot through the remote pipeline CLI", () => {
     const setting = {
       ...DEFAULT_SOLVER_SETTING_LIBRARY[0]!,
       id: "custom-setting",
@@ -107,10 +107,11 @@ describe("solver job helpers", () => {
     });
     const encodedSetting = Buffer.from(JSON.stringify(setting), "utf8").toString("base64");
 
-    expect(command).toContain("'python' '-c'");
-    expect(command).toContain("SCENARIO_CONFIG");
+    expect(command).toContain("'python' 'run_pipeline.py'");
+    expect(command).toContain("'--setting-snapshot'");
     expect(command).toContain(`'${encodedSetting}'`);
     expect(command).toContain("'--scenario' 'custom-setting'");
+    expect(command).not.toContain("runpy.run_path");
   });
 
   it("adds proxy and HF token exports when upload is enabled", () => {

@@ -2804,9 +2804,7 @@ export function buildRunPipelineCommand({
   const injectedSetting = setting && solverSettingRequiresRuntimeInjection(setting) ? setting : null;
   const args = [
     "python",
-    ...(injectedSetting
-      ? ["-c", SOLVER_SETTING_PIPELINE_LAUNCHER, encodeSolverSettingSnapshot(injectedSetting)]
-      : ["run_pipeline.py"]),
+    "run_pipeline.py",
     settings.rangeExpr,
     "--batch-size",
     String(settings.batchSize),
@@ -2823,6 +2821,9 @@ export function buildRunPipelineCommand({
     "--scenario",
     effectiveScenario
   ];
+  if (injectedSetting) {
+    args.push("--setting-snapshot", encodeSolverSettingSnapshot(injectedSetting));
+  }
   if (resultPath) {
     args.push("--result-path", resultPath);
   }
@@ -2870,24 +2871,6 @@ export function buildRunPipelineCommand({
     `PIPELINE_STATUS_FILE=${shellQuote(statusFilePath)} ${args.map(shellQuote).join(" ")}`
   ].join(" && ");
 }
-
-const SOLVER_SETTING_PIPELINE_LAUNCHER = `import base64,json,runpy,sys
-setting=json.loads(base64.b64decode(sys.argv.pop(1)).decode("utf-8"))
-namespace=runpy.run_path("run_pipeline.py",run_name="solver_pipeline")
-configs=namespace.get("SCENARIO_CONFIG")
-defaults=namespace.get("SCENARIO_DEFAULTS")
-if not isinstance(configs,dict) or not isinstance(defaults,dict):
-    raise RuntimeError("run_pipeline.py does not expose SCENARIO_CONFIG and SCENARIO_DEFAULTS")
-setting_id=setting["id"]
-configs[setting_id]=setting["configTemplate"]
-defaults[setting_id]={"pot":setting["pot"],"effective_stack":setting["effectiveStack"]}
-subdirs=tuple(namespace.get("SCENARIO_SUBDIRS",()))
-namespace["SCENARIO_SUBDIRS"]=subdirs if setting_id in subdirs else (*subdirs,setting_id)
-sys.argv=["run_pipeline.py",*sys.argv[1:]]
-main=namespace.get("main")
-if not callable(main):
-    raise RuntimeError("run_pipeline.py does not expose main()")
-main()`;
 
 function encodeSolverSettingSnapshot(setting: SolverSettingLibraryItem): string {
   return Buffer.from(JSON.stringify(setting), "utf8").toString("base64");
