@@ -74,6 +74,7 @@ async function main(): Promise<void> {
     db,
     servers,
     intervalMs: alertRefreshIntervalMs(alertSettings, config.refreshIntervalMs),
+    refreshConcurrency: config.refreshConcurrency,
     credentials: config.ssh,
     pipelineStatusFilePath: config.pipelineStatusFilePath,
     getSshTimeouts: () => resolveSshTimeouts(loadAlertSettings(config.alertSettingsPath)),
@@ -92,6 +93,7 @@ async function main(): Promise<void> {
     networkSubscriptionUrl: config.subscriptionUrl,
     giteeUsername: config.giteeUsername,
     giteeToken: config.giteeToken,
+    getSshTimeouts: () => resolveSshTimeouts(loadAlertSettings(config.alertSettingsPath)),
     getHfProxySettings: () => loadAlertSettings(config.alertSettingsPath),
     getSettingLibrary: () => loadSolverSettingLibrary(config.solverSettingLibraryPath).settings
   });

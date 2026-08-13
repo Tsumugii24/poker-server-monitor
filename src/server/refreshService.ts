@@ -20,7 +20,7 @@ import {
 } from "./sshConnectivityProbe";
 import { buildFailureSnapshot } from "./metrics";
 
-const DEFAULT_REFRESH_CONCURRENCY = 4;
+const DEFAULT_REFRESH_CONCURRENCY = 8;
 
 export type RefreshServiceOptions = {
   db: MonitorDatabase;
@@ -119,9 +119,6 @@ export class RefreshService {
           return item;
         }
       );
-      this.syncDiscoveredServerNames(collected);
-      this.options.db.pruneSnapshots(24);
-
       const snapshots = collected.map((item) => item.metrics);
 
       const run: RefreshRun = {
@@ -148,7 +145,11 @@ export class RefreshService {
           (item) => item.connectionStatus === "offline" || item.connectionStatus === "unknown"
         ).length
       };
-      this.options.db.insertRefreshRun(run);
+      this.options.db.runInPersistenceBatch(() => {
+        this.syncDiscoveredServerNames(collected);
+        this.options.db.pruneSnapshots(24);
+        this.options.db.insertRefreshRun(run);
+      });
       if (this.options.alerts) {
         void this.options.alerts.handleRefresh({
           servers: enabledServers,
@@ -238,11 +239,16 @@ export class RefreshService {
         metrics: { ...metrics, collectedAt },
         pipeline: { ...pipeline, collectedAt }
       };
-      this.options.db.insertSnapshot(item.metrics);
-      this.options.db.insertPipelineSnapshot(item.pipeline);
-      if (item.pipeline.datasetName) {
-        this.options.db.updateServerLastDatasetName(item.metrics.serverId, item.pipeline.datasetName);
-      }
+      // sql.js exports the complete database on persistence. Keep the metric,
+      // pipeline, and derived dataset-name writes for one server in a single
+      // export instead of rewriting the database two or three times.
+      this.options.db.runInPersistenceBatch(() => {
+        this.options.db.insertSnapshot(item.metrics);
+        this.options.db.insertPipelineSnapshot(item.pipeline);
+        if (item.pipeline.datasetName) {
+          this.options.db.updateServerLastDatasetName(item.metrics.serverId, item.pipeline.datasetName);
+        }
+      });
       return item;
     }).finally(() => {
       if (this.serverRefreshTasks.get(server.id) === task) {
@@ -285,37 +291,24 @@ export class RefreshService {
       };
     }
 
-    let metrics: MetricSnapshot;
-    try {
-      metrics = await this.collect(server);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      metrics = buildFailureSnapshot(server.id, "collection_failed", message);
-    }
+    // Once the lightweight provider-style probe succeeds, metrics and pipeline
+    // status are independent read-only SSH commands. Running them together
+    // removes one full SSH handshake/command timeout from the critical path.
+    const [collectedMetrics, pipeline] = await Promise.all([
+      this.collect(server).catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        return buildFailureSnapshot(server.id, "collection_failed", message);
+      }),
+      this.collectPipeline(server).catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        return buildPipelineFailureSnapshot(server.id, "pipeline_collection_failed", message);
+      })
+    ]);
 
     // The provider-style probe established network connectivity. An auth,
     // handshake, command, or parse failure is therefore degraded SSH readiness,
     // not an offline server.
-    metrics = this.withReachableConnectivity(metrics, server.id);
-
-    if (metrics.errorCode != null) {
-      return {
-        metrics,
-        pipeline: buildPipelineFailureSnapshot(
-          server.id,
-          metrics.errorCode,
-          metrics.errorMessage ?? "Authenticated SSH metric collection failed"
-        )
-      };
-    }
-
-    let pipeline: PipelineStatusSnapshot;
-    try {
-      pipeline = await this.collectPipeline(server);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      pipeline = buildPipelineFailureSnapshot(server.id, "pipeline_collection_failed", message);
-    }
+    const metrics = this.withReachableConnectivity(collectedMetrics, server.id);
     return { metrics, pipeline };
   }
 

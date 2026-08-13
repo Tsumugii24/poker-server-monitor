@@ -193,6 +193,24 @@ describe("ServerOperationsPanel", () => {
     expect(onNetworkSync).toHaveBeenCalledWith(["22"]);
   });
 
+  it("starts code sync only on the selected servers", async () => {
+    const user = userEvent.setup();
+    const onSync = vi.fn();
+    renderPanel({ servers: networkServers, onSync });
+
+    await user.click(screen.getByRole("tab", { name: "Code Sync" }));
+    expect(screen.getByRole("button", { name: "Sync Selected" })).toBeDisabled();
+    expect(screen.getByRole("checkbox", { name: "Select server 23 for code sync" })).toBeDisabled();
+
+    await user.click(screen.getByRole("checkbox", { name: "Select server 1 for code sync" }));
+    await user.click(screen.getByRole("checkbox", { name: "Select server 22 for code sync" }));
+    expect(screen.getByText("2 selected · 3 available")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Sync Selected" }));
+
+    expect(onSync).toHaveBeenCalledTimes(1);
+    expect(onSync).toHaveBeenCalledWith(["1", "22"]);
+  });
+
   it("filters retained results and exposes row upload and delete actions", async () => {
     const user = userEvent.setup();
     const onUploadCandidate = vi.fn();

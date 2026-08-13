@@ -14,6 +14,7 @@ import {
   buildForceKillPipelineCommand,
   buildDispatchPreflightCommand,
   buildDeleteUploadCandidateCommand,
+  buildDeployRangeCommand,
   buildGracefulStopPipelineCommand,
   buildRunPipelineCommand,
   buildReadServerOperationStatusCommand,
@@ -21,6 +22,7 @@ import {
   buildServerNetworkSyncCommand,
   buildServerSyncCommand,
   buildServerUploadCommand,
+  buildTmuxStartCommand,
   datasetNameFromRangePath,
   parseUploadCandidatesOutput,
   parseDeletedUploadCandidateOutput,
@@ -88,7 +90,7 @@ describe("solver job helpers", () => {
     expect(command).toContain("PIPELINE_STATUS_FILE='~/run/status.json'");
   });
 
-  it("passes a custom Setting snapshot through the remote pipeline CLI", () => {
+  it("passes a custom Setting by job-scoped JSON file", () => {
     const setting = {
       ...DEFAULT_SOLVER_SETTING_LIBRARY[0]!,
       id: "custom-setting",
@@ -101,17 +103,83 @@ describe("solver job helpers", () => {
       repoId: "Tsumugii/custom-dataset",
       scenario: setting.id,
       setting,
+      settingPath: "~/solver/job-settings/job-1.json",
       rangePath: "~/solver/job-ranges/job-1/custom.txt",
       statusFilePath: "~/run/status.json",
       settings: { ...DEFAULT_SOLVER_JOB_SETTINGS, uploadEnabled: false }
     });
-    const encodedSetting = Buffer.from(JSON.stringify(setting), "utf8").toString("base64");
-
     expect(command).toContain("'python' 'run_pipeline.py'");
-    expect(command).toContain("'--setting-snapshot'");
-    expect(command).toContain(`'${encodedSetting}'`);
+    expect(command).toContain("'--setting-file' '~/solver/job-settings/job-1.json'");
+    expect(command).not.toContain("'--setting-snapshot'");
     expect(command).toContain("'--scenario' 'custom-setting'");
+    expect(command.length).toBeLessThan(1_000);
     expect(command).not.toContain("runpy.run_path");
+  });
+
+  it("keeps inline Setting snapshots for legacy queued jobs", () => {
+    const setting = {
+      ...DEFAULT_SOLVER_SETTING_LIBRARY[0]!,
+      id: "legacy-custom-setting",
+      label: "Legacy Custom Setting"
+    };
+    const command = buildRunPipelineCommand({
+      solverRoot: "/srv/solver",
+      repoId: "Tsumugii/legacy-custom-dataset",
+      scenario: setting.id,
+      setting,
+      rangePath: "~/solver/job-ranges/legacy-job/custom.txt",
+      statusFilePath: "~/run/status.json",
+      settings: { ...DEFAULT_SOLVER_JOB_SETTINGS, uploadEnabled: false }
+    });
+
+    expect(command).toContain("'--setting-snapshot'");
+    expect(command).not.toContain("'--setting-file'");
+  });
+
+  it("deploys the runtime Setting JSON and starts it through a Conda-aware reusable tmux", () => {
+    const setting = {
+      ...DEFAULT_SOLVER_SETTING_LIBRARY[0]!,
+      id: "custom-setting",
+      label: "Custom Setting",
+      pot: 7,
+      effectiveStack: 91
+    };
+    const command = buildRunPipelineCommand({
+      solverRoot: "/srv/solver",
+      repoId: "Tsumugii/custom-dataset",
+      scenario: setting.id,
+      setting,
+      settingPath: "~/solver/job-settings/job-1.json",
+      rangePath: "~/solver/job-ranges/job-1/custom.txt",
+      statusFilePath: "~/run/status.json",
+      settings: { ...DEFAULT_SOLVER_JOB_SETTINGS, uploadEnabled: false }
+    });
+    const job = {
+      id: "job-1",
+      command,
+      setting,
+      solverRangeText: 'OOP_RANGE = "AA"\nIP_RANGE = "KK"',
+      remoteRangePath: "~/solver/job-ranges/job-1/custom.txt",
+      tmuxSession: "solver"
+    } as Parameters<typeof buildDeployRangeCommand>[0];
+
+    const deploy = buildDeployRangeCommand(job);
+    const launch = buildTmuxStartCommand(job, "~/solver", command);
+
+    expect(deploy).toContain('SETTING_PATH="$HOME/solver/job-settings/job-1.json"');
+    expect(deploy).toContain('"id":"custom-setting"');
+    expect(deploy).toContain('"effectiveStack":91');
+    expect(deploy).not.toContain('"parameters"');
+    expect(launch).toContain("#{pane_current_command}");
+    expect(launch).toContain("Remote solver does not support --setting-file");
+    expect(launch).toContain("refusing to replace it");
+    expect(launch).toContain("SESSION_CREATED=1");
+    expect(launch).toContain('if [ "$SESSION_CREATED" -eq 0 ]');
+    expect(launch.indexOf(" C-c")).toBeLessThan(launch.lastIndexOf("run_pipeline.py"));
+    expect(launch).toContain("bash -ic");
+    expect(launch).toContain('JOB_ID=\'job-1\'');
+    expect(launch).toContain('grep -Fq -- "$JOB_ID" "$STATUS_FILE"');
+    expect(launch).toContain("Solver launch was not acknowledged");
   });
 
   it("adds proxy and HF token exports when upload is enabled", () => {
@@ -186,6 +254,9 @@ describe("solver job helpers", () => {
     expect(command).toContain("export https_proxy='http://127.0.0.1:7890'");
     expect(command).toContain("git stash");
     expect(command).toContain("git pull --rebase");
+    expect(command).toContain("grep -q -- '--setting-file' run_pipeline.py");
+    expect(command).toContain('"setting_file_supported"');
+    expect(command).toContain("run_pipeline.py does not support --setting-file");
   });
 
   it("builds a redacted Mihomo repository and config sync command", () => {
@@ -263,7 +334,24 @@ describe("solver job helpers", () => {
     expect(command).toContain("DISPATCH_REASON_CODE=mihomo_missing");
     expect(command).toContain("DISPATCH_REASON_CODE=hugging_face_unreachable");
     expect(command).toContain("DISPATCH_REASON_CODE=active_pid");
+    expect(command).toContain("DISPATCH_REASON_CODE=solver_python_unavailable");
+    expect(command).toContain("test -n \"${CONDA_PREFIX:-}\"");
+    expect(command).toContain("bash -ic");
     expect(command).toContain("run Sync Network first");
+  });
+
+  it("keeps new Setting-file jobs queued until the remote solver supports them", () => {
+    const command = buildDispatchPreflightCommand(
+      "~/run/solver_running_status.json",
+      null,
+      { solverRoot: "~/solver", requireSettingFile: true }
+    );
+
+    expect(command).toContain('RUN_PIPELINE="$HOME/solver/run_pipeline.py"');
+    expect(command).toContain("grep -q -- '--setting-file'");
+    expect(command).toContain("DISPATCH_REASON_CODE=setting_file_unsupported");
+    expect(command).toContain("DISPATCH_REASON_CODE=solver_python_unavailable");
+    expect(command).toContain("run Code Sync first");
   });
 
   it("builds server upload commands with results-dir and redacted HF token support", () => {
@@ -554,12 +642,17 @@ describe("solver job API", () => {
     expect(commands).toHaveLength(2);
     expect(commands[0]).toContain("OOP_RANGE");
     expect(commands[0]).toContain(`RANGE_PATH='/srv/solver/job-ranges/${created.body.job.id}/3ia-4.2-3od-4.3.txt'`);
+    expect(commands[0]).toContain(`SETTING_PATH='/srv/solver/job-settings/${created.body.job.id}.json'`);
+    expect(commands[0]).toContain('"id":"3ia-3od"');
     expect(commands[0]).not.toContain(".bak.");
     expect(commands[1]).toContain("-c '/srv/solver'");
     expect(commands[1]).toContain("tmux send-keys");
-    expect(commands[1]).toContain('STATUS_FILE="$HOME/run/solver_running_status.json"');
+    expect(commands[1]).toContain('STATUS_FILE="$HOME/run/status.json"');
     expect(commands[1]).toContain('rm -f "$STATUS_FILE"');
     expect(commands[1]).toContain("run_pipeline.py");
+    expect(commands[1]).toContain("--setting-file");
+    expect(commands[1]).toContain(`job-settings/${created.body.job.id}.json`);
+    expect(commands[1]).not.toContain("--setting-snapshot");
     expect(commands[1]).toContain("--scenario");
     expect(commands[1]).toContain("3ia-3od");
     expect(commands[1]).toContain("--range-path");
@@ -579,6 +672,25 @@ describe("solver job API", () => {
     expect(list.body.jobs[0].command).toContain("export HF_TOKEN=$HF_TOKEN");
     expect(list.body.jobs[0].command).not.toContain("hf_test_token");
     expect(JSON.stringify(list.body.events)).not.toContain("hf_test_token");
+    expect(list.body.events.filter((event: { type: string }) =>
+      event.type === "created" || event.type === "started"
+    ).every((event: { commandPreview: string | null }) => event.commandPreview === null)).toBe(true);
+
+    const compactList = await request(app).get("/api/jobs").query({ compact: "1" });
+    expect(compactList.status).toBe(200);
+    expect(compactList.body.jobs[0]).toMatchObject({
+      id: created.body.job.id,
+      status: "running",
+      repoId: "Tsumugii/3ia-4.2-3od-4.3"
+    });
+    expect(compactList.body.jobs[0].command).toBeUndefined();
+    expect(compactList.body.jobs[0].setting).toBeUndefined();
+    expect(compactList.body.jobs[0].settings).toBeUndefined();
+    expect(compactList.body.jobs[0].solverRangeText).toBeUndefined();
+    expect(compactList.body.jobs[0].assignedIndices).toBeUndefined();
+    expect(compactList.body.jobs[0].pipeline).toBeUndefined();
+    expect(compactList.body.events[0].commandPreview).toBeUndefined();
+    expect(JSON.stringify(compactList.body).length).toBeLessThan(JSON.stringify(list.body).length / 2);
   });
 
   it("supports graceful stop followed by force stop", async () => {
@@ -959,7 +1071,107 @@ describe("solver job API", () => {
     expect(commands.some((command) => command.includes("--proxy"))).toBe(true);
   });
 
-  it("reuses the latest operation ID for a repeated server operation", async () => {
+  it("retries a Server Operation once when SSH times out before the handshake", async () => {
+    let attempts = 0;
+    const executor: SshExecutor = {
+      run: vi.fn(async () => {
+        attempts += 1;
+        if (attempts === 1) throw new Error("Timed out while waiting for handshake");
+        return "ok";
+      })
+    };
+    const solverJobService = new SolverJobService({
+      db,
+      preflopRangesPath,
+      credentials: { username: "root", password: "secret" },
+      executor,
+      serverOperationHandshakeRetryDelayMs: 0
+    });
+    const app = createApp({ db, refreshService, preflopRangesPath, solverJobService });
+
+    const started = await request(app)
+      .post("/api/server-operations/network-check")
+      .send({ serverIds: ["solver-01"] });
+
+    expect(started.status).toBe(201);
+    expect(attempts).toBe(2);
+    expect(started.body.operations[0]).toMatchObject({ status: "running", lastError: null });
+    expect(started.body.events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: "handshake_retry",
+        message: expect.stringContaining("before the command was sent")
+      })
+    ]));
+  });
+
+  it("does not retry a Server Operation after the command execution timeout", async () => {
+    let attempts = 0;
+    const executor: SshExecutor = {
+      run: vi.fn(async () => {
+        attempts += 1;
+        throw new Error("SSH command timed out");
+      })
+    };
+    const solverJobService = new SolverJobService({
+      db,
+      preflopRangesPath,
+      credentials: { username: "root", password: "secret" },
+      executor,
+      serverOperationHandshakeRetryDelayMs: 0
+    });
+    const app = createApp({ db, refreshService, preflopRangesPath, solverJobService });
+
+    const started = await request(app)
+      .post("/api/server-operations/network-check")
+      .send({ serverIds: ["solver-01"] });
+
+    expect(started.status).toBe(201);
+    expect(attempts).toBe(1);
+    expect(started.body.operations[0]).toMatchObject({
+      status: "failed",
+      lastError: "SSH command timed out"
+    });
+    expect(started.body.events.some((event: { type: string }) => event.type === "handshake_retry")).toBe(false);
+  });
+
+  it("limits a Server Operations batch to two simultaneous SSH handshakes", async () => {
+    const additionalServers = Array.from({ length: 4 }, (_, index): ServerConfig => ({
+      ...servers[0]!,
+      id: `solver-0${index + 2}`,
+      name: `Solver 0${index + 2}`,
+      host: `10.0.0.${index + 2}`
+    }));
+    db.syncServers([...servers, ...additionalServers]);
+    for (const server of additionalServers) db.insertSnapshot(metricSnapshot(server.id, "online"));
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const executor: SshExecutor = {
+      run: vi.fn(async () => {
+        inFlight += 1;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        inFlight -= 1;
+        return "ok";
+      })
+    };
+    const solverJobService = new SolverJobService({
+      db,
+      preflopRangesPath,
+      credentials: { username: "root", password: "secret" },
+      executor
+    });
+    const app = createApp({ db, refreshService, preflopRangesPath, solverJobService });
+
+    const started = await request(app)
+      .post("/api/server-operations/network-check")
+      .send({ serverIds: ["solver-01", ...additionalServers.map((server) => server.id)] });
+
+    expect(started.status).toBe(201);
+    expect(started.body.operations).toHaveLength(5);
+    expect(maxInFlight).toBe(2);
+  });
+
+  it("uses a fresh operation ID for every repeated server operation", async () => {
     const executor: SshExecutor = { run: vi.fn(async () => "ok") };
     const solverJobService = new SolverJobService({
       db,
@@ -984,10 +1196,12 @@ describe("solver job API", () => {
 
     expect(repeated.status).toBe(201);
     expect(repeated.body.operations).toHaveLength(1);
-    expect(repeated.body.operations[0]).toMatchObject({ id: operationId, status: "running" });
+    expect(repeated.body.operations[0]).toMatchObject({ status: "running" });
+    expect(repeated.body.operations[0].id).not.toBe(operationId);
+    expect(repeated.body.operations[0].statusFilePath).not.toBe(first.body.operations[0].statusFilePath);
   });
 
-  it("retries a failed network operation in place", async () => {
+  it("retries a failed network operation as a fresh attempt", async () => {
     const previous = {
       ...runningServerOperation(),
       type: "network_sync" as const,
@@ -1018,11 +1232,12 @@ describe("solver job API", () => {
     expect(response.status).toBe(201);
     expect(response.body.operations).toHaveLength(1);
     expect(response.body.operations[0]).toMatchObject({
-      id: previous.id,
       type: "network_sync",
       serverId: "solver-01",
       status: "running"
     });
+    expect(response.body.operations[0].id).not.toBe(previous.id);
+    expect(db.getServerOperation(previous.id)).toMatchObject({ status: "failed" });
     expect(commands.some((command) => command.includes("config.yaml.previous"))).toBe(true);
     expect(commands.some((command) => command.includes("pull --rebase"))).toBe(true);
     expect(commands.some((command) => command.includes("secret-token"))).toBe(true);
@@ -1813,7 +2028,22 @@ describe("solver job API", () => {
     );
   });
 
-  it("requeues a parallel slice when the dispatched command never takes ownership", async () => {
+  it("quarantines a server and retries a launch-unowned parallel slice on a different server", async () => {
+    db.syncServers([
+      ...servers,
+      {
+        id: "solver-02",
+        name: "Solver 02",
+        host: "10.0.0.2",
+        port: 22,
+        enabled: true,
+        note: "TBD",
+        solverRoot: "/srv/solver",
+        tmuxSession: "solver",
+        pipelineStatusFilePath: "~/run/status.json"
+      }
+    ]);
+    db.insertSnapshot(metricSnapshot("solver-02", "online"));
     const executor: SshExecutor = {
       run: vi.fn(async (_server, _credentials, command) => {
         if (command.includes("cards/cards.txt")) return solverCardsText();
@@ -1839,7 +2069,8 @@ describe("solver job API", () => {
       .post("/api/parallel-jobs")
       .send({
         rangePath,
-        serverIds: ["solver-01"],
+        serverIds: ["solver-01", "solver-02"],
+        chunkCount: 1,
         settings: { uploadEnabled: false },
         confirmDatasetName: true
       });
@@ -1881,24 +2112,88 @@ describe("solver job API", () => {
       serverId: "",
       jobId: null,
       status: "queued",
-      lastError: expect.stringContaining("queued retry 2/3")
+      lastError: expect.stringContaining("quarantined until")
     });
     expect(solverJobService.listParallelJobs().failurePool).toHaveLength(0);
+    expect(db.getUnresolvedParallelDispatchFailures()).toEqual([
+      expect.objectContaining({
+        serverId: "solver-01",
+        sliceId: requeued?.slices[0]?.id,
+        jobId: oldJobId,
+        failureKind: "launch_unowned"
+      })
+    ]);
 
     await solverJobService.reconcileAndStartQueuedJobs();
     const retried = solverJobService.listParallelJobs().runs
       .find((run) => run.id === created.body.run.id);
 
     expect(retried?.slices[0]).toMatchObject({
-      serverId: "solver-01",
+      serverId: "solver-02",
       status: "running",
       job: { status: "running" }
     });
     expect(retried?.slices[0]?.jobId).not.toBe(oldJobId);
     expect(commands.filter((command) => command.includes("run_pipeline.py"))).toHaveLength(2);
     expect(db.getSolverJobEvents(oldJobId)).toEqual(expect.arrayContaining([
-      expect.objectContaining({ type: "launch_retry_queued" })
+      expect.objectContaining({ type: "launch_server_quarantined" })
     ]));
+  });
+
+  it("keeps every remaining chunk queued when the only free server cannot acknowledge launch", async () => {
+    const executor: SshExecutor = {
+      run: vi.fn(async (_server, _credentials, command) => {
+        if (command.includes("cards/cards.txt")) return solverCardsText();
+        if (command.includes("DISPATCH_READY")) return "DISPATCH_READY=1\n";
+        if (isCodeReadyCommand(command)) return codeReadyOutput();
+        if (command.includes("LAUNCH_CONFIRMED=0")) {
+          throw new Error("Solver launch was not acknowledged within 10 seconds");
+        }
+        return "ok";
+      })
+    };
+    const solverJobService = new SolverJobService({
+      db,
+      preflopRangesPath,
+      credentials: { username: "root", password: "secret" },
+      executor,
+      defaultPipelineStatusFilePath: "~/run/solver_running_status.json",
+      repoNamespace: "Tsumugii",
+      hfToken: "hf_test_token"
+    });
+    const app = createApp({ db, refreshService, preflopRangesPath, solverJobService });
+    const rangePath = "3OD-EP/3OD-4.3 vs 3IA-4.2.json";
+    await approveRange(app, rangePath);
+
+    const created = await request(app)
+      .post("/api/parallel-jobs")
+      .send({
+        rangePath,
+        serverIds: ["solver-01"],
+        chunkCount: 3,
+        settings: { uploadEnabled: false },
+        confirmDatasetName: true
+      });
+
+    expect(created.status).toBe(201);
+    expect(created.body.run.status).toBe("queued");
+    expect(created.body.run.slices).toHaveLength(3);
+    expect(created.body.run.slices.every((slice: { status: string; serverId: string }) =>
+      slice.status === "queued" && slice.serverId === ""
+    )).toBe(true);
+    expect(created.body.run.report).toMatchObject({ completedBoards: 0, failedBoards: 0, queuedBoards: 1755 });
+    expect(solverJobService.listParallelJobs().failurePool).toHaveLength(0);
+    expect(db.getUnresolvedParallelDispatchFailures()).toHaveLength(1);
+
+    await solverJobService.reconcileAndStartQueuedJobs();
+    await solverJobService.reconcileAndStartQueuedJobs();
+    const afterRetries = solverJobService.listParallelJobs().runs
+      .find((run) => run.id === created.body.run.id);
+    expect(afterRetries?.status).toBe("queued");
+    expect(afterRetries?.slices.every((slice) => slice.status === "queued")).toBe(true);
+    expect((executor.run as ReturnType<typeof vi.fn>).mock.calls.filter((call) =>
+      String(call[2]).includes("LAUNCH_CONFIRMED=0")
+    )).toHaveLength(1);
   });
 
   it("creates a parallel run, distributes boards, and records failed slices in the failure pool", async () => {
@@ -1983,6 +2278,27 @@ describe("solver job API", () => {
     expect(created.body.run.slices.every((slice: { jobId: string | null }) => slice.jobId)).toBe(true);
     expect(commands.filter((command) => command.includes("run_pipeline.py"))).toHaveLength(2);
     expect(commands.join("\n")).toContain("--no-upload");
+    expect(vi.mocked(executor.run).mock.calls.filter(([, , command]) => command.includes("cards/cards.txt"))).toHaveLength(4);
+    expect(vi.mocked(fetch).mock.calls.filter(([input]) => {
+      const url = String(input);
+      return url.includes("/api/datasets/Tsumugii/3ia-4.2-3od-4.3") && !url.includes("/tree/main");
+    })).toHaveLength(1);
+    expect(vi.mocked(fetch).mock.calls.filter(([input]) => String(input).includes("/tree/main"))).toHaveLength(2);
+
+    const compactCreated = await request(app).get("/api/parallel-jobs").query({ compact: "1" });
+    expect(compactCreated.status).toBe(200);
+    expect(compactCreated.body.failurePool).toBeUndefined();
+    expect(compactCreated.body.runs[0].solverRangeText).toBeUndefined();
+    expect(compactCreated.body.runs[0].totalIndices).toBeUndefined();
+    expect(compactCreated.body.runs[0].missingIndices).toBeUndefined();
+    expect(compactCreated.body.runs[0].slices[0]).toMatchObject({
+      assignedCount: 878,
+      jobStatus: "running"
+    });
+    expect(compactCreated.body.runs[0].slices[0].assignedIndices).toBeUndefined();
+    expect(compactCreated.body.runs[0].slices[0].assignedBoardNames).toBeUndefined();
+    expect(compactCreated.body.runs[0].slices[0].job).toBeUndefined();
+    expect(compactCreated.body.runs[0].report).toEqual(created.body.run.report);
 
     const failedSlice = created.body.run.slices[0];
     db.updateSolverJob(failedSlice.jobId, {
@@ -2007,6 +2323,29 @@ describe("solver job API", () => {
       failureReason: "abnormal_end",
       lastServerId: "solver-01"
     });
+    const scopedFailurePool = await request(app)
+      .get("/api/parallel-jobs/failure-pool")
+      .query({ rangePath, datasetName: "3ia-4.2-3od-4.3" });
+    expect(scopedFailurePool.status).toBe(200);
+    expect(scopedFailurePool.body.entries).toHaveLength(failedSlice.assignedIndices.length);
+    expect(scopedFailurePool.body).toMatchObject({ rangePath, datasetName: "3ia-4.2-3od-4.3" });
+
+    const compactList = await request(app).get("/api/parallel-jobs").query({ compact: "1" });
+    expect(compactList.body.runs[0].report).toEqual(list.body.runs[0].report);
+    expect(JSON.stringify(compactList.body).length).toBeLessThan(JSON.stringify(list.body).length / 2);
+
+    const reports = await request(app).get("/api/parallel-jobs/reports");
+    expect(reports.status).toBe(200);
+    expect(reports.body.runs[0].slices[0]).toMatchObject({
+      assignedCount: failedSlice.assignedIndices.length,
+      rangeExpr: failedSlice.rangeExpr
+    });
+    expect(reports.body.runs[0].slices[0].assignedIndices).toBeUndefined();
+    expect(reports.body.failurePool).toEqual([{
+      datasetName: "3ia-4.2-3od-4.3",
+      count: failedSlice.assignedIndices.length
+    }]);
+    expect(JSON.stringify(reports.body).length).toBeLessThan(JSON.stringify(list.body).length / 2);
 
     const cleared = await request(app)
       .delete("/api/parallel-jobs/failure-pool")
@@ -2862,6 +3201,164 @@ describe("solver job API", () => {
         })
       ])
     );
+  });
+
+  it.each([
+    {
+      reasonCode: "setting_file_unsupported",
+      reason: "solver does not support --setting-file; run Code Sync first",
+      expectedError: "--setting-file"
+    },
+    {
+      reasonCode: "solver_python_unavailable",
+      reason: "interactive Conda Python is unavailable; repair Conda initialization on the server",
+      expectedError: "Conda Python"
+    }
+  ])(
+    "quarantines static dispatch validation failure $reasonCode instead of bouncing a queued chunk",
+    async ({ reasonCode, reason, expectedError }) => {
+    db.syncServers([
+      ...servers,
+      {
+        id: "solver-02",
+        name: "Solver 02",
+        host: "10.0.0.2",
+        port: 22,
+        enabled: true,
+        note: "TBD",
+        solverRoot: "/srv/solver",
+        tmuxSession: "solver",
+        pipelineStatusFilePath: "~/run/status.json"
+      }
+    ]);
+    db.insertSnapshot(metricSnapshot("solver-02", "online"));
+    let incompatiblePreflights = 0;
+    const executor: SshExecutor = {
+      run: vi.fn(async (server, _credentials, command) => {
+        if (command.includes("cards/cards.txt")) return solverCardsText();
+        if (command.includes("DISPATCH_READY")) {
+          if (server.id === "solver-01") {
+            incompatiblePreflights += 1;
+            return [
+              "DISPATCH_READY=0",
+              `DISPATCH_REASON_CODE=${reasonCode}`,
+              `DISPATCH_REASON=${reason}`
+            ].join("\n");
+          }
+          return "DISPATCH_READY=1\n";
+        }
+        if (isCodeReadyCommand(command)) return codeReadyOutput();
+        commands.push(`${server.id}:${command}`);
+        return "ok";
+      })
+    };
+    const solverJobService = new SolverJobService({
+      db,
+      preflopRangesPath,
+      credentials: { username: "root", password: "secret" },
+      executor,
+      defaultPipelineStatusFilePath: "~/run/solver_running_status.json",
+      repoNamespace: "Tsumugii",
+      hfToken: "hf_test_token"
+    });
+    const app = createApp({ db, refreshService, preflopRangesPath, solverJobService });
+    const rangePath = "3OD-EP/3OD-4.3 vs 3IA-4.2.json";
+    await approveRange(app, rangePath);
+
+    const created = await request(app)
+      .post("/api/parallel-jobs")
+      .send({
+        rangePath,
+        serverIds: ["solver-01", "solver-02"],
+        chunkCount: 1,
+        settings: { uploadEnabled: false },
+        confirmDatasetName: true
+      });
+
+    expect(created.status).toBe(201);
+    expect(created.body.run.slices[0]).toMatchObject({
+      serverId: "solver-02",
+      status: "running",
+      job: { status: "running" }
+    });
+    expect(db.getUnresolvedParallelDispatchFailures()).toEqual([
+      expect.objectContaining({
+        serverId: "solver-01",
+        failureKind: "validation_failed"
+      })
+    ]);
+    expect(db.getSolverJobs().filter((job) => job.serverId === "solver-01")).toEqual([
+      expect.objectContaining({ status: "failed", lastError: expect.stringContaining(expectedError) })
+    ]);
+
+    await solverJobService.reconcileAndStartQueuedJobs();
+
+    expect(incompatiblePreflights).toBe(1);
+    expect(db.getSolverJobs().filter((job) => job.serverId === "solver-01")).toHaveLength(1);
+    expect(db.getSolverJobs().filter((job) => job.status === "canceled")).toHaveLength(0);
+    }
+  );
+
+  it("repairs a pre-dispatch chunk left canceled by an interrupted reassignment", async () => {
+    const executor: SshExecutor = {
+      run: vi.fn(async (_server, _credentials, command) => {
+        if (command.includes("cards/cards.txt")) return solverCardsText();
+        if (command.includes("DISPATCH_READY")) return "DISPATCH_READY=1\n";
+        if (isCodeReadyCommand(command)) return codeReadyOutput();
+        return "ok";
+      })
+    };
+    const solverJobService = new SolverJobService({
+      db,
+      preflopRangesPath,
+      credentials: { username: "root", password: "secret" },
+      executor,
+      defaultPipelineStatusFilePath: "~/run/solver_running_status.json",
+      repoNamespace: "Tsumugii",
+      hfToken: "hf_test_token"
+    });
+    const app = createApp({ db, refreshService, preflopRangesPath, solverJobService });
+    const rangePath = "3OD-EP/3OD-4.3 vs 3IA-4.2.json";
+    await approveRange(app, rangePath);
+    const created = await request(app)
+      .post("/api/parallel-jobs")
+      .send({
+        rangePath,
+        serverIds: ["solver-01"],
+        chunkCount: 1,
+        settings: { uploadEnabled: false },
+        confirmDatasetName: true
+      });
+    const slice = created.body.run.slices[0];
+    const message = "Parallel chunk reassigned to solver-02 before dispatch.";
+    db.updateSolverJob(slice.jobId, {
+      status: "canceled",
+      startedAt: null,
+      finishedAt: new Date().toISOString(),
+      lastError: message,
+      pipeline: null
+    });
+    db.updateParallelSolverSlice(slice.id, {
+      status: "canceled",
+      startedAt: null,
+      finishedAt: new Date().toISOString(),
+      lastError: message
+    });
+
+    const repaired = solverJobService.listParallelJobs().runs
+      .find((run) => run.id === created.body.run.id)?.slices[0];
+
+    expect(repaired).toMatchObject({
+      serverId: "",
+      jobId: null,
+      status: "queued",
+      completedCount: 0,
+      failedCount: 0,
+      startedAt: null,
+      finishedAt: null,
+      lastError: null
+    });
+    expect(solverJobService.listParallelJobs().failurePool).toHaveLength(0);
   });
 
   it("keeps failed parallel dispatches queued until the server passes SSH preflight", async () => {

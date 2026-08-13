@@ -197,6 +197,27 @@ export type SolverJobsResponse = {
   events: SolverJobEvent[];
 };
 
+export type SolverJobSummary = Omit<
+  SolverJob,
+  | "setting"
+  | "settings"
+  | "command"
+  | "solverRangeText"
+  | "confirmUnstudied"
+  | "tmuxSession"
+  | "remoteRangePath"
+  | "remoteResultPath"
+  | "assignedIndices"
+  | "pipeline"
+>;
+
+export type SolverJobEventSummary = Omit<SolverJobEvent, "commandPreview">;
+
+export type SolverJobsSummaryResponse = {
+  jobs: SolverJobSummary[];
+  events: SolverJobEventSummary[];
+};
+
 export type SolverDatasetRepoStatus = {
   preview: SolverJobPreview;
   datasetName: string;
@@ -346,6 +367,28 @@ export type ParallelSolverRun = {
   };
 };
 
+/**
+ * Lightweight list representation used by Parallel Queue and History.
+ * Large board arrays, solver text, and the complete nested SolverJob remain
+ * available from GET /api/parallel-jobs/:id when explicitly requested.
+ */
+export type ParallelSolverSliceSummary = Pick<
+  ParallelSolverSlice,
+  "id" | "serverId" | "candidateServerIds" | "status" | "completedCount" | "failedCount" | "lastError"
+> & {
+  assignedCount: number;
+  jobStatus: SolverJobStatus | null;
+  jobLastError: string | null;
+};
+
+export type ParallelSolverRunSummary = Omit<
+  ParallelSolverRun,
+  "setting" | "solverRangeText" | "totalIndices" | "missingIndices" | "slices"
+> & {
+  setting: Pick<SolverSettingLibraryItem, "id" | "label">;
+  slices: ParallelSolverSliceSummary[];
+};
+
 export type ParallelFailurePoolEntry = {
   id: string;
   rangePath: string;
@@ -370,6 +413,44 @@ export type ParallelSolverJobsResponse = {
   runs: ParallelSolverRun[];
   failurePool: ParallelFailurePoolEntry[];
   reconciling: boolean;
+};
+
+export type ParallelSolverJobsSummaryResponse = {
+  runs: ParallelSolverRunSummary[];
+  reconciling: boolean;
+};
+
+export type ParallelSolverReportSlice = ParallelSolverSliceSummary & {
+  rangeExpr: string;
+};
+
+export type ParallelSolverReportRun = Omit<ParallelSolverRunSummary, "slices"> & {
+  slices: ParallelSolverReportSlice[];
+};
+
+export type ParallelFailurePoolDatasetSummary = {
+  datasetName: string;
+  count: number;
+};
+
+export type ParallelSolverReportsResponse = {
+  runs: ParallelSolverReportRun[];
+  failurePool: ParallelFailurePoolDatasetSummary[];
+};
+
+export type ParallelFailurePoolResponse = {
+  rangePath: string;
+  datasetName: string;
+  entries: ParallelFailurePoolEntry[];
+};
+
+export type ParallelSolverReportsSummaryClearResponse = ParallelSolverJobsSummaryResponse & {
+  deletedCount: number;
+  deletedRunIds: string[];
+};
+
+export type ParallelFailurePoolSummaryClearResponse = ParallelSolverJobsSummaryResponse & {
+  deletedCount: number;
 };
 
 export type ParallelSolverReportsClearResponse = ParallelSolverJobsResponse & {

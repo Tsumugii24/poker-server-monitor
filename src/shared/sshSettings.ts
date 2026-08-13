@@ -1,7 +1,7 @@
 import type { AlertSettings } from "./types";
 
 export const DEFAULT_SSH_COMMAND_TIMEOUT_SECONDS = 15;
-export const DEFAULT_SSH_CONNECT_TIMEOUT_SECONDS = 10;
+export const DEFAULT_SSH_CONNECT_TIMEOUT_SECONDS = 20;
 export const DEFAULT_OFFLINE_RETRY_INTERVAL_SECONDS = 60;
 
 export type SshTimeoutOptions = {

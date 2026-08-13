@@ -13,16 +13,22 @@ import type {
 } from "../shared/types";
 import type {
   ParallelFailurePoolEntry,
+  ParallelFailurePoolDatasetSummary,
   ParallelFailureReason,
   ParallelFailurePoolStatus,
   ParallelServerSelectionScope,
   ParallelSolverRun,
+  ParallelSolverReportRun,
+  ParallelSolverRunSummary,
   ParallelSolverRunStatus,
   ParallelSolverSlice,
+  ParallelSolverSliceSummary,
   ParallelSolverSliceStatus,
   SolverJob,
   SolverJobEvent,
+  SolverJobEventSummary,
   SolverJobSettings,
+  SolverJobSummary,
   SolverJobStatus
 } from "../shared/solverJobs";
 import {
@@ -49,6 +55,26 @@ function getSql(): Promise<SqlJsStatic> {
 }
 
 type SqlValue = string | number | null;
+type ParallelSolverSliceSummaryRecord = ParallelSolverSliceSummary & {
+  runId: string;
+  assignedIndices: number[];
+  jobId: string | null;
+  jobServerId: string | null;
+  jobCreatedAt: string | null;
+  jobStartedAt: string | null;
+  pipelineSnapshotId: string | null;
+};
+
+type ParallelPipelineProgressRecord = {
+  id: string;
+  serverId: string;
+  collectedAt: string;
+  completedIndices: number[];
+  failedIndices: number[];
+  skippedIndices: number[];
+  resultPath: string | null;
+  command: string | null;
+};
 
 type DatabaseFileLock = {
   path: string;
@@ -59,6 +85,18 @@ type DatabaseFileLockOwner = {
   pid: number;
   token: string;
   startedAt: string;
+};
+
+export type ParallelDispatchFailureRecord = {
+  id: string;
+  serverId: string;
+  runId: string;
+  sliceId: string;
+  jobId: string | null;
+  failureKind: "launch_unowned" | "dispatch_failed" | "validation_failed";
+  error: string;
+  failedAt: string;
+  resolvedAt: string | null;
 };
 
 const ownedDatabaseFileLocks = new Map<string, string>();
@@ -539,6 +577,19 @@ export class MonitorDatabase {
     );
   }
 
+  getSolverJobSummaries(): SolverJobSummary[] {
+    return this.query<SolverJobSummary>(
+      `SELECT
+         id, server_id, range_path, range_name, dataset_name, scenario,
+         repo_id, status, queue_mode, parallel_run_id, parallel_slice_id, source_type,
+         created_at, updated_at, started_at, finished_at, last_error
+       FROM solver_jobs
+       ORDER BY created_at DESC`,
+      [],
+      mapSolverJobSummary
+    );
+  }
+
   getSolverJob(id: string): SolverJob | null {
     return (
       this.query<SolverJob>(
@@ -748,6 +799,158 @@ export class MonitorDatabase {
       "SELECT * FROM parallel_solver_runs ORDER BY queue_order ASC, created_at DESC",
       [],
       (row) => mapParallelSolverRun(row, this.getParallelSolverSlices(String(row.id)))
+    );
+  }
+
+  getParallelSolverRunSummaries(): ParallelSolverRunSummary[] {
+    const slicesByRun = new Map<string, ParallelSolverSliceSummary[]>();
+    const slices = this.query<ParallelSolverSliceSummaryRecord>(
+      `SELECT
+         s.id, s.run_id, s.server_id, s.candidate_server_ids_json,
+         s.assigned_indices_json,
+         s.status, s.completed_count, s.failed_count, s.last_error,
+         j.id AS solver_job_id, j.status AS job_status, j.last_error AS job_last_error,
+         j.server_id AS job_server_id, j.created_at AS job_created_at,
+         j.started_at AS job_started_at, j.pipeline_snapshot_id
+       FROM parallel_solver_slices s
+       LEFT JOIN solver_jobs j ON j.id = s.job_id
+       ORDER BY s.created_at ASC`,
+      [],
+      mapParallelSolverSliceSummary
+    );
+
+    const terminalProgress = this.query<ParallelPipelineProgressRecord>(
+      `SELECT
+         id, server_id, collected_at, completed_indices_json, failed_indices_json,
+         skipped_indices_json, result_path, NULL AS command_text
+       FROM pipeline_status_snapshots
+       WHERE id IN (
+         SELECT DISTINCT pipeline_snapshot_id
+         FROM solver_jobs
+         WHERE parallel_slice_id IS NOT NULL AND pipeline_snapshot_id IS NOT NULL
+       )`,
+      [],
+      mapParallelPipelineProgressRecord
+    );
+    const activeProgress = this.query<ParallelPipelineProgressRecord>(
+      `SELECT
+         id, server_id, collected_at, completed_indices_json, failed_indices_json,
+         skipped_indices_json, result_path, command_text
+       FROM pipeline_status_snapshots
+       WHERE id IN (
+         SELECT (
+           SELECT snapshot.id
+           FROM pipeline_status_snapshots snapshot
+           WHERE snapshot.server_id = job.server_id
+           ORDER BY snapshot.collected_at DESC
+           LIMIT 1
+         )
+         FROM solver_jobs job
+         WHERE job.parallel_slice_id IS NOT NULL
+           AND job.status NOT IN ('completed', 'failed', 'canceled', 'interrupted')
+       )`,
+      [],
+      mapParallelPipelineProgressRecord
+    );
+    const progressById = new Map(terminalProgress.map((progress) => [progress.id, progress]));
+    const latestProgressByServer = new Map(activeProgress.map((progress) => [progress.serverId, progress]));
+    const completedByRun = new Map<string, Set<number>>();
+    const failedByRun = new Map<string, Set<number>>();
+
+    for (const slice of slices) {
+      const runSlices = slicesByRun.get(slice.runId) ?? [];
+      const {
+        runId,
+        assignedIndices,
+        jobId,
+        jobServerId,
+        jobCreatedAt,
+        jobStartedAt,
+        pipelineSnapshotId,
+        ...summary
+      } = slice;
+      runSlices.push(summary);
+      slicesByRun.set(runId, runSlices);
+
+      const progress = slice.jobStatus != null && solverJobStatusIsTerminal(slice.jobStatus)
+        ? pipelineSnapshotId ? progressById.get(pipelineSnapshotId) ?? null : null
+        : jobServerId ? latestProgressByServer.get(jobServerId) ?? null : null;
+      const usableProgress = progress && jobId && jobCreatedAt && (
+        slice.jobStatus != null && solverJobStatusIsTerminal(slice.jobStatus) ||
+        parallelPipelineProgressCanReconcileJob(progress, {
+          id: jobId,
+          createdAt: jobCreatedAt,
+          startedAt: jobStartedAt
+        })
+      ) ? progress : null;
+      const assigned = new Set(assignedIndices);
+      const completed = slice.status === "completed"
+        ? assignedIndices
+        : (usableProgress?.completedIndices ?? []).filter((index) => assigned.has(index));
+      const failedFromProgress = [
+        ...(usableProgress?.failedIndices ?? []),
+        ...(usableProgress?.skippedIndices ?? [])
+      ].filter((index) => assigned.has(index));
+      const failed = failedFromProgress.length > 0
+        ? failedFromProgress
+        : slice.status === "failed" ? assignedIndices : [];
+      const runCompleted = completedByRun.get(runId) ?? new Set<number>();
+      const runFailed = failedByRun.get(runId) ?? new Set<number>();
+      completed.forEach((index) => runCompleted.add(index));
+      failed.forEach((index) => runFailed.add(index));
+      completedByRun.set(runId, runCompleted);
+      failedByRun.set(runId, runFailed);
+    }
+    return this.query<ParallelSolverRunSummary>(
+      `SELECT
+         id, source_type, range_path, range_name, dataset_name, repo_id, scenario,
+         CASE WHEN json_valid(setting_json) THEN json_extract(setting_json, '$.id') ELSE scenario END AS setting_id,
+         CASE WHEN json_valid(setting_json) THEN json_extract(setting_json, '$.label') ELSE scenario END AS setting_label,
+         settings_json, status, report_cleared, queue_order, server_ids_json,
+         auto_include_new_servers, server_scope,
+         json_array_length(total_indices_json) AS total_board_count,
+         created_at, updated_at, started_at, finished_at, last_error
+       FROM parallel_solver_runs
+      ORDER BY queue_order ASC, created_at DESC`,
+      [],
+      (row) => {
+        const runId = String(row.id);
+        return mapParallelSolverRunSummary(
+          row,
+          slicesByRun.get(runId) ?? [],
+          completedByRun.get(runId)?.size ?? 0,
+          failedByRun.get(runId)?.size ?? 0
+        );
+      }
+    );
+  }
+
+  getParallelSolverReportRuns(): ParallelSolverReportRun[] {
+    const rangeExprBySliceId = new Map(this.query<[string, string]>(
+      "SELECT id, range_expr FROM parallel_solver_slices",
+      [],
+      (row) => [String(row.id), String(row.range_expr)]
+    ));
+    return this.getParallelSolverRunSummaries().map((run) => ({
+      ...run,
+      slices: run.slices.map((slice) => ({
+        ...slice,
+        rangeExpr: rangeExprBySliceId.get(slice.id) ?? ""
+      }))
+    }));
+  }
+
+  getParallelFailurePoolDatasetSummaries(): ParallelFailurePoolDatasetSummary[] {
+    return this.query<ParallelFailurePoolDatasetSummary>(
+      `SELECT dataset_name, COUNT(*) AS entry_count
+       FROM parallel_failure_pool_entries
+       GROUP BY dataset_name
+       ORDER BY dataset_name ASC`,
+      [],
+      (row) => ({
+        datasetName: String(row.dataset_name),
+        count: Number(row.entry_count ?? 0)
+      })
     );
   }
 
@@ -1036,10 +1239,23 @@ export class MonitorDatabase {
   }
 
   insertSolverJobEvent(event: SolverJobEvent): void {
+    // The canonical command already lives on solver_jobs. Repeating the exact
+    // same multi-kilobyte launcher for created/started/assigned events made the
+    // sql.js file and every subsequent export grow unnecessarily. Distinct
+    // diagnostics (for example stop output) are still retained verbatim.
+    const commandPreview = event.commandPreview != null && this.query<{ matches: boolean }>(
+      `SELECT EXISTS(
+         SELECT 1 FROM solver_jobs WHERE id = ? AND command_text = ?
+       ) AS matches`,
+      [event.jobId, event.commandPreview],
+      (row) => ({ matches: Number(row.matches ?? 0) === 1 })
+    )[0]?.matches
+      ? null
+      : event.commandPreview;
     this.database.run(
       `INSERT INTO solver_job_events (id, job_id, event_type, message, command_preview, created_at)
        VALUES (?, ?, ?, ?, ?, ?)`,
-      [event.id, event.jobId, event.type, event.message, event.commandPreview, event.createdAt]
+      [event.id, event.jobId, event.type, event.message, commandPreview, event.createdAt]
     );
     this.persist();
   }
@@ -1057,6 +1273,79 @@ export class MonitorDatabase {
       [],
       mapSolverJobEvent
     );
+  }
+
+  getSolverJobEventSummaries(): SolverJobEventSummary[] {
+    return this.query<SolverJobEventSummary>(
+      `SELECT id, job_id, event_type, message, created_at
+       FROM solver_job_events
+       ORDER BY created_at DESC
+       LIMIT 200`,
+      [],
+      mapSolverJobEventSummary
+    );
+  }
+
+  insertParallelDispatchFailure(failure: ParallelDispatchFailureRecord): void {
+    this.database.run(
+      `INSERT INTO parallel_dispatch_failures (
+         id, server_id, run_id, slice_id, job_id, failure_kind, error_text, failed_at, resolved_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(job_id) DO UPDATE SET
+         server_id = excluded.server_id,
+         run_id = excluded.run_id,
+         slice_id = excluded.slice_id,
+         failure_kind = excluded.failure_kind,
+         error_text = excluded.error_text,
+         failed_at = excluded.failed_at,
+         resolved_at = excluded.resolved_at`,
+      [
+        failure.id,
+        failure.serverId,
+        failure.runId,
+        failure.sliceId,
+        failure.jobId,
+        failure.failureKind,
+        failure.error,
+        failure.failedAt,
+        failure.resolvedAt
+      ]
+    );
+    this.persist();
+  }
+
+  getUnresolvedParallelDispatchFailures(): ParallelDispatchFailureRecord[] {
+    return this.query<ParallelDispatchFailureRecord>(
+      `SELECT * FROM parallel_dispatch_failures
+       WHERE resolved_at IS NULL
+       ORDER BY failed_at ASC`,
+      [],
+      mapParallelDispatchFailureRecord
+    );
+  }
+
+  resolveParallelDispatchFailuresForServer(
+    serverId: string,
+    resolvedAt = new Date().toISOString(),
+    failureKinds: ParallelDispatchFailureRecord["failureKind"][] = []
+  ): number {
+    const normalizedFailureKinds = [...new Set(failureKinds)];
+    const failureKindFilter = normalizedFailureKinds.length > 0
+      ? ` AND failure_kind IN (${normalizedFailureKinds.map(() => "?").join(", ")})`
+      : "";
+    this.database.run(
+      `UPDATE parallel_dispatch_failures
+       SET resolved_at = ?
+       WHERE server_id = ? AND resolved_at IS NULL${failureKindFilter}`,
+      [resolvedAt, serverId, ...normalizedFailureKinds]
+    );
+    const changed = this.query<number>(
+      "SELECT changes() AS changed_count",
+      [],
+      (row) => Number(row.changed_count ?? 0)
+    )[0] ?? 0;
+    if (changed > 0) this.persist();
+    return changed;
   }
 
   insertServerOperation(operation: ServerOperation): void {
@@ -1224,10 +1513,19 @@ export class MonitorDatabase {
   }
 
   insertServerOperationEvent(event: ServerOperationEvent): void {
+    const commandPreview = event.commandPreview != null && this.query<{ matches: boolean }>(
+      `SELECT EXISTS(
+         SELECT 1 FROM server_operations WHERE id = ? AND command_text = ?
+       ) AS matches`,
+      [event.operationId, event.commandPreview],
+      (row) => ({ matches: Number(row.matches ?? 0) === 1 })
+    )[0]?.matches
+      ? null
+      : event.commandPreview;
     this.database.run(
       `INSERT INTO server_operation_events (id, operation_id, event_type, message, command_preview, created_at)
        VALUES (?, ?, ?, ?, ?, ?)`,
-      [event.id, event.operationId, event.type, event.message, event.commandPreview, event.createdAt]
+      [event.id, event.operationId, event.type, event.message, commandPreview, event.createdAt]
     );
     this.persist();
   }
@@ -1385,6 +1683,24 @@ export class MonitorDatabase {
       CREATE INDEX IF NOT EXISTS idx_solver_job_events_job_time
         ON solver_job_events(job_id, created_at);
 
+      CREATE TABLE IF NOT EXISTS parallel_dispatch_failures (
+        id TEXT PRIMARY KEY,
+        server_id TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        slice_id TEXT NOT NULL,
+        job_id TEXT UNIQUE,
+        failure_kind TEXT NOT NULL,
+        error_text TEXT NOT NULL,
+        failed_at TEXT NOT NULL,
+        resolved_at TEXT
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_parallel_dispatch_failures_server
+        ON parallel_dispatch_failures(server_id, resolved_at, failed_at);
+
+      CREATE INDEX IF NOT EXISTS idx_parallel_dispatch_failures_slice
+        ON parallel_dispatch_failures(slice_id, resolved_at, failed_at);
+
       CREATE TABLE IF NOT EXISTS server_operations (
         id TEXT PRIMARY KEY,
         operation_type TEXT NOT NULL,
@@ -1505,7 +1821,49 @@ export class MonitorDatabase {
     this.ensureParallelFailurePoolReasonColumn();
     this.ensureSolverJobResultPathColumn();
     this.ensureServerOperationResultColumn();
+    this.compactRedundantCommandPreviews();
     this.persist();
+  }
+
+  private compactRedundantCommandPreviews(): void {
+    this.database.run(
+      `UPDATE solver_job_events
+       SET command_preview = NULL
+       WHERE command_preview IS NOT NULL
+         AND EXISTS (
+           SELECT 1
+           FROM solver_jobs
+           WHERE solver_jobs.id = solver_job_events.job_id
+             AND solver_jobs.command_text = solver_job_events.command_preview
+         )`
+    );
+    const solverEventChanges = this.query<number>(
+      "SELECT changes() AS changed_count",
+      [],
+      (row) => Number(row.changed_count ?? 0)
+    )[0] ?? 0;
+    this.database.run(
+      `UPDATE server_operation_events
+       SET command_preview = NULL
+       WHERE command_preview IS NOT NULL
+         AND EXISTS (
+           SELECT 1
+           FROM server_operations
+           WHERE server_operations.id = server_operation_events.operation_id
+             AND server_operations.command_text = server_operation_events.command_preview
+         )`
+    );
+    const operationEventChanges = this.query<number>(
+      "SELECT changes() AS changed_count",
+      [],
+      (row) => Number(row.changed_count ?? 0)
+    )[0] ?? 0;
+    if (solverEventChanges + operationEventChanges > 0) {
+      // sql.js exports the complete SQLite image after each persisted write.
+      // VACUUM releases the pages occupied by the now-null exact duplicates so
+      // later queue/status writes no longer copy those pages indefinitely.
+      this.database.run("VACUUM");
+    }
   }
 
   private ensureServerOperationResultColumn(): void {
@@ -1892,6 +2250,30 @@ function mapSolverJob(row: Record<string, SqlValue>, pipeline: PipelineStatusSna
   };
 }
 
+function mapSolverJobSummary(row: Record<string, SqlValue>): SolverJobSummary {
+  const settingId = String(row.scenario);
+  return {
+    id: String(row.id),
+    serverId: String(row.server_id),
+    rangePath: String(row.range_path),
+    rangeName: String(row.range_name),
+    datasetName: String(row.dataset_name),
+    settingId,
+    scenario: settingId,
+    repoId: String(row.repo_id),
+    status: String(row.status) as SolverJobStatus,
+    queueMode: String(row.queue_mode) as SolverJob["queueMode"],
+    parallelRunId: row.parallel_run_id == null ? null : String(row.parallel_run_id),
+    parallelSliceId: row.parallel_slice_id == null ? null : String(row.parallel_slice_id),
+    sourceType: row.source_type === "parallel" || row.source_type === "failure_pool" ? row.source_type : "single",
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+    startedAt: row.started_at == null ? null : String(row.started_at),
+    finishedAt: row.finished_at == null ? null : String(row.finished_at),
+    lastError: row.last_error == null ? null : String(row.last_error)
+  };
+}
+
 function fallbackRemoteResultPath(datasetName: string, jobId: string): string {
   return `~/solver/results/${datasetName}/${jobId}`;
 }
@@ -2000,6 +2382,60 @@ function mapParallelSolverRun(row: Record<string, SqlValue>, slices: ParallelSol
   };
 }
 
+function mapParallelSolverRunSummary(
+  row: Record<string, SqlValue>,
+  slices: ParallelSolverSliceSummary[],
+  completedBoards: number,
+  failedBoards: number
+): ParallelSolverRunSummary {
+  const startedAt = row.started_at == null ? null : String(row.started_at);
+  const finishedAt = row.finished_at == null ? null : String(row.finished_at);
+  const totalBoards = Number(row.total_board_count ?? 0);
+  completedBoards = Math.min(totalBoards, completedBoards);
+  failedBoards = Math.min(totalBoards, failedBoards);
+  const runningBoards = slices
+    .filter((slice) => slice.status === "running")
+    .reduce((sum, slice) => sum + slice.assignedCount, 0);
+  const queuedBoards = slices
+    .filter((slice) => slice.status === "queued")
+    .reduce((sum, slice) => sum + slice.assignedCount, 0);
+  const settingId = String(row.setting_id ?? row.scenario);
+  const settingLabel = String(row.setting_label ?? settingId);
+  return {
+    id: String(row.id),
+    sourceType: row.source_type === "failure_pool" ? "failure_pool" : "parallel",
+    rangePath: String(row.range_path),
+    rangeName: String(row.range_name),
+    datasetName: String(row.dataset_name),
+    repoId: String(row.repo_id),
+    settingId,
+    setting: { id: settingId, label: settingLabel },
+    scenario: settingId,
+    settings: parseSolverJobSettings(row.settings_json),
+    status: String(row.status) as ParallelSolverRunStatus,
+    reportCleared: Number(row.report_cleared ?? 0) === 1,
+    queueOrder: Number(row.queue_order ?? 0),
+    serverIds: parseStringArray(row.server_ids_json),
+    autoIncludeNewServers: Number(row.auto_include_new_servers ?? 0) === 1,
+    serverScope: parseParallelServerSelectionScope(row.server_scope),
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+    startedAt,
+    finishedAt,
+    lastError: row.last_error == null ? null : String(row.last_error),
+    slices,
+    report: {
+      totalBoards,
+      completedBoards,
+      failedBoards,
+      queuedBoards,
+      runningBoards,
+      successRate: totalBoards > 0 ? completedBoards / totalBoards : 1,
+      durationSeconds: durationSeconds(startedAt, finishedAt)
+    }
+  };
+}
+
 function parseSolverSettingSnapshot(value: SqlValue, legacyScenario: string): SolverSettingLibraryItem {
   if (typeof value === "string" && value.trim()) {
     try {
@@ -2076,6 +2512,56 @@ function mapParallelSolverSlice(row: Record<string, SqlValue>, job: SolverJob | 
   };
 }
 
+function mapParallelSolverSliceSummary(row: Record<string, SqlValue>): ParallelSolverSliceSummaryRecord {
+  const serverId = String(row.server_id ?? "");
+  const candidateServerIds = parseStringArray(row.candidate_server_ids_json);
+  const assignedIndices = parseNumberArray(row.assigned_indices_json);
+  return {
+    id: String(row.id),
+    runId: String(row.run_id),
+    serverId,
+    candidateServerIds: candidateServerIds.length > 0 ? candidateServerIds : (serverId ? [serverId] : []),
+    assignedCount: assignedIndices.length,
+    assignedIndices,
+    status: String(row.status) as ParallelSolverSliceStatus,
+    completedCount: Number(row.completed_count),
+    failedCount: Number(row.failed_count),
+    lastError: row.last_error == null ? null : String(row.last_error),
+    jobId: row.solver_job_id == null ? null : String(row.solver_job_id),
+    jobStatus: row.job_status == null ? null : String(row.job_status) as SolverJobStatus,
+    jobLastError: row.job_last_error == null ? null : String(row.job_last_error),
+    jobServerId: row.job_server_id == null ? null : String(row.job_server_id),
+    jobCreatedAt: row.job_created_at == null ? null : String(row.job_created_at),
+    jobStartedAt: row.job_started_at == null ? null : String(row.job_started_at),
+    pipelineSnapshotId: row.pipeline_snapshot_id == null ? null : String(row.pipeline_snapshot_id)
+  };
+}
+
+function mapParallelPipelineProgressRecord(row: Record<string, SqlValue>): ParallelPipelineProgressRecord {
+  return {
+    id: String(row.id),
+    serverId: String(row.server_id),
+    collectedAt: String(row.collected_at),
+    completedIndices: parseNumberArray(row.completed_indices_json),
+    failedIndices: parseNumberArray(row.failed_indices_json),
+    skippedIndices: parseNumberArray(row.skipped_indices_json),
+    resultPath: row.result_path == null ? null : String(row.result_path),
+    command: row.command_text == null ? null : String(row.command_text)
+  };
+}
+
+function parallelPipelineProgressCanReconcileJob(
+  progress: ParallelPipelineProgressRecord,
+  job: { id: string; createdAt: string; startedAt: string | null }
+): boolean {
+  if (progress.resultPath?.includes(job.id) || progress.command?.includes(job.id)) return true;
+  const jobReference = Date.parse(job.startedAt ?? job.createdAt);
+  const pipelineReference = Date.parse(progress.collectedAt);
+  return Number.isFinite(jobReference) &&
+    Number.isFinite(pipelineReference) &&
+    pipelineReference >= jobReference - 15_000;
+}
+
 function mapParallelFailurePoolEntry(row: Record<string, SqlValue>): ParallelFailurePoolEntry {
   return {
     id: String(row.id),
@@ -2123,6 +2609,33 @@ function mapSolverJobEvent(row: Record<string, SqlValue>): SolverJobEvent {
     message: String(row.message),
     commandPreview: row.command_preview == null ? null : redactSensitiveCommand(String(row.command_preview)),
     createdAt: String(row.created_at)
+  };
+}
+
+function mapSolverJobEventSummary(row: Record<string, SqlValue>): SolverJobEventSummary {
+  return {
+    id: String(row.id),
+    jobId: String(row.job_id),
+    type: String(row.event_type),
+    message: String(row.message),
+    createdAt: String(row.created_at)
+  };
+}
+
+function mapParallelDispatchFailureRecord(row: Record<string, SqlValue>): ParallelDispatchFailureRecord {
+  const failureKind = String(row.failure_kind);
+  return {
+    id: String(row.id),
+    serverId: String(row.server_id),
+    runId: String(row.run_id),
+    sliceId: String(row.slice_id),
+    jobId: row.job_id == null ? null : String(row.job_id),
+    failureKind: failureKind === "launch_unowned" || failureKind === "validation_failed"
+      ? failureKind
+      : "dispatch_failed",
+    error: String(row.error_text),
+    failedAt: String(row.failed_at),
+    resolvedAt: row.resolved_at == null ? null : String(row.resolved_at)
   };
 }
 

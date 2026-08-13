@@ -239,6 +239,7 @@ describe("runtime config loading", () => {
     expect(config.host).toBe("127.0.0.1");
     expect(config.port).toBe(3001);
     expect(config.refreshIntervalMs).toBe(3_600_000);
+    expect(config.refreshConcurrency).toBe(8);
     expect(config.alertSettingsPath).toBe("config/alerts.json");
     expect(config.pipelineStatusFilePath).toBe("~/run/solver_running_status.json");
     expect(config.hfToken).toBeNull();
@@ -252,6 +253,16 @@ describe("runtime config loading", () => {
     });
 
     expect(config.host).toBe("0.0.0.0");
+  });
+
+  it("allows overriding full-refresh concurrency", () => {
+    const config = loadRuntimeConfig({
+      SSH_USERNAME: "root",
+      SSH_PASSWORD: "secret",
+      SERVER_MONITOR_REFRESH_CONCURRENCY: "12"
+    });
+
+    expect(config.refreshConcurrency).toBe(12);
   });
 
   it("loads the Hugging Face token for upload jobs", () => {
@@ -312,7 +323,7 @@ describe("alert settings loading", () => {
       language: "en",
       offlineRetryIntervalSeconds: 60,
       sshCommandTimeoutSeconds: 15,
-      sshConnectTimeoutSeconds: 10,
+      sshConnectTimeoutSeconds: 20,
       hfProxyEnabled: false,
       solverHfProxyEnabled: false
     });
@@ -356,7 +367,7 @@ describe("alert settings loading", () => {
     expect(loadAlertSettings(file)).toMatchObject({
       offlineRetryIntervalSeconds: 60,
       sshCommandTimeoutSeconds: 15,
-      sshConnectTimeoutSeconds: 10,
+      sshConnectTimeoutSeconds: 20,
       hfProxyEnabled: false,
       solverHfProxyEnabled: false
     });

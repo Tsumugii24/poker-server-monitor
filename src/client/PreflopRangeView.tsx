@@ -56,22 +56,28 @@ import {
   SOLVER_EXPORT_FORMATS,
   SOLVER_UPLOAD_FORMATS,
   type ParallelServerSelectionScope,
-  type ParallelFailurePoolClearResponse,
+  type ParallelFailurePoolResponse,
+  type ParallelFailurePoolSummaryClearResponse,
   type ParallelFailurePoolEntry,
   type ParallelFailureReason,
   type ParallelSolverJobPreview,
   type ParallelSolverJobPreviewRequest,
-  type ParallelSolverJobsResponse,
-  type ParallelSolverReportsClearResponse,
-  type ParallelSolverRun,
+  type ParallelSolverJobsSummaryResponse,
+  type ParallelFailurePoolDatasetSummary,
+  type ParallelSolverReportRun,
+  type ParallelSolverReportsResponse,
+  type ParallelSolverReportsSummaryClearResponse,
+  type ParallelSolverRunSummary,
   type SolverExportFormat,
   type SolverDatasetRepoStatus,
   type SolverJob,
   type SolverJobEvent,
+  type SolverJobEventSummary,
+  type SolverJobSummary,
   type SolverJobPreview,
   type SolverJobPreviewRequest,
   type SolverJobSettings,
-  type SolverJobsResponse,
+  type SolverJobsSummaryResponse,
   type SolverUploadFormat
 } from "../shared/solverJobs";
 import {
@@ -232,14 +238,14 @@ const RANGE_PROGRESS_VIEW_KEY = "preflop-range-progress-view";
 const PARALLEL_JOBS_CACHE_DB_NAME = "poker-server-monitor-ui-cache";
 const PARALLEL_JOBS_CACHE_STORE_NAME = "snapshots";
 const PARALLEL_JOBS_CACHE_KEY = "parallel-jobs";
-const PARALLEL_JOBS_CACHE_VERSION = 1;
+const PARALLEL_JOBS_CACHE_VERSION = 2;
 const PARALLEL_JOBS_CACHE_WRITE_INTERVAL_MS = 15_000;
 const DEFAULT_SELECTED_HAND = "AA";
 type ParallelJobsCacheRecord = {
   version: number;
   cachedAt: string;
   snapshotAt: string | null;
-  response: ParallelSolverJobsResponse;
+  response: ParallelSolverJobsSummaryResponse;
 };
 let parallelJobsMemoryCache: ParallelJobsCacheRecord | null = null;
 let pendingParallelJobsCacheWrite: ParallelJobsCacheRecord | null = null;
@@ -297,10 +303,10 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [rangeProgressRefreshSummary, setRangeProgressRefreshSummary] = useState<RangeProgressRefreshSummary | null>(null);
   const [servers, setServers] = useState<ServerRow[]>([]);
-  const [jobs, setJobs] = useState<SolverJob[]>([]);
-  const [jobEvents, setJobEvents] = useState<SolverJobEvent[]>([]);
-  const [parallelRuns, setParallelRuns] = useState<ParallelSolverRun[]>(() => initialParallelJobsCache?.response.runs ?? []);
-  const [failurePool, setFailurePool] = useState<ParallelFailurePoolEntry[]>(() => initialParallelJobsCache?.response.failurePool ?? []);
+  const [jobs, setJobs] = useState<SolverJobSummary[]>([]);
+  const [jobEvents, setJobEvents] = useState<SolverJobEventSummary[]>([]);
+  const [parallelRuns, setParallelRuns] = useState<ParallelSolverRunSummary[]>(() => initialParallelJobsCache?.response.runs ?? []);
+  const [failurePool, setFailurePool] = useState<ParallelFailurePoolEntry[]>([]);
   const [parallelContextLoaded, setParallelContextLoaded] = useState(Boolean(initialParallelJobsCache));
   const [parallelPreview, setParallelPreview] = useState<ParallelSolverJobPreview | null>(null);
   const [selectedParallelServerIds, setSelectedParallelServerIds] = useState<string[]>([]);
@@ -329,6 +335,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
     initialParallelJobsCache?.snapshotAt ?? initialParallelJobsCache?.cachedAt ?? null
   );
   const jobRefreshGeneration = useRef(0);
+  const failurePoolRequestGeneration = useRef(0);
   const parallelContextLoadedRef = useRef(Boolean(initialParallelJobsCache));
   const jobStatusSnapshotAtRef = useRef(jobStatusSnapshotAt);
   const [scenarioLibrary, setScenarioLibrary] = useState<SolverScenarioLibraryItem[]>(DEFAULT_SOLVER_SCENARIO_LIBRARY);
@@ -359,15 +366,13 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
       const response = await fetchPreflopJson<PreflopRangeTreeResponse>("/api/preflop-ranges");
       const normalizedTree = normalizeRangeTreeItems(response.tree);
       setTree(normalizedTree);
-      if (currentFolderPath && !findFolder(normalizedTree, currentFolderPath)) {
-        setCurrentFolderPath("");
-      }
+      setCurrentFolderPath((current) => current && !findFolder(normalizedTree, current) ? "" : current);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     } finally {
       setLoading(false);
     }
-  }, [currentFolderPath]);
+  }, []);
 
   const refreshRangeProgress = useCallback(async () => {
     setLoading(true);
@@ -386,15 +391,13 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
         fileListingFallbacks: response.fileListingFallbacks,
         failures: response.failures
       });
-      if (currentFolderPath && !findFolder(normalizedTree, currentFolderPath)) {
-        setCurrentFolderPath("");
-      }
+      setCurrentFolderPath((current) => current && !findFolder(normalizedTree, current) ? "" : current);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     } finally {
       setLoading(false);
     }
-  }, [currentFolderPath]);
+  }, []);
 
   useEffect(() => {
     void loadTree();
@@ -423,12 +426,11 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
   }, [parallelChunkCountTouched, parallelServerTierMode]);
 
   const applyParallelJobsResponse = useCallback((
-    response: ParallelSolverJobsResponse,
+    response: ParallelSolverJobsSummaryResponse,
     persist = true,
     snapshotAt = jobStatusSnapshotAtRef.current
   ) => {
     setParallelRuns(response.runs);
-    setFailurePool(response.failurePool);
     setParallelContextLoaded(true);
     parallelContextLoadedRef.current = true;
     if (snapshotAt) {
@@ -446,33 +448,28 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
 
   const loadJobContext = useCallback(async (options: { reconcileParallel?: boolean } = {}) => {
     setJobError(null);
-    const parallelJobsPath = options.reconcileParallel ? "/api/parallel-jobs?reconcile=1" : "/api/parallel-jobs";
+    const parallelJobsPath = options.reconcileParallel
+      ? "/api/parallel-jobs?compact=1&reconcile=1"
+      : "/api/parallel-jobs?compact=1";
     const overviewRequest = fetchPreflopJson<OverviewResponse>("/api/overview");
-    const jobsRequest = fetchPreflopJson<SolverJobsResponse>("/api/jobs");
-    const parallelRequest = fetchPreflopJson<ParallelSolverJobsResponse>(parallelJobsPath);
-    const operationsRequest = fetchPreflopJson<ServerOperationsResponse>("/api/server-operations");
+    const jobsRequest = fetchPreflopJson<SolverJobsSummaryResponse>("/api/jobs?compact=1");
+    const parallelRequest = fetchPreflopJson<ParallelSolverJobsSummaryResponse>(parallelJobsPath);
     void overviewRequest.then(applyOverviewResponse, () => undefined);
     void jobsRequest.then((response) => {
       setJobs(response.jobs);
       setJobEvents(response.events);
     }, () => undefined);
     void parallelRequest.then((response) => applyParallelJobsResponse(response), () => undefined);
-    void operationsRequest.then((response) => {
-      setServerOperations(response.operations);
-      setNetworkSyncConfigured(Boolean(response.capabilities?.networkSyncConfigured));
-    }, () => undefined);
-    const [overviewResult, jobsResult, parallelResult, operationsResult] = await Promise.allSettled([
+    const [overviewResult, jobsResult, parallelResult] = await Promise.allSettled([
       overviewRequest,
       jobsRequest,
-      parallelRequest,
-      operationsRequest
+      parallelRequest
     ] as const);
 
     const failures = [
       ["Overview", overviewResult],
       ["Jobs", jobsResult],
-      ["Parallel jobs", parallelResult],
-      ["Server operations", operationsResult]
+      ["Parallel jobs", parallelResult]
     ] as const;
     const messages = failures.flatMap(([label, result]) => result.status === "rejected"
       ? [`${label}: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`]
@@ -491,20 +488,27 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
     void (async () => {
       try {
         await requestMonitorRefresh();
-        let parallelResponse = await loadJobContext({ reconcileParallel: true });
         const deadline = Date.now() + 10 * 60_000;
+        let nextOverviewPollAt = 0;
         while (Date.now() < deadline && jobRefreshGeneration.current === generation) {
           const refreshState = await fetchPreflopJson<RefreshState>("/api/refresh/current");
           setJobRefreshState(refreshState);
           if (!refreshState.active) {
-            setJobRefreshActive(false);
             setJobRefreshState(null);
+            break;
           }
-          if (!refreshState.active && !parallelResponse?.reconciling) break;
-          await waitFor(2_000);
-          parallelResponse = await loadJobContext();
+          if (Date.now() >= nextOverviewPollAt) {
+            nextOverviewPollAt = Date.now() + 2_000;
+            try {
+              applyOverviewResponse(await fetchPreflopJson<OverviewResponse>("/api/overview"));
+            } catch {
+              // Keep polling the refresh itself; the final context reload will
+              // surface any persistent Overview failure.
+            }
+          }
+          await waitFor(1_000);
         }
-        await loadJobContext();
+        await loadJobContext({ reconcileParallel: true });
       } catch (caught) {
         setJobError(caught instanceof Error ? caught.message : String(caught));
         await loadJobContext();
@@ -515,7 +519,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
         }
       }
     })();
-  }, [jobRefreshActive, loadJobContext]);
+  }, [applyOverviewResponse, jobRefreshActive, loadJobContext]);
 
   useEffect(() => {
     let canceled = false;
@@ -629,6 +633,31 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
   );
   const linkedJobSetting = linkedJobSettings.length === 1 ? linkedJobSettings[0]! : null;
   const effectiveSelectedJobScenario = linkedJobSetting?.id ?? selectedJobScenario;
+  const failurePoolContextRun = parallelRuns.find((run) => run.id === activeParallelRunId) ?? null;
+  const failurePoolRangePath = failurePoolContextRun?.rangePath ?? selectedRangePathForJob;
+  const failurePoolDatasetName = failurePoolContextRun?.datasetName ?? parallelPreview?.datasetName ?? jobDatasetName.trim();
+
+  useEffect(() => {
+    const generation = failurePoolRequestGeneration.current + 1;
+    failurePoolRequestGeneration.current = generation;
+    if (!failurePoolRangePath || !failurePoolDatasetName) {
+      setFailurePool([]);
+      return;
+    }
+    const query = new URLSearchParams({
+      rangePath: failurePoolRangePath,
+      datasetName: failurePoolDatasetName
+    });
+    void fetchPreflopJson<ParallelFailurePoolResponse>(`/api/parallel-jobs/failure-pool?${query}`)
+      .then((response) => {
+        if (failurePoolRequestGeneration.current === generation) setFailurePool(response.entries);
+      })
+      .catch((caught: unknown) => {
+        if (failurePoolRequestGeneration.current !== generation) return;
+        setFailurePool([]);
+        setJobError(caught instanceof Error ? caught.message : String(caught));
+      });
+  }, [failurePoolDatasetName, failurePoolRangePath, parallelRuns]);
   const pendingRangeMutationSourceSettings = pendingRangeMutation
     ? settingsAffectedByRangePath(scenarioLibrary, pendingRangeMutation.path, pendingRangeMutation.itemType)
     : [];
@@ -1074,6 +1103,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ folder: targetParent, orderedNames: names })
     });
+    setTree((current) => reorderRangeTreeFolder(current, targetParent, names));
     return true;
   };
 
@@ -1090,15 +1120,14 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
     }
   };
 
-  const handleDropOnItem = async (item: PreflopRangeTreeItem) => {
-    if (!dragItem || dragItem.path === item.path || !dropTarget) return;
+  const handleDropOnItem = async (item: PreflopRangeTreeItem, mode: DropTarget["mode"]) => {
+    if (!dragItem || dragItem.path === item.path) return;
     setError(null);
     try {
-      if (dropTarget.mode === "inside" && item.type === "folder") {
+      if (mode === "inside" && item.type === "folder") {
         requestMoveItem(dragItem, item.path);
-      } else if (dropTarget.mode === "before" || dropTarget.mode === "after") {
-        const reordered = await reorderAround(item, dropTarget.mode);
-        if (reordered) await loadTree();
+      } else if (mode === "before" || mode === "after") {
+        await reorderAround(item, mode);
       }
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
@@ -1255,6 +1284,18 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
     setJobBusy("parallel-start");
     setJobError(null);
     try {
+      if (
+        parallelPreview?.sourceType === "parallel" &&
+        parallelPreview.repoExists &&
+        parallelPreview.rangePath === requestPayload.rangePath &&
+        parallelPreview.settingId === requestPayload.settingId
+      ) {
+        await createParallelJobAfterRepoReady(
+          { ...requestPayload, datasetName: parallelPreview.datasetName },
+          queueMode
+        );
+        return;
+      }
       const repoStatus = await checkDatasetRepoForAction("parallel-start", gateRequest);
       if (!repoStatus) {
         setPendingDatasetRepoAction({
@@ -1279,14 +1320,23 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
     requestPayload: ParallelSolverJobPreviewRequest,
     queueMode: "start_now" | "queue_next"
   ) => {
-    await fetchPreflopJson<{ run: ParallelSolverRun }>("/api/parallel-jobs", {
+    const response = await fetchPreflopJson<ParallelSolverJobsSummaryResponse & { run: ParallelSolverRunSummary }>("/api/parallel-jobs?compact=1", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ ...requestPayload, confirmDatasetName: true, queueMode })
     });
+    applyParallelJobsResponse(response);
+    setActiveParallelRunId(response.run.id);
     setParallelPreview(null);
-    await loadJobContext();
-    await loadTree();
+    // The create response already contains the current lightweight snapshot.
+    // Refresh only the single-job list and range progress in the background;
+    // reloading /api/parallel-jobs here would download the same large history
+    // and failure-pool payload a second time.
+    void fetchPreflopJson<SolverJobsSummaryResponse>("/api/jobs?compact=1").then((jobsResponse) => {
+      setJobs(jobsResponse.jobs);
+      setJobEvents(jobsResponse.events);
+    }, () => undefined);
+    void loadTree();
   };
 
   const submitFailurePool = async (queueMode: "start_now" | "queue_next") => {
@@ -1315,7 +1365,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
         });
         return;
       }
-      await fetchPreflopJson<{ run: ParallelSolverRun }>("/api/parallel-jobs/failure-pool/submit", {
+      const response = await fetchPreflopJson<ParallelSolverJobsSummaryResponse & { run: ParallelSolverRunSummary }>("/api/parallel-jobs/failure-pool/submit?compact=1", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1325,7 +1375,8 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
           queueMode
         })
       });
-      await loadJobContext();
+      applyParallelJobsResponse(response);
+      setActiveParallelRunId(response.run.id);
       await loadTree();
     } catch (caught) {
       setJobError(caught instanceof Error ? caught.message : String(caught));
@@ -1340,7 +1391,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
     setJobBusy("parallel-reorder");
     setJobError(null);
     try {
-      const response = await fetchPreflopJson<ParallelSolverJobsResponse>("/api/parallel-jobs/reorder", {
+      const response = await fetchPreflopJson<ParallelSolverJobsSummaryResponse>("/api/parallel-jobs/reorder?compact=1", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ runIds })
@@ -1356,14 +1407,14 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
     }
   };
 
-  const cancelParallelRun = async (run: ParallelSolverRun) => {
+  const cancelParallelRun = async (run: ParallelSolverRunSummary) => {
     setJobBusy(`parallel-cancel:${run.id}`);
     setJobError(null);
     try {
-      await fetchPreflopJson<{ run: ParallelSolverRun }>(`/api/parallel-jobs/${encodeURIComponent(run.id)}/cancel`, {
+      const response = await fetchPreflopJson<ParallelSolverJobsSummaryResponse & { run: ParallelSolverRunSummary }>(`/api/parallel-jobs/${encodeURIComponent(run.id)}/cancel?compact=1`, {
         method: "POST"
       });
-      await loadJobContext();
+      applyParallelJobsResponse(response);
       await loadTree();
     } catch (caught) {
       setJobError(caught instanceof Error ? caught.message : String(caught));
@@ -1373,20 +1424,30 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
     }
   };
 
-  const requestDeleteParallelRun = (run: ParallelSolverRun) => {
+  const requestDeleteParallelRun = (run: ParallelSolverRunSummary) => {
     const terminal = terminalParallelReportRuns([run]).length === 1;
     if (parallelRunIsLocked(run) || (run.status !== "queued" && !terminal)) return;
-    const sliceIds = new Set(run.slices.map((slice) => slice.id));
-    const linkedFailureCount = failurePool.filter((entry) =>
-      entry.lastRunId === run.id || (entry.lastSliceId != null && sliceIds.has(entry.lastSliceId))
-    ).length;
-    setPendingParallelQueueDeleteAction({
-      runId: run.id,
-      datasetName: run.datasetName,
-      totalBoards: run.report.totalBoards,
-      kind: run.status === "queued" ? "queue" : "history",
-      linkedFailureCount
-    });
+    setJobBusy(`parallel-delete-inspect:${run.id}`);
+    setJobError(null);
+    const query = new URLSearchParams({ rangePath: run.rangePath, datasetName: run.datasetName });
+    void fetchPreflopJson<ParallelFailurePoolResponse>(`/api/parallel-jobs/failure-pool?${query}`)
+      .then((response) => {
+        const sliceIds = new Set(run.slices.map((slice) => slice.id));
+        const linkedFailureCount = response.entries.filter((entry) =>
+          entry.lastRunId === run.id || (entry.lastSliceId != null && sliceIds.has(entry.lastSliceId))
+        ).length;
+        setPendingParallelQueueDeleteAction({
+          runId: run.id,
+          datasetName: run.datasetName,
+          totalBoards: run.report.totalBoards,
+          kind: run.status === "queued" ? "queue" : "history",
+          linkedFailureCount
+        });
+      })
+      .catch((caught: unknown) => {
+        setJobError(caught instanceof Error ? caught.message : String(caught));
+      })
+      .finally(() => setJobBusy(null));
   };
 
   const confirmDeleteParallelQueueRun = async () => {
@@ -1395,7 +1456,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
     setJobBusy(`parallel-delete:${runId}`);
     setJobError(null);
     try {
-      const response = await fetchPreflopJson<ParallelSolverJobsResponse>(`/api/parallel-jobs/${encodeURIComponent(runId)}`, {
+      const response = await fetchPreflopJson<ParallelSolverJobsSummaryResponse>(`/api/parallel-jobs/${encodeURIComponent(runId)}?compact=1`, {
         method: "DELETE"
       });
       applyParallelJobsResponse(response);
@@ -1433,16 +1494,25 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
   const confirmParallelReportsAction = async () => {
     if (!pendingParallelReportsAction) return;
     if (pendingParallelReportsAction.action === "download") {
-      const markdown = buildParallelReportsMarkdown(parallelRuns, failurePool);
-      downloadTextFile(`parallel-reports-${new Date().toISOString().slice(0, 10)}.md`, markdown);
-      setPendingParallelReportsAction(null);
+      setJobBusy("parallel-download-reports");
+      setJobError(null);
+      try {
+        const reportSnapshot = await fetchPreflopJson<ParallelSolverReportsResponse>("/api/parallel-jobs/reports");
+        const markdown = buildParallelReportsMarkdown(reportSnapshot.runs, reportSnapshot.failurePool);
+        downloadTextFile(`parallel-reports-${new Date().toISOString().slice(0, 10)}.md`, markdown);
+        setPendingParallelReportsAction(null);
+      } catch (caught) {
+        setJobError(caught instanceof Error ? caught.message : String(caught));
+      } finally {
+        setJobBusy(null);
+      }
       return;
     }
 
     setJobBusy("parallel-clear-reports");
     setJobError(null);
     try {
-      const response = await fetchPreflopJson<ParallelSolverReportsClearResponse>("/api/parallel-jobs/reports", {
+      const response = await fetchPreflopJson<ParallelSolverReportsSummaryClearResponse>("/api/parallel-jobs/reports?compact=1", {
         method: "DELETE"
       });
       applyParallelJobsResponse(response);
@@ -1477,7 +1547,8 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
         rangePath: pendingFailurePoolClearAction.rangePath,
         datasetName: pendingFailurePoolClearAction.datasetName
       });
-      const response = await fetchPreflopJson<ParallelFailurePoolClearResponse>(`/api/parallel-jobs/failure-pool?${query}`, {
+      query.set("compact", "1");
+      const response = await fetchPreflopJson<ParallelFailurePoolSummaryClearResponse>(`/api/parallel-jobs/failure-pool?${query}`, {
         method: "DELETE"
       });
       applyParallelJobsResponse(response);
@@ -1981,7 +2052,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
         return;
       }
       if (pending.action === "pool-submit" && pending.parallelRequest) {
-        await fetchPreflopJson<{ run: ParallelSolverRun }>("/api/parallel-jobs/failure-pool/submit", {
+        const response = await fetchPreflopJson<ParallelSolverJobsSummaryResponse & { run: ParallelSolverRunSummary }>("/api/parallel-jobs/failure-pool/submit?compact=1", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -1991,7 +2062,8 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
             queueMode: pending.parallelQueueMode ?? "queue_next"
           })
         });
-        await loadJobContext();
+        applyParallelJobsResponse(response);
+        setActiveParallelRunId(response.run.id);
         await loadTree();
         return;
       }
@@ -2135,7 +2207,7 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
     }
   };
 
-  const runJobAction = async (job: SolverJob, action: SolverJobAction) => {
+  const runJobAction = async (job: SolverJobSummary, action: SolverJobAction) => {
     const server = servers.find((candidate) => candidate.id === job.serverId) ?? null;
     if (!serverIsOnlineForJob(server)) {
       showOfflineServerNotice(server, job.serverId, JOB_ACTION_LABELS[action]);
@@ -2561,7 +2633,8 @@ export function PreflopRangeView({ onBack }: { onBack: () => void }) {
                     onDragLeave={() => setDropTarget(null)}
                     onDrop={(event) => {
                       event.preventDefault();
-                      void handleDropOnItem(item);
+                      const mode = dropModeFromEvent(event, item.type);
+                      void handleDropOnItem(item, mode);
                     }}
                     onDragEnd={() => {
                       setDragItem(null);
@@ -3590,9 +3663,9 @@ function SolverJobPanel({
   onJobAction
 }: {
   servers: ServerRow[];
-  jobs: SolverJob[];
-  events: SolverJobEvent[];
-  parallelRuns: ParallelSolverRun[];
+  jobs: SolverJobSummary[];
+  events: SolverJobEventSummary[];
+  parallelRuns: ParallelSolverRunSummary[];
   failurePool: ParallelFailurePoolEntry[];
   parallelPreview: ParallelSolverJobPreview | null;
   parallelContextLoaded: boolean;
@@ -3654,14 +3727,14 @@ function SolverJobPanel({
   onParallelStart: () => void;
   onParallelQueueNext: () => void;
   onParallelRunSelect: (runId: string) => void;
-  onParallelQueueDelete: (run: ParallelSolverRun) => void;
+  onParallelQueueDelete: (run: ParallelSolverRunSummary) => void;
   onFailurePoolSubmit: () => void;
   onFailurePoolClear: () => void;
-  onParallelCancel: (run: ParallelSolverRun) => void;
+  onParallelCancel: (run: ParallelSolverRunSummary) => void;
   onParallelReportsDownload: () => void;
   onParallelReportsClear: () => void;
   onParallelQueueSave: (runIds: string[]) => Promise<boolean>;
-  onJobAction: (job: SolverJob, action: SolverJobAction) => void;
+  onJobAction: (job: SolverJobSummary, action: SolverJobAction) => void;
 }) {
   const selectedServer = servers.find((server) => server.id === selectedServerId) ?? null;
   const filteredJobs = selectedServerId ? jobs.filter((job) => job.serverId === selectedServerId) : jobs;
@@ -4473,7 +4546,7 @@ function ParallelSolverJobPanel({
   selectedScenario: SolverScenario | "";
   linkedSetting: SolverScenarioLibraryItem | null;
   scenarioLibrary: SolverScenarioLibraryItem[];
-  runs: ParallelSolverRun[];
+  runs: ParallelSolverRunSummary[];
   failurePool: ParallelFailurePoolEntry[];
   activeRunId: string | null;
   busy: string | null;
@@ -4488,10 +4561,10 @@ function ParallelSolverJobPanel({
   onStart: () => void;
   onQueueNext: () => void;
   onRunSelect: (runId: string) => void;
-  onRunDelete: (run: ParallelSolverRun) => void;
+  onRunDelete: (run: ParallelSolverRunSummary) => void;
   onFailurePoolSubmit: () => void;
   onFailurePoolClear: () => void;
-  onCancelRun: (run: ParallelSolverRun) => void;
+  onCancelRun: (run: ParallelSolverRunSummary) => void;
   onReportsDownload: () => void;
   onReportsClear: () => void;
   onQueueSave: (runIds: string[]) => Promise<boolean>;
@@ -4916,9 +4989,11 @@ function ParallelSolverJobPanel({
                 {run.slices.map((slice) => (
                   <div key={slice.id} className={`parallel-slice-row ${slice.status}`}>
                     <span>{formatSliceServerId(slice)}</span>
-                    <strong>{slice.assignedIndices.length}</strong>
+                    <strong>{slice.assignedCount}</strong>
                     <em>{formatParallelSliceStatus(slice.status)}</em>
-                    <small>{slice.status === "queued" ? slice.lastError ?? slice.job?.lastError ?? "Pending dispatch" : slice.rangeExpr}</small>
+                    <small>{slice.lastError ?? slice.jobLastError ?? (
+                      slice.status === "queued" ? "Pending dispatch" : `${slice.assignedCount} assigned boards`
+                    )}</small>
                   </div>
                 ))}
               </div>
@@ -4978,12 +5053,12 @@ export function ParallelQueueBoard({
   onRunDelete,
   onSaveOrder
 }: {
-  runs: ParallelSolverRun[];
+  runs: ParallelSolverRunSummary[];
   loaded?: boolean;
   activeRunId: string | null;
   busy: string | null;
   onRunSelect: (runId: string) => void;
-  onRunDelete: (run: ParallelSolverRun) => void;
+  onRunDelete: (run: ParallelSolverRunSummary) => void;
   onSaveOrder: (runIds: string[]) => Promise<boolean>;
 }) {
   const committedQueueRuns = parallelQueueRuns(runs);
@@ -5331,12 +5406,12 @@ export function ParallelHistoryBoard({
   onRunSelect,
   onRunDelete
 }: {
-  runs: ParallelSolverRun[];
+  runs: ParallelSolverRunSummary[];
   loaded?: boolean;
   activeRunId: string | null;
   busy: string | null;
   onRunSelect: (runId: string) => void;
-  onRunDelete: (run: ParallelSolverRun) => void;
+  onRunDelete: (run: ParallelSolverRunSummary) => void;
 }) {
   const historyRuns = parallelHistoryRuns(runs);
   const [filter, setFilter] = useState<ParallelHistoryFilter>("all");
@@ -5530,6 +5605,9 @@ export function ServerOperationsPanel({
   const activeOperations = operations
     .filter((operation) => !serverOperationIsTerminal(operation))
     .sort(compareServerOperations);
+  const activeCodeSyncServerIds = new Set(
+    activeOperations.filter((operation) => operation.type === "sync").map((operation) => operation.serverId)
+  );
   const activeUploadServerIds = new Set(
     activeOperations.filter((operation) => operation.type === "upload").map((operation) => operation.serverId)
   );
@@ -5549,6 +5627,7 @@ export function ServerOperationsPanel({
   const [uploadQuery, setUploadQuery] = useState("");
   const [uploadServerFilter, setUploadServerFilter] = useState("all");
   const [uploadFormatFilter, setUploadFormatFilter] = useState<"all" | SolverUploadFormat>("all");
+  const [selectedCodeSyncServerIds, setSelectedCodeSyncServerIds] = useState<Set<string>>(() => new Set());
   const [selectedNetworkServerIds, setSelectedNetworkServerIds] = useState<Set<string>>(() => new Set());
   const [selectedUploadCandidateIds, setSelectedUploadCandidateIds] = useState<Set<string>>(() => new Set());
   const [uploadDetailOperationId, setUploadDetailOperationId] = useState<string | null>(null);
@@ -5597,6 +5676,19 @@ export function ServerOperationsPanel({
   const allFilteredCandidatesSelected = filteredCandidateIds.length > 0 &&
     filteredCandidateIds.every((id) => selectedUploadCandidateIds.has(id));
   const someFilteredCandidatesSelected = filteredCandidateIds.some((id) => selectedUploadCandidateIds.has(id));
+  const codeSyncSelectableServers = enabledServers.filter((server) => (
+    serverIsOnlineForJob(server) && !activeCodeSyncServerIds.has(server.id)
+  ));
+  const codeSyncSelectableServerIds = codeSyncSelectableServers.map((server) => server.id);
+  const codeSyncSelectableServerIdSet = new Set(codeSyncSelectableServerIds);
+  const selectedCodeSyncServers = enabledServers.filter((server) => selectedCodeSyncServerIds.has(server.id));
+  const selectedBlockedCodeSyncServerIds = selectedCodeSyncServers
+    .filter((server) => !codeSyncSelectableServerIdSet.has(server.id))
+    .map((server) => server.id);
+  const allCodeSyncServersSelected = codeSyncSelectableServerIds.length > 0 &&
+    codeSyncSelectableServerIds.every((serverId) => selectedCodeSyncServerIds.has(serverId));
+  const someCodeSyncServersSelected = codeSyncSelectableServerIds
+    .some((serverId) => selectedCodeSyncServerIds.has(serverId));
   const networkSyncSelectableServers = enabledServers.filter((server) => (
     serverIsOnlineForJob(server) && !activeNetworkSyncServerIds.has(server.id)
   ));
@@ -5629,6 +5721,23 @@ export function ServerOperationsPanel({
   useEffect(() => {
     const activeServerIds = new Set(
       operations
+        .filter((operation) => operation.type === "sync" && !serverOperationIsTerminal(operation))
+        .map((operation) => operation.serverId)
+    );
+    const currentIds = new Set(
+      servers
+        .filter((server) => server.enabled && serverIsOnlineForJob(server) && !activeServerIds.has(server.id))
+        .map((server) => server.id)
+    );
+    setSelectedCodeSyncServerIds((selected) => {
+      if ([...selected].every((serverId) => currentIds.has(serverId))) return selected;
+      return new Set([...selected].filter((serverId) => currentIds.has(serverId)));
+    });
+  }, [operations, servers]);
+
+  useEffect(() => {
+    const activeServerIds = new Set(
+      operations
         .filter((operation) => operation.type === "network_sync" && !serverOperationIsTerminal(operation))
         .map((operation) => operation.serverId)
     );
@@ -5642,6 +5751,25 @@ export function ServerOperationsPanel({
       return new Set([...selected].filter((serverId) => currentIds.has(serverId)));
     });
   }, [operations, servers]);
+
+  const toggleCodeSyncServer = (serverId: string) => {
+    if (!codeSyncSelectableServerIdSet.has(serverId)) return;
+    setSelectedCodeSyncServerIds((selected) => {
+      const next = new Set(selected);
+      if (next.has(serverId)) next.delete(serverId);
+      else next.add(serverId);
+      return next;
+    });
+  };
+
+  const toggleAllCodeSyncServers = () => {
+    setSelectedCodeSyncServerIds((selected) => {
+      const next = new Set(selected);
+      if (allCodeSyncServersSelected) codeSyncSelectableServerIds.forEach((serverId) => next.delete(serverId));
+      else codeSyncSelectableServerIds.forEach((serverId) => next.add(serverId));
+      return next;
+    });
+  };
 
   const toggleNetworkServer = (serverId: string) => {
     if (!networkSyncSelectableServerIdSet.has(serverId)) return;
@@ -6048,6 +6176,39 @@ export function ServerOperationsPanel({
             </button>
           ))}
         </div>
+        {inventoryTab === "sync" ? (
+          <div className="server-ops-inventory-selectionbar" role="region" aria-label="Code sync server selection">
+            <span className="server-ops-selection-summary">
+              {selectedCodeSyncServers.length} selected · {codeSyncSelectableServers.length} available
+            </span>
+            <span className="server-ops-muted">Select only the servers that need a Git code update.</span>
+            <div className="server-ops-selection-actions">
+              <button
+                className="inventory-confirm-button"
+                type="button"
+                onClick={() => setSelectedCodeSyncServerIds(new Set())}
+                disabled={selectedCodeSyncServers.length === 0}
+              >
+                <X size={13} />
+                Clear
+              </button>
+              <button
+                className="inventory-confirm-button primary"
+                type="button"
+                onClick={() => onSync(selectedCodeSyncServers.map((server) => server.id))}
+                disabled={
+                  operationBusy ||
+                  selectedCodeSyncServers.length === 0 ||
+                  selectedBlockedCodeSyncServerIds.length > 0
+                }
+                title="Sync code only on the selected servers"
+              >
+                <RefreshCw size={13} />
+                Sync Selected
+              </button>
+            </div>
+          </div>
+        ) : null}
         {inventoryTab === "network" ? (
           <div className="server-ops-inventory-selectionbar" role="region" aria-label="Network sync server selection">
             <span className="server-ops-selection-summary">
@@ -6088,7 +6249,21 @@ export function ServerOperationsPanel({
               <thead>
                 <tr>
                   <th>
-                    {inventoryTab === "network" ? (
+                    {inventoryTab === "sync" ? (
+                      <label className="server-ops-inventory-server-select">
+                        <input
+                          type="checkbox"
+                          checked={allCodeSyncServersSelected}
+                          ref={(input) => {
+                            if (input) input.indeterminate = someCodeSyncServersSelected && !allCodeSyncServersSelected;
+                          }}
+                          onChange={toggleAllCodeSyncServers}
+                          disabled={operationBusy || codeSyncSelectableServers.length === 0}
+                          aria-label="Select all available code sync servers"
+                        />
+                        <span>Server ID</span>
+                      </label>
+                    ) : inventoryTab === "network" ? (
                       <label className="server-ops-inventory-server-select">
                         <input
                           type="checkbox"
@@ -6120,19 +6295,31 @@ export function ServerOperationsPanel({
                     operations={operationsByServer.get(server.id) ?? new Map()}
                     inventoryTab={inventoryTab}
                     busy={busy}
-                    networkSelected={selectedNetworkServerIds.has(server.id)}
-                    networkSelectionDisabledReason={
-                      !networkSyncConfigured
-                        ? "SUBSCRIPTION_URL is required for network sync"
-                        : operationBusy
+                    selectionSelected={
+                      inventoryTab === "sync"
+                        ? selectedCodeSyncServerIds.has(server.id)
+                        : selectedNetworkServerIds.has(server.id)
+                    }
+                    selectionDisabledReason={
+                      inventoryTab === "sync"
+                        ? operationBusy
                           ? "Another server operation request is being processed"
                           : !serverIsOnlineForJob(server)
                             ? `Server ${server.id} is unavailable`
-                            : activeNetworkSyncServerIds.has(server.id)
-                              ? `A network sync is already active on server ${server.id}`
+                            : activeCodeSyncServerIds.has(server.id)
+                              ? `A code sync is already active on server ${server.id}`
                               : null
+                        : !networkSyncConfigured
+                          ? "SUBSCRIPTION_URL is required for network sync"
+                          : operationBusy
+                            ? "Another server operation request is being processed"
+                            : !serverIsOnlineForJob(server)
+                              ? `Server ${server.id} is unavailable`
+                              : activeNetworkSyncServerIds.has(server.id)
+                                ? `A network sync is already active on server ${server.id}`
+                                : null
                     }
-                    onNetworkSelect={toggleNetworkServer}
+                    onSelectionToggle={inventoryTab === "sync" ? toggleCodeSyncServer : toggleNetworkServer}
                     onSync={() => onSync([server.id])}
                     onNetworkCheck={() => onNetworkCheck([server.id])}
                     onUpload={() => onUpload([server.id])}
@@ -6161,9 +6348,9 @@ function ServerOperationRow({
   operations,
   inventoryTab,
   busy,
-  networkSelected,
-  networkSelectionDisabledReason,
-  onNetworkSelect,
+  selectionSelected,
+  selectionDisabledReason,
+  onSelectionToggle,
   onSync,
   onNetworkCheck,
   onUpload,
@@ -6175,9 +6362,9 @@ function ServerOperationRow({
   operations: Map<ServerOperation["type"], ServerOperation>;
   inventoryTab: ServerOperationInventoryTab;
   busy: string | null;
-  networkSelected: boolean;
-  networkSelectionDisabledReason: string | null;
-  onNetworkSelect: (serverId: string) => void;
+  selectionSelected: boolean;
+  selectionDisabledReason: string | null;
+  onSelectionToggle: (serverId: string) => void;
   onSync: () => void;
   onNetworkCheck: () => void;
   onUpload: () => void;
@@ -6211,17 +6398,19 @@ function ServerOperationRow({
   const startDisabled = (busy?.startsWith("operation-") ?? false) || !serverIsOnlineForJob(server) || startOperationActive;
   const startLabel = inventoryTab === "sync" ? "Code Sync" : inventoryTab === "network" ? "Check Online" : "Scan + Upload";
   const startAction = inventoryTab === "sync" ? onSync : inventoryTab === "network" ? onNetworkCheck : onUpload;
+  const selectionOperationLabel = inventoryTab === "sync" ? "code sync" : "network sync";
+  const selectionVisible = inventoryTab === "sync" || inventoryTab === "network";
   return (
-    <tr className={`server-ops-history-row server-ops-inventory-row ${inventoryTab === "network" && networkSelected ? "selected" : ""}`}>
+    <tr className={`server-ops-history-row server-ops-inventory-row ${selectionVisible && selectionSelected ? "selected" : ""}`}>
       <td>
-        {inventoryTab === "network" ? (
-          <label className="server-ops-inventory-server-select" title={networkSelectionDisabledReason ?? `Select server ${server.id} for network sync`}>
+        {selectionVisible ? (
+          <label className="server-ops-inventory-server-select" title={selectionDisabledReason ?? `Select server ${server.id} for ${selectionOperationLabel}`}>
             <input
               type="checkbox"
-              checked={networkSelected}
-              onChange={() => onNetworkSelect(server.id)}
-              disabled={Boolean(networkSelectionDisabledReason)}
-              aria-label={`Select server ${server.id} for network sync`}
+              checked={selectionSelected}
+              onChange={() => onSelectionToggle(server.id)}
+              disabled={Boolean(selectionDisabledReason)}
+              aria-label={`Select server ${server.id} for ${selectionOperationLabel}`}
             />
             <strong>{server.id}</strong>
           </label>
@@ -6519,13 +6708,13 @@ function SolverJobGroup({
   onJobAction
 }: {
   title: string;
-  jobs: SolverJob[];
-  latestEventByJobId: Map<string, SolverJobEvent>;
+  jobs: SolverJobSummary[];
+  latestEventByJobId: Map<string, SolverJobEventSummary>;
   busy: string | null;
   emptyText: string;
   showRecentLabels?: boolean;
   allowDelete?: boolean;
-  onJobAction: (job: SolverJob, action: SolverJobAction) => void;
+  onJobAction: (job: SolverJobSummary, action: SolverJobAction) => void;
 }) {
   return (
     <div className="solver-job-group">
@@ -6554,12 +6743,12 @@ function SolverJobCard({
   allowDelete,
   onJobAction
 }: {
-  job: SolverJob;
-  latestEvent: SolverJobEvent | null;
+  job: SolverJobSummary;
+  latestEvent: SolverJobEventSummary | null;
   busy: string | null;
   showRecentLabels: boolean;
   allowDelete: boolean;
-  onJobAction: (job: SolverJob, action: SolverJobAction) => void;
+  onJobAction: (job: SolverJobSummary, action: SolverJobAction) => void;
 }) {
   const jobBusy = Boolean(busy?.endsWith(job.id));
   const canRetry = job.status === "interrupted" || job.status === "failed";
@@ -6853,8 +7042,8 @@ function nullablePositiveNumberFromInput(value: string): number | null {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
 }
 
-function latestJobEvents(events: SolverJobEvent[]): Map<string, SolverJobEvent> {
-  const latest = new Map<string, SolverJobEvent>();
+function latestJobEvents(events: SolverJobEventSummary[]): Map<string, SolverJobEventSummary> {
+  const latest = new Map<string, SolverJobEventSummary>();
   for (const event of events) {
     const current = latest.get(event.jobId);
     if (!current || event.createdAt > current.createdAt) {
@@ -6864,11 +7053,11 @@ function latestJobEvents(events: SolverJobEvent[]): Map<string, SolverJobEvent> 
   return latest;
 }
 
-function formatJobStatus(status: SolverJob["status"]): string {
+function formatJobStatus(status: SolverJobSummary["status"]): string {
   return status.replace(/_/g, " ");
 }
 
-function formatParallelRunStatus(status: ParallelSolverRun["status"]): string {
+function formatParallelRunStatus(status: ParallelSolverRunSummary["status"]): string {
   if (status === "completed_with_failures" || status === "failed") return "Completed with Failures";
   return titleCaseStatus(status);
 }
@@ -6877,7 +7066,7 @@ export function ParallelServerScopeBadge({
   scope,
   compact = false
 }: {
-  scope: ParallelSolverRun["serverScope"];
+  scope: ParallelSolverRunSummary["serverScope"];
   compact?: boolean;
 }) {
   const label = scope == null
@@ -6906,7 +7095,7 @@ export function ParallelServerScopeBadge({
   );
 }
 
-function formatParallelSliceStatus(status: ParallelSolverRun["slices"][number]["status"]): string {
+function formatParallelSliceStatus(status: ParallelSolverRunSummary["slices"][number]["status"]): string {
   if (status === "failed") return "Completed with Failures";
   return titleCaseStatus(status);
 }
@@ -7239,7 +7428,7 @@ function serverOperationConfirmCopy(action: PendingServerOperationAction): strin
   return `This will remove ${action.itemCount} completed, failed, or canceled server operation record${action.itemCount === 1 ? "" : "s"}. Active operations stay visible.`;
 }
 
-function parallelDispatchState(run: ParallelSolverRun): {
+function parallelDispatchState(run: ParallelSolverRunSummary): {
   label: string;
   className: string;
   summary: string;
@@ -7281,16 +7470,16 @@ function parallelDispatchState(run: ParallelSolverRun): {
   };
 }
 
-function parallelQueueRuns(runs: ParallelSolverRun[]): ParallelSolverRun[] {
+function parallelQueueRuns(runs: ParallelSolverRunSummary[]): ParallelSolverRunSummary[] {
   return runs
     .filter((run) => run.status === "queued" || run.status === "running")
     .sort(compareParallelRunQueue);
 }
 
 function applyParallelQueueDraft(
-  committedRuns: ParallelSolverRun[],
+  committedRuns: ParallelSolverRunSummary[],
   draftMovableIds: string[]
-): ParallelSolverRun[] {
+): ParallelSolverRunSummary[] {
   const byId = new Map(committedRuns.map((run) => [run.id, run]));
   const movableIds = new Set(
     committedRuns
@@ -7309,11 +7498,11 @@ function sameStringOrder(left: string[], right: string[]): boolean {
   return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
-function parallelHistoryRuns(runs: ParallelSolverRun[]): ParallelSolverRun[] {
+function parallelHistoryRuns(runs: ParallelSolverRunSummary[]): ParallelSolverRunSummary[] {
   return terminalParallelReportRuns(runs).sort(compareParallelHistoryRun);
 }
 
-function parallelHistoryRunMatchesQuery(run: ParallelSolverRun, normalizedQuery: string): boolean {
+function parallelHistoryRunMatchesQuery(run: ParallelSolverRunSummary, normalizedQuery: string): boolean {
   const searchText = [
     run.datasetName,
     displayDatasetName(run.datasetName),
@@ -7333,16 +7522,16 @@ function parallelHistoryRunMatchesQuery(run: ParallelSolverRun, normalizedQuery:
   return searchText.includes(normalizedQuery);
 }
 
-function resolveInspectionRun(runs: ParallelSolverRun[], activeRunId: string | null): ParallelSolverRun | null {
+function resolveInspectionRun(runs: ParallelSolverRunSummary[], activeRunId: string | null): ParallelSolverRunSummary | null {
   if (!activeRunId) return null;
   return runs.find((run) => run.id === activeRunId) ?? null;
 }
 
-function resolveDefaultParallelRunId(runs: ParallelSolverRun[]): string | null {
+function resolveDefaultParallelRunId(runs: ParallelSolverRunSummary[]): string | null {
   return parallelQueueRuns(runs)[0]?.id ?? parallelHistoryRuns(runs)[0]?.id ?? null;
 }
 
-function terminalParallelReportRuns(runs: ParallelSolverRun[]): ParallelSolverRun[] {
+function terminalParallelReportRuns(runs: ParallelSolverRunSummary[]): ParallelSolverRunSummary[] {
   return runs.filter((run) =>
     !run.reportCleared && (
       run.status === "completed" ||
@@ -7353,13 +7542,13 @@ function terminalParallelReportRuns(runs: ParallelSolverRun[]): ParallelSolverRu
   );
 }
 
-function compareParallelRunQueue(left: ParallelSolverRun, right: ParallelSolverRun): number {
+function compareParallelRunQueue(left: ParallelSolverRunSummary, right: ParallelSolverRunSummary): number {
   const orderDelta = left.queueOrder - right.queueOrder;
   if (orderDelta !== 0) return orderDelta;
   return Date.parse(left.createdAt) - Date.parse(right.createdAt);
 }
 
-function compareParallelHistoryRun(left: ParallelSolverRun, right: ParallelSolverRun): number {
+function compareParallelHistoryRun(left: ParallelSolverRunSummary, right: ParallelSolverRunSummary): number {
   const leftFinished = Date.parse(left.finishedAt ?? left.updatedAt);
   const rightFinished = Date.parse(right.finishedAt ?? right.updatedAt);
   if (Number.isFinite(leftFinished) && Number.isFinite(rightFinished) && leftFinished !== rightFinished) {
@@ -7368,16 +7557,16 @@ function compareParallelHistoryRun(left: ParallelSolverRun, right: ParallelSolve
   return Date.parse(right.createdAt) - Date.parse(left.createdAt);
 }
 
-function parallelRunIsLocked(run: ParallelSolverRun): boolean {
+function parallelRunIsLocked(run: ParallelSolverRunSummary): boolean {
   return run.slices.some((slice) =>
     slice.status === "running" ||
-    slice.job?.status === "deploying" ||
-    slice.job?.status === "running" ||
-    slice.job?.status === "stopping"
+    slice.jobStatus === "deploying" ||
+    slice.jobStatus === "running" ||
+    slice.jobStatus === "stopping"
   );
 }
 
-function formatSliceServerId(slice: ParallelSolverRun["slices"][number]): string {
+function formatSliceServerId(slice: Pick<ParallelSolverRunSummary["slices"][number], "serverId">): string {
   return slice.serverId || "Pending";
 }
 
@@ -7428,8 +7617,8 @@ function failureReasonLabel(reason: ParallelFailureReason): string {
 }
 
 function buildParallelReportsMarkdown(
-  runs: ParallelSolverRun[],
-  failurePool: ParallelFailurePoolEntry[]
+  runs: ParallelSolverReportRun[],
+  failurePool: ParallelFailurePoolDatasetSummary[]
 ): string {
   const sortedRuns = runs
     .slice()
@@ -7439,7 +7628,7 @@ function buildParallelReportsMarkdown(
     "",
     `Generated: ${new Date().toISOString()}`,
     `Runs: ${sortedRuns.length}`,
-    `Failure Pool Entries: ${failurePool.length}`,
+    `Failure Pool Entries: ${failurePool.reduce((sum, item) => sum + item.count, 0)}`,
     ""
   ];
 
@@ -7474,7 +7663,7 @@ function buildParallelReportsMarkdown(
     );
     for (const slice of run.slices) {
       lines.push(
-        `| ${markdownCell(formatSliceServerId(slice))} | ${markdownCell(formatParallelSliceStatus(slice.status))} | ${slice.assignedIndices.length} | ${slice.completedCount} | ${slice.failedCount} | ${markdownCell(slice.rangeExpr || "-")} |`
+        `| ${markdownCell(formatSliceServerId(slice))} | ${markdownCell(formatParallelSliceStatus(slice.status))} | ${slice.assignedCount} | ${slice.completedCount} | ${slice.failedCount} | ${markdownCell(slice.rangeExpr || "-")} |`
       );
     }
     if (run.lastError) {
@@ -7483,13 +7672,12 @@ function buildParallelReportsMarkdown(
     lines.push("");
   }
 
-  const failureByDataset = summarizeFailurePoolDatasets(failurePool);
   lines.push("## Failure Pool Snapshot", "");
-  if (failureByDataset.length === 0) {
+  if (failurePool.length === 0) {
     lines.push("No failure pool entries.", "");
   } else {
     lines.push("| Dataset | Entries |", "| --- | ---: |");
-    for (const item of failureByDataset) {
+    for (const item of failurePool) {
       lines.push(`| ${markdownCell(item.datasetName)} | ${item.count} |`);
     }
     lines.push("");
@@ -7498,7 +7686,7 @@ function buildParallelReportsMarkdown(
   return `${lines.join("\n").trimEnd()}\n`;
 }
 
-function parallelServerScopeReportLabel(scope: ParallelSolverRun["serverScope"]): string {
+function parallelServerScopeReportLabel(scope: ParallelSolverRunSummary["serverScope"]): string {
   if (scope === "all") return "All Servers";
   if (scope === "performance") return "Performance";
   if (scope === "standard") return "Standard";
@@ -7616,6 +7804,35 @@ function normalizeRangeTreeItems(items: PreflopRangeTreeItem[]): PreflopRangeTre
     }
     return normalizeRangeFileItem(item);
   });
+}
+
+export function reorderRangeTreeFolder(
+  items: PreflopRangeTreeItem[],
+  folderPath: string,
+  orderedNames: string[]
+): PreflopRangeTreeItem[] {
+  if (!folderPath) return reorderRangeTreeChildren(items, orderedNames);
+  return items.map((item) => {
+    if (item.type !== "folder") return item;
+    if (item.path === folderPath) {
+      return { ...item, children: reorderRangeTreeChildren(item.children, orderedNames) };
+    }
+    return { ...item, children: reorderRangeTreeFolder(item.children, folderPath, orderedNames) };
+  });
+}
+
+function reorderRangeTreeChildren(
+  items: PreflopRangeTreeItem[],
+  orderedNames: string[]
+): PreflopRangeTreeItem[] {
+  const byName = new Map(items.map((item) => [item.name, item]));
+  const ordered = orderedNames.flatMap((name) => {
+    const item = byName.get(name);
+    if (!item) return [];
+    byName.delete(name);
+    return [item];
+  });
+  return [...ordered, ...items.filter((item) => byName.has(item.name))];
 }
 
 function normalizeRangeFileItem(item: PreflopRangeFileItem): PreflopRangeFileItem {
@@ -8053,7 +8270,7 @@ export function writeRangeProgressViewPreference(view: RangeProgressView): void 
   }
 }
 
-function scheduleParallelJobsCacheWrite(response: ParallelSolverJobsResponse, snapshotAt: string | null): void {
+function scheduleParallelJobsCacheWrite(response: ParallelSolverJobsSummaryResponse, snapshotAt: string | null): void {
   const fingerprint = parallelJobsCacheFingerprint(response, snapshotAt);
   if (fingerprint === parallelJobsCachePersistedFingerprint) return;
   pendingParallelJobsCacheWrite = {
@@ -8093,8 +8310,7 @@ async function readParallelJobsCache(): Promise<ParallelJobsCacheRecord | null> 
     database.close();
     if (
       record?.version !== PARALLEL_JOBS_CACHE_VERSION ||
-      !Array.isArray(record.response?.runs) ||
-      !Array.isArray(record.response?.failurePool)
+      !Array.isArray(record.response?.runs)
     ) {
       return null;
     }
@@ -8134,20 +8350,14 @@ function openParallelJobsCacheDatabase(): Promise<IDBDatabase> {
   });
 }
 
-function parallelJobsCacheFingerprint(response: ParallelSolverJobsResponse, snapshotAt: string | null): string {
+function parallelJobsCacheFingerprint(response: ParallelSolverJobsSummaryResponse, snapshotAt: string | null): string {
   const latestRunUpdate = response.runs.reduce(
     (latest, run) => run.updatedAt > latest ? run.updatedAt : latest,
-    ""
-  );
-  const latestFailureUpdate = response.failurePool.reduce(
-    (latest, entry) => entry.updatedAt > latest ? entry.updatedAt : latest,
     ""
   );
   return [
     response.runs.length,
     latestRunUpdate,
-    response.failurePool.length,
-    latestFailureUpdate,
     Number(response.reconciling),
     snapshotAt ?? ""
   ].join(":");

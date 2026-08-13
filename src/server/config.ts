@@ -15,6 +15,7 @@ export type RuntimeConfig = {
   port: number;
   databasePath: string;
   refreshIntervalMs: number;
+  refreshConcurrency: number;
   inventoryPath: string;
   alertSettingsPath: string;
   preflopRangesPath: string;
@@ -70,6 +71,7 @@ export function loadRuntimeConfig(env: EnvSource = process.env): RuntimeConfig {
     port: numberFromEnv(env.SERVER_MONITOR_PORT, 3001),
     databasePath: env.SERVER_MONITOR_DB_PATH ?? "data/server-monitor.sqlite",
     refreshIntervalMs: numberFromEnv(env.SERVER_MONITOR_REFRESH_INTERVAL_MS, 3_600_000),
+    refreshConcurrency: numberFromEnv(env.SERVER_MONITOR_REFRESH_CONCURRENCY, 8),
     inventoryPath: env.SERVER_MONITOR_INVENTORY_PATH ?? "config/servers.json",
     alertSettingsPath: env.SERVER_MONITOR_ALERT_SETTINGS_PATH ?? "config/alerts.json",
     preflopRangesPath: env.SERVER_MONITOR_PREFLOP_RANGES_PATH ?? "config/preflop-ranges",

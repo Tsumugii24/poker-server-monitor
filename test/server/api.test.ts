@@ -311,7 +311,7 @@ describe("monitor API", () => {
       language: "en",
       offlineRetryIntervalSeconds: 60,
       sshCommandTimeoutSeconds: 15,
-      sshConnectTimeoutSeconds: 10,
+      sshConnectTimeoutSeconds: 20,
       hfProxyEnabled: false,
       solverHfProxyEnabled: false
     });

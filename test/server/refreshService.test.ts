@@ -132,9 +132,51 @@ describe("RefreshService", () => {
       cpuUsedPercent: 20,
       memoryUsedPercent: 30
     });
-    expect(row.pipeline).toMatchObject({ displayStatus: "unavailable", errorCode: "connect_failed" });
-    expect(collectPipeline).not.toHaveBeenCalled();
+    expect(row.pipeline).toMatchObject({ displayStatus: "idle", errorCode: null });
+    expect(collectPipeline).toHaveBeenCalledOnce();
     expect(db.getLastRefreshRun()).toMatchObject({ warningCount: 1, failureCount: 0 });
+  });
+
+  it("collects metrics and pipeline status in parallel after the connectivity probe", async () => {
+    let release!: () => void;
+    const blocker = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const collect = vi.fn(async (server: ServerConfig) => {
+      await blocker;
+      return metric(server.id, "online");
+    });
+    const collectPipeline = vi.fn(async (server: ServerConfig) => {
+      await blocker;
+      return buildIdlePipeline(server.id);
+    });
+    const service = new RefreshService({
+      db,
+      servers: [servers[0]!],
+      intervalMs: 3_600_000,
+      probeConnectivity: async () => ({
+        reachable: true,
+        latencyMs: 1,
+        banner: "SSH-2.0-test",
+        errorCode: null,
+        errorMessage: null
+      }),
+      collect,
+      collectPipeline
+    });
+
+    const refresh = service.refreshAll("manual");
+    await vi.waitFor(() => {
+      expect(collect).toHaveBeenCalledOnce();
+      expect(collectPipeline).toHaveBeenCalledOnce();
+    });
+    release();
+    await refresh;
+
+    expect(db.getServerRows()[0]).toMatchObject({
+      latest: { connectionStatus: "online" },
+      pipeline: { displayStatus: "idle" }
+    });
   });
 
   it("marks a failed provider connectivity probe offline and skips authenticated SSH", async () => {
@@ -165,8 +207,8 @@ describe("RefreshService", () => {
     });
   });
 
-  it("limits a full refresh to four servers in flight", async () => {
-    const manyServers = Array.from({ length: 8 }, (_, index): ServerConfig => ({
+  it("limits a full refresh to eight servers in flight", async () => {
+    const manyServers = Array.from({ length: 12 }, (_, index): ServerConfig => ({
       id: `prod-${index + 1}`,
       name: `Production ${index + 1}`,
       host: `10.0.1.${index + 1}`,
@@ -200,8 +242,8 @@ describe("RefreshService", () => {
 
     await service.refreshAll("manual");
 
-    expect(maximumActiveCollectors).toBe(4);
-    expect(db.getServerRows().filter((server) => server.latest?.connectionStatus === "online")).toHaveLength(8);
+    expect(maximumActiveCollectors).toBe(8);
+    expect(db.getServerRows().filter((server) => server.latest?.connectionStatus === "online")).toHaveLength(12);
   });
 
   it("refreshes one recovered server without running a full inventory refresh", async () => {

@@ -56,7 +56,7 @@ import {
   type PreflopRangeRuntimeInput,
   type UploadedPreflopRangeFile
 } from "./preflopRangeStore";
-import { SolverJobService } from "./solverJobService";
+import { SolverJobService, summarizeParallelSolverRun } from "./solverJobService";
 import {
   PARALLEL_SERVER_SELECTION_SCOPES,
   SOLVER_JOB_QUEUE_MODES,
@@ -667,9 +667,11 @@ export function createApp({
 
   // ── Solver job system ─────────────────────────────────────────
 
-  app.get("/api/jobs", (_request, response) => {
+  app.get("/api/jobs", (request, response) => {
     try {
-      response.json(solverJobService.listJobs());
+      response.json(compactResponseRequested(request.query.compact)
+        ? solverJobService.readJobSummaries()
+        : solverJobService.listJobs());
     } catch (error) {
       respondSolverJobError(response, error, "solver_jobs_list_failed");
     }
@@ -804,7 +806,14 @@ export function createApp({
   app.get("/api/parallel-jobs", async (request, response) => {
     try {
       const shouldReconcile = request.query.reconcile === "1" || request.query.reconcile === "true";
-      response.json(shouldReconcile ? solverJobService.refreshParallelJobs() : solverJobService.readParallelJobs());
+      const compact = compactResponseRequested(request.query.compact);
+      response.json(compact
+        ? shouldReconcile
+          ? solverJobService.refreshParallelJobSummaries()
+          : solverJobService.readParallelJobSummaries()
+        : shouldReconcile
+          ? solverJobService.refreshParallelJobs()
+          : solverJobService.readParallelJobs());
     } catch (error) {
       respondSolverJobError(response, error, "parallel_solver_jobs_list_failed");
     }
@@ -831,7 +840,10 @@ export function createApp({
 
     try {
       const run = await solverJobService.createParallel(request.body);
-      response.status(201).json({ run, ...solverJobService.listParallelJobs() });
+      const compact = compactResponseRequested(request.query.compact);
+      response.status(201).json(compact
+        ? { run: summarizeParallelSolverRun(run), ...solverJobService.readParallelJobSummaries() }
+        : { run, ...solverJobService.listParallelJobs() });
     } catch (error) {
       respondSolverJobError(response, error, "parallel_solver_job_create_failed");
     }
@@ -845,16 +857,31 @@ export function createApp({
 
     try {
       const runs = solverJobService.reorderParallelQueue(request.body.runIds);
-      response.json({ runs, failurePool: solverJobService.listParallelJobs().failurePool });
+      response.json(compactResponseRequested(request.query.compact)
+        ? solverJobService.readParallelJobSummaries()
+        : { runs, failurePool: solverJobService.listParallelJobs().failurePool });
     } catch (error) {
       respondSolverJobError(response, error, "parallel_solver_queue_reorder_failed");
+    }
+  });
+
+  app.get("/api/parallel-jobs/reports", (_request, response) => {
+    try {
+      response.json(solverJobService.readParallelReports());
+    } catch (error) {
+      respondSolverJobError(response, error, "parallel_solver_reports_read_failed");
     }
   });
 
   app.delete("/api/parallel-jobs/reports", (_request, response) => {
     try {
       const cleared = solverJobService.clearParallelReports();
-      response.json({ ...cleared, ...solverJobService.listParallelJobs() });
+      response.json({
+        ...cleared,
+        ...(compactResponseRequested(_request.query.compact)
+          ? solverJobService.readParallelJobSummaries()
+          : solverJobService.listParallelJobs())
+      });
     } catch (error) {
       respondSolverJobError(response, error, "parallel_solver_reports_clear_failed");
     }
@@ -872,10 +899,32 @@ export function createApp({
         return;
       }
       const cleared = solverJobService.clearFailurePool(rangePath, datasetName);
-      response.json({ ...cleared, ...solverJobService.listParallelJobs() });
+      response.json({
+        ...cleared,
+        ...(compactResponseRequested(_request.query.compact)
+          ? solverJobService.readParallelJobSummaries()
+          : solverJobService.listParallelJobs())
+      });
     } catch (error) {
       respondSolverJobError(response, error, "parallel_failure_pool_clear_failed");
     }
+  });
+
+  app.get("/api/parallel-jobs/failure-pool", (request, response) => {
+    const rangePath = typeof request.query.rangePath === "string" ? request.query.rangePath.trim() : "";
+    const datasetName = typeof request.query.datasetName === "string" ? request.query.datasetName.trim() : "";
+    if (!rangePath || !datasetName) {
+      response.status(400).json({
+        error: "parallel_failure_pool_scope_required",
+        message: "rangePath and datasetName are required to read a failure pool."
+      });
+      return;
+    }
+    response.json({
+      rangePath,
+      datasetName,
+      entries: solverJobService.readParallelFailurePool(rangePath, datasetName)
+    });
   });
 
   app.get("/api/parallel-jobs/:id", (request, response) => {
@@ -888,7 +937,10 @@ export function createApp({
 
   app.post("/api/parallel-jobs/:id/cancel", async (request, response) => {
     try {
-      response.json({ run: await solverJobService.cancelParallelRun(request.params.id), ...solverJobService.listParallelJobs() });
+      const run = await solverJobService.cancelParallelRun(request.params.id);
+      response.json(compactResponseRequested(request.query.compact)
+        ? { run: summarizeParallelSolverRun(run), ...solverJobService.readParallelJobSummaries() }
+        : { run, ...solverJobService.listParallelJobs() });
     } catch (error) {
       respondSolverJobError(response, error, "parallel_solver_job_cancel_failed");
     }
@@ -896,7 +948,12 @@ export function createApp({
 
   app.delete("/api/parallel-jobs/:id", (request, response) => {
     try {
-      response.json({ ...solverJobService.deleteParallelRun(request.params.id), ...solverJobService.listParallelJobs() });
+      response.json({
+        ...solverJobService.deleteParallelRun(request.params.id),
+        ...(compactResponseRequested(request.query.compact)
+          ? solverJobService.readParallelJobSummaries()
+          : solverJobService.listParallelJobs())
+      });
     } catch (error) {
       respondSolverJobError(response, error, "parallel_solver_job_delete_failed");
     }
@@ -923,7 +980,9 @@ export function createApp({
 
     try {
       const run = await solverJobService.submitFailurePool(request.body);
-      response.status(201).json({ run, ...solverJobService.listParallelJobs() });
+      response.status(201).json(compactResponseRequested(request.query.compact)
+        ? { run: summarizeParallelSolverRun(run), ...solverJobService.readParallelJobSummaries() }
+        : { run, ...solverJobService.listParallelJobs() });
     } catch (error) {
       respondSolverJobError(response, error, "parallel_failure_pool_submit_failed");
     }
@@ -1686,6 +1745,10 @@ function average(values: Array<number | null>): number | null {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+function compactResponseRequested(value: unknown): boolean {
+  return value === "1" || value === "true";
 }
 
 function isAlertSettingsInput(value: unknown): value is AlertSettings {

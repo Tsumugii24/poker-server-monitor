@@ -58,6 +58,15 @@ If the monitor host keeps that file somewhere else, set:
 SERVER_MONITOR_SOLVER_CARDS_PATH=/home/user/solver/cards/cards.txt
 ```
 
+Each remote solver host must provide Bash, tmux, and a Conda environment that is activated by
+its interactive `~/.bashrc`. Before dispatch, the monitor runs a fresh `bash -ic` probe and
+requires `CONDA_PREFIX` plus a working `python`. The actual pipeline is launched through the same
+interactive-Bash path, including when an older tmux pane was created before Conda was available.
+New tmux sessions are never interrupted during shell startup; only a reused idle pane receives
+`Ctrl-C` to clear stale partial input. A failed runtime probe leaves parallel work queued for a
+healthy server and identifies the affected host as `solver_python_unavailable` instead of
+recording its boards as solver failures.
+
 3. Create the local server inventory:
 
 ```bash

@@ -22,6 +22,8 @@ export type SshExecutor = {
   run(server: ServerConfig, credentials: SshCredentials, command: string): Promise<string>;
 };
 
+type SshTimeoutSource = Partial<SshTimeoutOptions> | (() => Partial<SshTimeoutOptions>);
+
 export const COLLECTOR_COMMAND = String.raw`set -e
 read cpu user nice system idle iowait irq softirq steal guest guest_nice < /proc/stat
 total1=$((user + nice + system + idle + iowait + irq + softirq + steal))
@@ -83,26 +85,29 @@ export async function collectServerMetrics(
 }
 
 export class Ssh2Executor implements SshExecutor {
-  constructor(private readonly timeouts: Partial<SshTimeoutOptions> = {}) {}
+  constructor(
+    private readonly timeoutSource: SshTimeoutSource = {},
+    private readonly createClient: () => Client = () => new Client()
+  ) {}
 
   run(server: ServerConfig, credentials: SshCredentials, command: string): Promise<string> {
+    const configuredTimeouts = typeof this.timeoutSource === "function"
+      ? this.timeoutSource()
+      : this.timeoutSource;
     const commandTimeoutMs =
-      this.timeouts.commandTimeoutMs ?? DEFAULT_SSH_COMMAND_TIMEOUT_SECONDS * 1000;
+      configuredTimeouts.commandTimeoutMs ?? DEFAULT_SSH_COMMAND_TIMEOUT_SECONDS * 1000;
     const connectTimeoutMs =
-      this.timeouts.connectTimeoutMs ?? DEFAULT_SSH_CONNECT_TIMEOUT_SECONDS * 1000;
+      configuredTimeouts.connectTimeoutMs ?? DEFAULT_SSH_CONNECT_TIMEOUT_SECONDS * 1000;
 
     return new Promise((resolve, reject) => {
-      const client = new Client();
+      const client = this.createClient();
       let settled = false;
-
-      const timeout = setTimeout(() => {
-        settle(new Error("SSH command timed out"), true);
-      }, commandTimeoutMs);
+      let commandTimeout: ReturnType<typeof setTimeout> | null = null;
 
       const settle = (value: Error | string, failed: boolean) => {
         if (settled) return;
         settled = true;
-        clearTimeout(timeout);
+        if (commandTimeout) clearTimeout(commandTimeout);
         client.end();
         if (failed) reject(value);
         else resolve(String(value));
@@ -110,6 +115,12 @@ export class Ssh2Executor implements SshExecutor {
 
       client
         .on("ready", () => {
+          // readyTimeout belongs exclusively to TCP/SSH negotiation. Start the
+          // command budget only after authentication succeeds so a slow
+          // handshake cannot consume the remote command's execution window.
+          commandTimeout = setTimeout(() => {
+            settle(new Error("SSH command timed out"), true);
+          }, commandTimeoutMs);
           client.exec(command, (execError, stream) => {
             if (execError) {
               settle(execError, true);

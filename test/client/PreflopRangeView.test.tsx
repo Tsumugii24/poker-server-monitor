@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_SOLVER_JOB_SETTINGS,
   type ParallelServerSelectionScope,
@@ -12,16 +12,22 @@ import {
   ParallelHistoryBoard,
   ParallelQueueBoard,
   ParallelRunProgress,
+  PreflopRangeView,
   RangeProgressPill,
   ServerOperationsPanel,
   SettingLibrarySection,
   parallelServersForTier,
   readRangeProgressViewPreference,
+  reorderRangeTreeFolder,
   writeRangeProgressViewPreference
 } from "../../src/client/PreflopRangeView";
 import { DEFAULT_SOLVER_SETTING_LIBRARY } from "../../src/shared/solverSettings";
 import type { ServerRow } from "../../src/shared/types";
-import type { PreflopRangeFileItem } from "../../src/shared/preflopRange";
+import type { PreflopRangeFileItem, PreflopRangeTreeItem } from "../../src/shared/preflopRange";
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 function queuedRun(
   id: string,
@@ -151,6 +157,102 @@ describe("RangeProgressPill", () => {
 
     writeRangeProgressViewPreference("total");
     expect(readRangeProgressViewPreference()).toBe("total");
+  });
+});
+
+describe("reorderRangeTreeFolder", () => {
+  it("updates root and nested folder order without replacing range data", () => {
+    const nestedChildren = [
+      { type: "file", name: "first.json", path: "SOD/first.json" },
+      { type: "file", name: "second.json", path: "SOD/second.json" },
+      { type: "file", name: "third.json", path: "SOD/third.json" }
+    ] as PreflopRangeTreeItem[];
+    const tree = [
+      { type: "folder", name: "SIA", path: "SIA", children: [] },
+      { type: "folder", name: "SOD", path: "SOD", children: nestedChildren }
+    ] as PreflopRangeTreeItem[];
+
+    const nestedResult = reorderRangeTreeFolder(tree, "SOD", ["third.json", "first.json", "second.json"]);
+    const nestedFolder = nestedResult[1];
+    expect(nestedFolder?.type).toBe("folder");
+    expect(nestedFolder?.type === "folder" ? nestedFolder.children.map((item) => item.name) : []).toEqual([
+      "third.json",
+      "first.json",
+      "second.json"
+    ]);
+    expect(nestedFolder?.type === "folder" ? nestedFolder.children[0] : null).toBe(nestedChildren[2]);
+
+    const rootResult = reorderRangeTreeFolder(nestedResult, "", ["SOD", "SIA"]);
+    expect(rootResult.map((item) => item.name)).toEqual(["SOD", "SIA"]);
+  });
+
+  it("persists a drag reorder without loading the range tree again", async () => {
+    const rangeTree = [
+      { type: "folder", name: "SIA", path: "SIA", children: [] },
+      { type: "folder", name: "SOD", path: "SOD", children: [] }
+    ] as PreflopRangeTreeItem[];
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (url === "/api/preflop-ranges" && method === "GET") {
+        return new Response(JSON.stringify({ root: "/ranges", tree: rangeTree }), { status: 200 });
+      }
+      if (url === "/api/preflop-ranges/reorder" && method === "POST") {
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      if (url === "/api/overview") {
+        return new Response(JSON.stringify({
+          generatedAt: "2026-08-08T00:00:00.000Z",
+          refresh: { lastRun: null },
+          servers: []
+        }), { status: 200 });
+      }
+      if (url === "/api/jobs?compact=1") {
+        return new Response(JSON.stringify({ jobs: [], events: [] }), { status: 200 });
+      }
+      if (url === "/api/parallel-jobs?compact=1") {
+        return new Response(JSON.stringify({ runs: [], reconciling: false }), { status: 200 });
+      }
+      if (url === "/api/server-operations") {
+        return new Response(JSON.stringify({ operations: [], capabilities: { networkSyncConfigured: false } }), { status: 200 });
+      }
+      if (url === "/api/solver-settings") {
+        return new Response(JSON.stringify({ settings: DEFAULT_SOLVER_SETTING_LIBRARY, updatedAt: null }), { status: 200 });
+      }
+      return new Response(JSON.stringify({}), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<PreflopRangeView onBack={vi.fn()} />);
+    await waitFor(() => expect(document.querySelectorAll(".preflop-file-row")).toHaveLength(2));
+    const rows = Array.from(document.querySelectorAll<HTMLElement>(".preflop-file-row"));
+    const source = rows.find((row) => row.textContent?.includes("SIA"));
+    const target = rows.find((row) => row.textContent?.includes("SOD"));
+    expect(source).toBeDefined();
+    expect(target).toBeDefined();
+
+    const dataTransfer = { effectAllowed: "none" } as DataTransfer;
+    fireEvent.dragStart(source!, { dataTransfer });
+    fireEvent.dragOver(target!, { dataTransfer });
+    fireEvent.drop(target!, { dataTransfer });
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
+      "/api/preflop-ranges/reorder",
+      expect.objectContaining({ method: "POST" })
+    ));
+    const reorderCall = fetchMock.mock.calls.find(([url]) => String(url) === "/api/preflop-ranges/reorder");
+    expect(JSON.parse(String(reorderCall?.[1]?.body))).toEqual({
+      folder: "",
+      orderedNames: ["SOD", "SIA"]
+    });
+    await waitFor(() => {
+      expect(Array.from(document.querySelectorAll(".preflop-file-row .preflop-row-main > strong"))
+        .map((row) => row.textContent)).toEqual(["SOD", "SIA"]);
+    });
+    expect(fetchMock.mock.calls.filter(([url, options]) => (
+      String(url) === "/api/preflop-ranges" && (options?.method ?? "GET") === "GET"
+    ))).toHaveLength(1);
+    expect(screen.queryByText("Loading ranges...")).not.toBeInTheDocument();
   });
 });
 

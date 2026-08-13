@@ -6835,11 +6835,21 @@ td .port-value {
 
 .parallel-history-lane {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 380px), 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-auto-rows: 76px;
   gap: 10px;
+  max-height: 248px;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+  padding-right: 4px;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
 }
 
 .parallel-history-item {
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
   cursor: pointer;
 }
 
@@ -9363,6 +9373,10 @@ td .port-value {
 }
 
 @media (max-width: 760px) {
+  .parallel-history-lane {
+    grid-template-columns: 1fr;
+  }
+
   .solver-job-refresh-control {
     justify-items: start;
   }

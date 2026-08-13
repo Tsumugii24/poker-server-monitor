@@ -14,6 +14,7 @@ import {
   type ParallelSolverJobPreview,
   type ParallelSolverJobPreviewRequest,
   type ParallelSolverRun,
+  type ParallelSolverRunSummary,
   type ParallelSolverServerAllocation,
   type ParallelSolverRunStatus,
   type ParallelSolverSlice,
@@ -23,10 +24,12 @@ import {
   type SolverDatasetRepoEnsureRequest,
   type SolverDatasetRepoStatus,
   type SolverJobEvent,
+  type SolverJobEventSummary,
   type SolverJobPreview,
   type SolverJobPreviewRequest,
   type SolverJobSettings,
   type SolverJobStatus,
+  type SolverJobSummary,
   type SolverScenario,
   type SolverScenarioLibraryItem,
   type SolverSettingLibraryItem,
@@ -34,6 +37,7 @@ import {
 } from "../shared/solverJobs";
 import type { AlertSettings } from "../shared/types";
 import type { PipelineStatusSnapshot, ServerRow } from "../shared/types";
+import type { SshTimeoutOptions } from "../shared/sshSettings";
 import { linkedSolverSettingsForRangePath } from "../shared/solverSettings";
 import {
   connectionDisplayStatus,
@@ -74,7 +78,7 @@ import type {
   ServerUploadItem,
   ServerUploadRequest
 } from "../shared/serverOperations";
-import type { MonitorDatabase } from "./db";
+import type { MonitorDatabase, ParallelDispatchFailureRecord } from "./db";
 import { collectServerPipelineStatus } from "./pipelineStatusCollector";
 import { readPreflopRangeFile } from "./preflopRangeStore";
 import type { SshCredentials, SshExecutor } from "./sshCollector";
@@ -88,6 +92,8 @@ type SolverJobServiceOptions = {
   preflopRangesPath: string;
   credentials?: SshCredentials;
   executor?: SshExecutor;
+  getSshTimeouts?: () => Partial<SshTimeoutOptions>;
+  serverOperationHandshakeRetryDelayMs?: number;
   defaultPipelineStatusFilePath?: string;
   repoNamespace?: string;
   hfToken?: string | null;
@@ -118,11 +124,33 @@ const TERMINAL_PARALLEL_RUN_STATUSES = new Set<ParallelSolverRunStatus>([
 const DEFAULT_SOLVER_ROOT = "~/solver";
 const DEFAULT_REMOTE_PROXY_URL = "http://127.0.0.1:7890";
 const ACTIVE_SERVER_OPERATION_STATUSES = new Set(["queued", "deploying", "running"]);
+const SERVER_OPERATION_SSH_CONCURRENCY = 2;
+const SERVER_OPERATION_HANDSHAKE_RETRY_DELAY_MS = 2_000;
 const ACTIVE_JOB_RECONCILE_GRACE_MS = 15_000;
-const MAX_PARALLEL_LAUNCH_ATTEMPTS = 3;
+const PARALLEL_DISPATCH_QUARANTINE_DURATIONS_MS = [30 * 60_000, 2 * 60 * 60_000, 24 * 60 * 60_000] as const;
 const HUGGING_FACE_ORIGIN = "https://huggingface.co";
 const HUGGING_FACE_TREE_PAGE_LIMIT = 1000;
 const HUGGING_FACE_TREE_MAX_PAGES = 100;
+const DATASET_REPO_CACHE_TTL_MS = 30_000;
+const REMOTE_BOARD_KEYS_CACHE_TTL_MS = 30_000;
+const SOLVER_CARDS_CACHE_TTL_MS = 5 * 60_000;
+
+type TimedCacheEntry<T> = {
+  value: T;
+  expiresAt: number;
+};
+
+type ParallelDispatchQuarantine = {
+  serverId: string;
+  failureCount: number;
+  blockedUntil: string;
+  latestError: string;
+};
+
+type ParallelDispatchSafetyState = {
+  activeQuarantines: Map<string, ParallelDispatchQuarantine>;
+  failedServerIdsBySlice: Map<string, Set<string>>;
+};
 
 export class SolverJobService {
   private readonly executor: SshExecutor;
@@ -136,12 +164,16 @@ export class SolverJobService {
   private readonly giteeToken: string | null;
   private readonly getHfProxySettings: () => Pick<AlertSettings, "hfProxyEnabled" | "solverHfProxyEnabled">;
   private readonly getSettingLibrary: () => SolverSettingLibraryItem[];
+  private readonly serverOperationHandshakeRetryDelayMs: number;
+  private readonly datasetRepoExistsCache = new Map<string, TimedCacheEntry<boolean>>();
+  private readonly remoteBoardKeysCache = new Map<string, TimedCacheEntry<Set<string>>>();
+  private readonly solverCardsCache = new Map<string, TimedCacheEntry<string[]>>();
   private queueReconciliationTask: Promise<void> | null = null;
   private serverOperationReconciliationTask: Promise<void> | null = null;
   private readonly serverOperationStartTasks = new Map<string, Promise<void>>();
 
   constructor(private readonly options: SolverJobServiceOptions) {
-    this.executor = options.executor ?? new Ssh2Executor();
+    this.executor = options.executor ?? new Ssh2Executor(options.getSshTimeouts);
     this.repoNamespace = (options.repoNamespace ?? "Tsumugii").trim() || "Tsumugii";
     this.defaultPipelineStatusFilePath = options.defaultPipelineStatusFilePath ?? "~/run/solver_running_status.json";
     this.hfToken = options.hfToken?.trim() || null;
@@ -157,6 +189,10 @@ export class SolverJobService {
     this.getSettingLibrary = options.getSettingLibrary
       ?? options.getScenarioLibrary
       ?? (() => DEFAULT_SOLVER_SETTING_LIBRARY);
+    this.serverOperationHandshakeRetryDelayMs = Math.max(
+      0,
+      Math.trunc(options.serverOperationHandshakeRetryDelayMs ?? SERVER_OPERATION_HANDSHAKE_RETRY_DELAY_MS)
+    );
   }
 
   listJobs() {
@@ -164,6 +200,28 @@ export class SolverJobService {
     return {
       jobs: this.options.db.getSolverJobs(),
       events: this.options.db.getSolverJobEvents()
+    };
+  }
+
+  listJobSummaries() {
+    this.reconcileCompletedJobs();
+    return this.readJobSummaries();
+  }
+
+  readJobSummaries() {
+    const recentTerminalByServer = new Map<string, number>();
+    const jobs = this.options.db.getSolverJobSummaries().filter((job) => {
+      if (ACTIVE_JOB_STATUSES.has(job.status) || job.status === "queued") return true;
+      const retained = recentTerminalByServer.get(job.serverId) ?? 0;
+      if (retained >= 5) return false;
+      recentTerminalByServer.set(job.serverId, retained + 1);
+      return true;
+    });
+    const visibleJobIds = new Set(jobs.map((job) => job.id));
+    return {
+      jobs,
+      events: this.options.db.getSolverJobEventSummaries()
+        .filter((event) => visibleJobIds.has(event.jobId))
     };
   }
 
@@ -190,11 +248,44 @@ export class SolverJobService {
     };
   }
 
+  listParallelJobSummaries() {
+    this.reconcileCompletedJobs();
+    this.reconcileParallelRuns();
+    return this.readParallelJobSummaries();
+  }
+
+  readParallelJobSummaries() {
+    return {
+      runs: this.options.db.getParallelSolverRunSummaries()
+        .filter((run) => !run.reportCleared),
+      reconciling: this.queueReconciliationTask !== null
+    };
+  }
+
+  readParallelFailurePool(rangePath: string, datasetName: string): ParallelFailurePoolEntry[] {
+    return this.options.db.getParallelFailurePoolEntries(rangePath.trim(), datasetName.trim());
+  }
+
+  readParallelReports() {
+    return {
+      runs: this.options.db.getParallelSolverReportRuns()
+        .filter((run) => !run.reportCleared),
+      failurePool: this.options.db.getParallelFailurePoolDatasetSummaries()
+    };
+  }
+
   refreshParallelJobs() {
     void this.reconcileAndStartQueuedJobs().catch((error: unknown) => {
       console.error("Solver job queue reconciliation failed", error);
     });
     return this.readParallelJobs();
+  }
+
+  refreshParallelJobSummaries() {
+    void this.reconcileAndStartQueuedJobs().catch((error: unknown) => {
+      console.error("Solver job queue reconciliation failed", error);
+    });
+    return this.readParallelJobSummaries();
   }
 
   getParallelRun(id: string): ParallelSolverRun {
@@ -388,7 +479,7 @@ export class SolverJobService {
 
   async checkDatasetRepo(input: SolverJobPreviewRequest): Promise<SolverDatasetRepoStatus> {
     const preview = this.preview(input);
-    const exists = await huggingFaceDatasetRepoExists(preview.repoId, this.hfToken, this.effectiveHfProxyUrl());
+    const exists = await this.cachedDatasetRepoExists(preview.repoId);
     return {
       preview,
       datasetName: preview.datasetName,
@@ -416,6 +507,7 @@ export class SolverJobService {
       throw new Error("HF_TOKEN is required to create a missing Hugging Face dataset repo.");
     }
     await createHuggingFaceDatasetRepo(status.repoId, this.hfToken, this.effectiveHfProxyUrl());
+    this.setCachedDatasetRepoExists(status.repoId, true);
     return {
       ...status,
       exists: true,
@@ -440,12 +532,14 @@ export class SolverJobService {
     const jobId = randomUUID();
     const solverRoot = effectiveSolverRoot(preview.server);
     const remoteRangePath = jobScopedRemoteRangePath(jobId, preview.datasetName, solverRoot);
+    const remoteSettingPath = jobScopedRemoteSettingPath(jobId, solverRoot);
     const remoteResultPath = jobScopedRemoteResultPath(jobId, preview.datasetName, solverRoot);
     const command = buildRunPipelineCommand({
       solverRoot,
       repoId: preview.repoId,
       scenario: preview.scenario,
       setting: preview.setting,
+      settingPath: remoteSettingPath,
       rangePath: remoteRangePath,
       resultPath: remoteResultPath,
       settings: preview.settings,
@@ -517,7 +611,7 @@ export class SolverJobService {
     const executionCommand = this.buildExecutionCommand(job, server);
 
     this.options.db.updateSolverJob(job.id, { status: "deploying", lastError: null });
-    this.recordEvent(job.id, "deploying", `Submitting selected range to ${job.remoteRangePath}.`, null);
+    this.recordEvent(job.id, "deploying", `Submitting selected range and Setting inputs for ${job.datasetName}.`, null);
     try {
       await this.executor.run(server, this.options.credentials!, buildDeployRangeCommand(job));
       this.recordEvent(job.id, "deployed", "Selected range submitted.", null);
@@ -534,6 +628,12 @@ export class SolverJobService {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (options.deferOnDispatchFailure) {
+        if (job.queueMode === "parallel" && job.parallelSliceId) {
+          return this.failAndRequeueParallelDispatch(
+            job,
+            `Parallel dispatch failed before solver ownership was confirmed on ${server.id}: ${message}`
+          );
+        }
         return this.markJobDispatchPending(job, `Dispatch failed before solver command was confirmed: ${message}`);
       }
       this.recordEvent(job.id, "failed", message, null);
@@ -634,9 +734,8 @@ export class SolverJobService {
     const server = this.requireServer(serverId);
     this.ensureServerOnline(server);
     this.ensureCredentials();
-    const output = await this.executor.run(
+    const output = await this.runServerOperationSsh(
       server,
-      this.options.credentials!,
       buildScanUploadCandidatesCommand(effectiveSolverRoot(server), this.repoNamespace)
     );
     return {
@@ -650,11 +749,10 @@ export class SolverJobService {
     const servers = this.operationTargetServers(serverIds);
     const candidates: ServerUploadCandidate[] = [];
     const failedServers: Array<{ serverId: string; message: string }> = [];
-    await forEachWithConcurrency(servers, 6, async (server) => {
+    await forEachWithConcurrency(servers, SERVER_OPERATION_SSH_CONCURRENCY, async (server) => {
       try {
-        const output = await this.executor.run(
+        const output = await this.runServerOperationSsh(
           server,
-          this.options.credentials!,
           buildScanUploadCandidatesCommand(effectiveSolverRoot(server), this.repoNamespace)
         );
         candidates.push(...parseUploadCandidatesOutput(output, server.id, this.repoNamespace));
@@ -686,9 +784,8 @@ export class SolverJobService {
     if (activeJob && activeJob.id === requestedJobId) {
       throw new Error(`Active solver job ${activeJob.datasetName} must be stopped before deleting its results.`);
     }
-    const output = await this.executor.run(
+    const output = await this.runServerOperationSsh(
       server,
-      this.options.credentials!,
       buildDeleteUploadCandidateCommand(effectiveSolverRoot(server), input.resultsDir)
     );
     return parseDeletedUploadCandidateOutput(output, server.id);
@@ -707,18 +804,22 @@ export class SolverJobService {
       itemsByServer.set(item.serverId, serverItems);
     }
 
-    await forEachWithConcurrency([...itemsByServer.values()], 6, async (serverItems) => {
-      for (const item of serverItems) {
-        try {
-          deleted.push(await this.deleteUploadCandidate(item));
-        } catch (error) {
-          failed.push({
-            ...item,
-            message: error instanceof Error ? error.message : String(error)
-          });
+    await forEachWithConcurrency(
+      [...itemsByServer.values()],
+      SERVER_OPERATION_SSH_CONCURRENCY,
+      async (serverItems) => {
+        for (const item of serverItems) {
+          try {
+            deleted.push(await this.deleteUploadCandidate(item));
+          } catch (error) {
+            failed.push({
+              ...item,
+              message: error instanceof Error ? error.message : String(error)
+            });
+          }
         }
       }
-    });
+    );
 
     return {
       requested: uniqueItems.length,
@@ -733,7 +834,7 @@ export class SolverJobService {
     if (servers.length === 0) {
       throw new Error("No online servers are available for sync.");
     }
-    await forEachWithConcurrency(servers, 6, async (server) => {
+    await forEachWithConcurrency(servers, SERVER_OPERATION_SSH_CONCURRENCY, async (server) => {
       const operation = this.prepareServerOperation(server, "sync", (id) => this.createSyncOperation(server, id));
       if (!operation) return;
       this.options.db.upsertServerOperation(operation);
@@ -752,7 +853,7 @@ export class SolverJobService {
     if (servers.length === 0) {
       throw new Error("No online servers are available for network sync.");
     }
-    await forEachWithConcurrency(servers, 6, async (server) => {
+    await forEachWithConcurrency(servers, SERVER_OPERATION_SSH_CONCURRENCY, async (server) => {
       const operation = this.prepareServerOperation(server, "network_sync", (id) => this.createNetworkSyncOperation(server, id));
       if (!operation) return;
       const executionCommand = buildTrackedServerOperationCommand({
@@ -781,7 +882,7 @@ export class SolverJobService {
     if (servers.length === 0) {
       throw new Error("No online servers are available for network checks.");
     }
-    await forEachWithConcurrency(servers, 6, async (server) => {
+    await forEachWithConcurrency(servers, SERVER_OPERATION_SSH_CONCURRENCY, async (server) => {
       const operation = this.prepareServerOperation(server, "network_check", (id) => this.createNetworkCheckOperation(server, id));
       if (!operation) return;
       this.options.db.upsertServerOperation(operation);
@@ -839,6 +940,7 @@ export class SolverJobService {
     }
 
     const itemsByServer = groupUploadItemsByServer(items, targetServers);
+    const pendingStarts: Array<{ operation: ServerOperation; server: ServerRow }> = [];
     for (const server of targetServers) {
       if (scanFailedServerIds.has(server.id)) continue;
       const operationItems = itemsByServer.get(server.id) ?? [];
@@ -853,8 +955,15 @@ export class SolverJobService {
           : `Created upload operation for ${server.id}; no retained result folders were found.`,
         operation.command
       );
-      void this.launchServerOperation(operation, server);
+      pendingStarts.push({ operation, server });
     }
+    void forEachWithConcurrency(
+      pendingStarts,
+      SERVER_OPERATION_SSH_CONCURRENCY,
+      async ({ operation, server }) => this.launchServerOperation(operation, server)
+    ).catch((error: unknown) => {
+      console.error("Server upload operation startup failed", error);
+    });
     return this.listServerOperations();
   }
 
@@ -863,10 +972,10 @@ export class SolverJobService {
     const server = this.requireServer(operation.serverId);
     this.ensureServerOnline(server);
     this.ensureCredentials();
-    const output = await this.executor.run(
+    const output = await this.runServerOperationSsh(
       server,
-      this.options.credentials!,
-      buildStopServerOperationCommand(operation.tmuxSession)
+      buildStopServerOperationCommand(operation.tmuxSession),
+      operation
     );
     this.options.db.updateServerOperation(operation.id, {
       status: "canceled",
@@ -900,13 +1009,14 @@ export class SolverJobService {
       return this.startUploadOperation({ serverId: server.id });
     }
 
+    const retryId = randomUUID();
     const operation = previous.type === "sync"
-      ? this.createSyncOperation(server, previous.id)
+      ? this.createSyncOperation(server, retryId)
       : previous.type === "network_sync"
-        ? this.createNetworkSyncOperation(server, previous.id)
+        ? this.createNetworkSyncOperation(server, retryId)
         : previous.type === "network_check"
-          ? this.createNetworkCheckOperation(server, previous.id)
-          : this.createUploadOperation(server, uploadItems, null, previous.id);
+          ? this.createNetworkCheckOperation(server, retryId)
+          : this.createUploadOperation(server, uploadItems, null, retryId);
     const executionCommand = previous.type === "network_sync"
       ? buildTrackedServerOperationCommand({
           id: operation.id,
@@ -927,7 +1037,7 @@ export class SolverJobService {
     this.recordOperationEvent(
       operation.id,
       "retried",
-      `Retrying ${previous.type} operation for ${server.id}.`,
+      `Retrying ${previous.type} operation ${previous.id} for ${server.id} as a new attempt.`,
       operation.command
     );
     await this.startServerOperation(operation, server, executionCommand);
@@ -1003,13 +1113,16 @@ export class SolverJobService {
     this.reconcileParallelRuns();
     await this.reconcileServerOperations();
     const servers = sortServersByNaturalId(this.options.db.getServerRows());
+    const dispatchSafety = buildParallelDispatchSafetyState(
+      this.options.db.getUnresolvedParallelDispatchFailures()
+    );
     for (const server of servers) {
       const queued = this.options.db.getQueuedSolverJobForServer(server.id);
       if (queued && queued.queueMode !== "parallel") {
         await this.startQueuedJobIfDispatchReady(queued);
         continue;
       }
-      await this.assignAndStartNextParallelSliceIfReady(server);
+      await this.assignAndStartNextParallelSliceIfReady(server, dispatchSafety);
     }
     this.reconcileCompletedJobs();
     this.reconcileParallelRuns();
@@ -1048,10 +1161,11 @@ export class SolverJobService {
       settingLibrary: this.getSettingLibrary()
     });
 
-    let repoExists = await huggingFaceDatasetRepoExists(basePreview.repoId, this.hfToken, this.effectiveHfProxyUrl());
+    let repoExists = await this.cachedDatasetRepoExists(basePreview.repoId);
     if (!repoExists && options.createRepoIfConfirmed) {
       if (!this.hfToken) throw new Error("HF_TOKEN is required to create a missing Hugging Face dataset repo.");
       await createHuggingFaceDatasetRepo(basePreview.repoId, this.hfToken, this.effectiveHfProxyUrl());
+      this.setCachedDatasetRepoExists(basePreview.repoId, true);
       repoExists = true;
     }
 
@@ -1083,6 +1197,7 @@ export class SolverJobService {
         repoId: basePreview.repoId,
         scenario: basePreview.scenario,
         setting: basePreview.setting,
+        settingPath: jobScopedRemoteSettingPath("<job-id>", solverRoot),
         rangePath: jobScopedRemoteRangePath("<job-id>", basePreview.datasetName, solverRoot),
         resultPath: jobScopedRemoteResultPath("<job-id>", basePreview.datasetName, solverRoot),
         settings,
@@ -1140,7 +1255,7 @@ export class SolverJobService {
     datasetName: string,
     allBoards: string[]
   ): Promise<{ missingIndices: number[]; coverage: ParallelSolverCoverageSummary }> {
-    const remoteBoardKeys = await fetchHuggingFaceDatasetBoardKeys(repoId, this.hfToken, this.effectiveHfProxyUrl());
+    const remoteBoardKeys = await this.cachedRemoteBoardKeys(repoId);
     return computeMissingSolveBoardIndices({
       allBoards,
       remoteBoardKeys,
@@ -1187,10 +1302,11 @@ export class SolverJobService {
       settingLibrary: this.getSettingLibrary()
     });
 
-    let repoExists = await huggingFaceDatasetRepoExists(basePreview.repoId, this.hfToken, this.effectiveHfProxyUrl());
+    let repoExists = await this.cachedDatasetRepoExists(basePreview.repoId);
     if (!repoExists && options.createRepoIfConfirmed) {
       if (!this.hfToken) throw new Error("HF_TOKEN is required to create a missing Hugging Face dataset repo.");
       await createHuggingFaceDatasetRepo(basePreview.repoId, this.hfToken, this.effectiveHfProxyUrl());
+      this.setCachedDatasetRepoExists(basePreview.repoId, true);
       repoExists = true;
     }
 
@@ -1239,6 +1355,7 @@ export class SolverJobService {
         repoId: basePreview.repoId,
         scenario: basePreview.scenario,
         setting: basePreview.setting,
+        settingPath: jobScopedRemoteSettingPath("<job-id>", solverRoot),
         rangePath: jobScopedRemoteRangePath("<job-id>", basePreview.datasetName, solverRoot),
         resultPath: jobScopedRemoteResultPath("<job-id>", basePreview.datasetName, solverRoot),
         settings,
@@ -1337,40 +1454,50 @@ export class SolverJobService {
         durationSeconds: null
       }
     };
-    this.options.db.insertParallelSolverRun(run);
-
-    for (const [allocationIndex, allocation] of preview.allocations.entries()) {
-      if (allocation.indices.length === 0) continue;
-      const allocationCreatedAt = new Date(Date.parse(now) + allocationIndex).toISOString();
-      const sliceId = randomUUID();
-      const slice: ParallelSolverSlice = {
-        id: sliceId,
-        runId,
-        serverId: "",
-        candidateServerIds: allocation.candidateServerIds,
-        jobId: null,
-        rangeExpr: allocation.rangeExpr,
-        assignedIndices: allocation.indices,
-        assignedBoardNames: allocation.boardNames,
-        status: "queued",
-        completedCount: 0,
-        failedCount: 0,
-        startedAt: null,
-        finishedAt: null,
-        createdAt: allocationCreatedAt,
-        updatedAt: allocationCreatedAt,
-        lastError: null,
-        job: null
-      };
-      this.options.db.insertParallelSolverSlice(slice);
-    }
+    // sql.js persists by exporting the complete database. A 20-chunk run used
+    // to export once for the run and once per slice, which made Queue Next grow
+    // dramatically slower with database size. Persist the run and all of its
+    // initial slices as one logical write instead.
+    this.options.db.runInPersistenceBatch(() => {
+      this.options.db.insertParallelSolverRun(run);
+      for (const [allocationIndex, allocation] of preview.allocations.entries()) {
+        if (allocation.indices.length === 0) continue;
+        const allocationCreatedAt = new Date(Date.parse(now) + allocationIndex).toISOString();
+        const sliceId = randomUUID();
+        const slice: ParallelSolverSlice = {
+          id: sliceId,
+          runId,
+          serverId: "",
+          candidateServerIds: allocation.candidateServerIds,
+          jobId: null,
+          rangeExpr: allocation.rangeExpr,
+          assignedIndices: allocation.indices,
+          assignedBoardNames: allocation.boardNames,
+          status: "queued",
+          completedCount: 0,
+          failedCount: 0,
+          startedAt: null,
+          finishedAt: null,
+          createdAt: allocationCreatedAt,
+          updatedAt: allocationCreatedAt,
+          lastError: null,
+          job: null
+        };
+        this.options.db.insertParallelSolverSlice(slice);
+      }
+    });
 
     if (autoStart) {
       await this.reconcileAndStartQueuedJobs();
     }
-    this.reconcileCompletedJobs();
-    this.reconcileParallelRuns();
-    return this.getParallelRun(runId);
+    // The create path already persisted a self-consistent queued run, and the
+    // auto-start path finishes with a full reconciliation. Calling the public
+    // getParallelRun() here used to run both global reconciliation passes two
+    // more times before returning, which made Queue Next increasingly slow as
+    // history grew.
+    const created = this.options.db.getParallelSolverRun(runId);
+    if (!created) throw new Error(`Parallel solver run ${runId} not found after creation.`);
+    return created;
   }
 
   private reconcileParallelRuns(): void {
@@ -1381,6 +1508,19 @@ export class SolverJobService {
     const runs = this.options.db.getParallelSolverRuns();
     for (const run of runs) {
       for (const slice of run.slices) {
+        if (parallelSliceHasInterruptedReassignment(slice)) {
+          this.options.db.updateParallelSolverSlice(slice.id, {
+            serverId: "",
+            jobId: null,
+            status: "queued",
+            completedCount: 0,
+            failedCount: 0,
+            startedAt: null,
+            finishedAt: null,
+            lastError: null
+          });
+          continue;
+        }
         if (slice.status === "completed" || slice.status === "failed" || slice.status === "canceled") continue;
         if (!slice.job) continue;
         const next = sliceStateFromJob(slice, slice.job);
@@ -1491,7 +1631,7 @@ export class SolverJobService {
     allBoards: string[]
   ): Promise<ParallelSolverCoverageSummary> {
     const runs = this.options.db.getParallelSolverRuns();
-    const remoteBoardKeys = await fetchHuggingFaceDatasetBoardKeys(repoId, this.hfToken, this.effectiveHfProxyUrl());
+    const remoteBoardKeys = await this.cachedRemoteBoardKeys(repoId);
     const remoteCovered = new Set(collectRemoteCoveredBoardIndices(allBoards, remoteBoardKeys));
     const historicallyCompleted = new Set(collectHistoricallyCompletedBoardIndices(runs, datasetName, rangePath));
     const queued = new Set<number>();
@@ -1572,6 +1712,9 @@ export class SolverJobService {
         const belongsToJob = pipelineBelongsToJob(job.pipeline, job);
         const nextStatus = belongsToJob ? completedStatusFromPipeline(job.pipeline) : "failed";
         const lastError = nextStatus === "failed" ? pipelineReconciliationError(job.pipeline, job) : null;
+        const clearedDispatchFailures = belongsToJob && job.queueMode === "parallel"
+          ? this.options.db.resolveParallelDispatchFailuresForServer(job.serverId)
+          : 0;
         this.options.db.updateSolverJob(job.id, {
           status: nextStatus,
           finishedAt: belongsToJob
@@ -1581,6 +1724,14 @@ export class SolverJobService {
           pipeline: belongsToJob ? job.pipeline : null
         });
         this.recordEvent(job.id, nextStatus, `Server task reconciled job as ${nextStatus}.`, null);
+        if (clearedDispatchFailures > 0) {
+          this.recordEvent(
+            job.id,
+            "dispatch_quarantine_cleared",
+            `Verified solver ownership on ${job.serverId}; cleared ${clearedDispatchFailures} dispatch quarantine record(s).`,
+            null
+          );
+        }
         if (!belongsToJob && lastError) {
           this.requeueParallelSliceAfterUnownedLaunch(job, lastError);
         }
@@ -1588,23 +1739,31 @@ export class SolverJobService {
     });
   }
 
-  private requeueParallelSliceAfterUnownedLaunch(job: SolverJob, lastError: string): void {
+  private requeueParallelSliceAfterUnownedLaunch(
+    job: SolverJob,
+    lastError: string,
+    failureKind: ParallelDispatchFailureRecord["failureKind"] = "launch_unowned"
+  ): void {
     if (job.queueMode !== "parallel" || !job.parallelSliceId) return;
     const slice = this.options.db.getParallelSolverSlice(job.parallelSliceId);
     if (!slice || slice.status === "completed" || slice.status === "failed" || slice.status === "canceled") return;
-    const attemptCount = this.options.db.getSolverJobs()
-      .filter((candidate) => candidate.parallelSliceId === slice.id)
-      .length;
-    if (attemptCount >= MAX_PARALLEL_LAUNCH_ATTEMPTS) {
-      this.recordEvent(
-        job.id,
-        "launch_retry_exhausted",
-        `Parallel chunk launch failed ${attemptCount} times; leaving the slice failed for manual review.`,
-        null
-      );
-      return;
-    }
-    const nextAttempt = attemptCount + 1;
+    const failedAt = new Date().toISOString();
+    this.options.db.insertParallelDispatchFailure({
+      id: randomUUID(),
+      serverId: job.serverId,
+      runId: slice.runId,
+      sliceId: slice.id,
+      jobId: job.id,
+      failureKind,
+      error: lastError,
+      failedAt,
+      resolvedAt: null
+    });
+    const quarantine = buildParallelDispatchSafetyState(
+      this.options.db.getUnresolvedParallelDispatchFailures(),
+      Date.parse(failedAt)
+    ).activeQuarantines.get(job.serverId);
+    const blockedUntil = quarantine?.blockedUntil ?? failedAt;
     this.options.db.updateParallelSolverSlice(slice.id, {
       serverId: "",
       jobId: null,
@@ -1613,14 +1772,32 @@ export class SolverJobService {
       failedCount: 0,
       startedAt: null,
       finishedAt: null,
-      lastError: `Launch attempt ${attemptCount} did not take ownership; queued retry ${nextAttempt}/${MAX_PARALLEL_LAUNCH_ATTEMPTS}. ${lastError}`
+      lastError: `Launch on ${job.serverId} did not take ownership. Chunk remains queued for another healthy server; ${job.serverId} is quarantined until ${blockedUntil}. ${lastError}`
     });
     this.recordEvent(
       job.id,
-      "launch_retry_queued",
-      `Parallel chunk returned to the queue for launch attempt ${nextAttempt}/${MAX_PARALLEL_LAUNCH_ATTEMPTS}.`,
+      "launch_server_quarantined",
+      `Parallel chunk returned to the queue without being counted as a board failure. Server ${job.serverId} is quarantined until ${blockedUntil}; retry must use another healthy server.`,
       null
     );
+  }
+
+  private failAndRequeueParallelDispatch(
+    job: SolverJob,
+    lastError: string,
+    failureKind: ParallelDispatchFailureRecord["failureKind"] = "dispatch_failed"
+  ): SolverJob {
+    return this.options.db.runInPersistenceBatch(() => {
+      const failed = this.options.db.updateSolverJob(job.id, {
+        status: "failed",
+        finishedAt: new Date().toISOString(),
+        lastError,
+        pipeline: null
+      });
+      this.recordEvent(job.id, "dispatch_failed", lastError, null);
+      this.requeueParallelSliceAfterUnownedLaunch(failed, lastError, failureKind);
+      return this.options.db.getSolverJob(job.id) ?? failed;
+    });
   }
 
   private async refreshUnconfirmedActiveJobPipelines(): Promise<void> {
@@ -1655,6 +1832,9 @@ export class SolverJobService {
       if (job.status !== "queued" && job.status !== "deploying") continue;
       if (!job.pipeline || !pipelineBelongsToJob(job.pipeline, job) || !isPipelineActive(job.pipeline)) continue;
       const startedAt = job.startedAt ?? job.pipeline.startedAt ?? job.pipeline.collectedAt ?? new Date().toISOString();
+      const clearedDispatchFailures = job.queueMode === "parallel"
+        ? this.options.db.resolveParallelDispatchFailuresForServer(job.serverId, startedAt)
+        : 0;
       this.options.db.updateSolverJob(job.id, {
         status: "running",
         startedAt,
@@ -1667,6 +1847,14 @@ export class SolverJobService {
         `Server inventory reports ${job.datasetName} is running on ${job.serverId}.`,
         null
       );
+      if (clearedDispatchFailures > 0) {
+        this.recordEvent(
+          job.id,
+          "dispatch_quarantine_cleared",
+          `Verified solver ownership on ${job.serverId}; cleared ${clearedDispatchFailures} dispatch quarantine record(s).`,
+          null
+        );
+      }
     }
   }
 
@@ -1714,7 +1902,10 @@ export class SolverJobService {
   ): ServerOperation | null {
     const current = this.options.db.getLatestServerOperation(server.id, type);
     if (current && ACTIVE_SERVER_OPERATION_STATUSES.has(current.status)) return null;
-    return create(current?.id ?? randomUUID());
+    // Each execution owns a unique tmux session and status path. Reusing an
+    // earlier operation ID lets its terminal status file masquerade as the
+    // outcome of a new command that has not actually started yet.
+    return create(randomUUID());
   }
 
   private createSyncOperation(server: ServerRow, id: string = randomUUID()): ServerOperation {
@@ -1859,14 +2050,40 @@ export class SolverJobService {
     };
   }
 
+  private async runServerOperationSsh(
+    server: ServerRow,
+    command: string,
+    operation?: ServerOperation,
+    credentials: SshCredentials = this.options.credentials!
+  ): Promise<string> {
+    try {
+      return await this.executor.run(server, credentials, command);
+    } catch (error) {
+      if (!isSshHandshakeTimeout(error)) throw error;
+      const delayMs = this.serverOperationHandshakeRetryDelayMs === 0
+        ? 0
+        : this.serverOperationHandshakeRetryDelayMs + stableServerRetryJitter(server.id);
+      if (operation) {
+        this.recordOperationEvent(
+          operation.id,
+          "handshake_retry",
+          `SSH handshake timed out before the command was sent; retrying once in ${delayMs} ms.`,
+          null
+        );
+      }
+      if (delayMs > 0) await waitFor(delayMs);
+      return this.executor.run(server, credentials, command);
+    }
+  }
+
   private async startServerOperation(operation: ServerOperation, server: ServerRow, executionCommand = operation.command): Promise<void> {
     this.options.db.updateServerOperation(operation.id, { status: "deploying", lastError: null });
     this.recordOperationEvent(operation.id, "deploying", `Starting ${operation.type} tmux session ${operation.tmuxSession}.`, null);
     try {
-      await this.executor.run(
+      await this.runServerOperationSsh(
         server,
-        this.options.credentials!,
-        buildServerOperationTmuxStartCommand(operation, effectiveSolverRoot(server), executionCommand)
+        buildServerOperationTmuxStartCommand(operation, effectiveSolverRoot(server), executionCommand),
+        operation
       );
       const now = new Date().toISOString();
       this.options.db.updateServerOperation(operation.id, {
@@ -1926,7 +2143,7 @@ export class SolverJobService {
     if (activeOperations.length === 0 || !this.options.credentials) return;
     const credentials = this.options.credentials;
     const servers = new Map(this.options.db.getServerRows().map((server) => [server.id, server]));
-    await forEachWithConcurrency(activeOperations, 6, async (operation) => {
+    await forEachWithConcurrency(activeOperations, SERVER_OPERATION_SSH_CONCURRENCY, async (operation) => {
       const server = servers.get(operation.serverId);
       if (!server || server.latest?.connectionStatus !== "online") return;
       if (operation.status === "queued") {
@@ -1947,10 +2164,11 @@ export class SolverJobService {
         return;
       }
       try {
-        const output = await this.executor.run(
+        const output = await this.runServerOperationSsh(
           server,
-          credentials,
-          buildReadServerOperationStatusCommand(operation.statusFilePath, operation.tmuxSession)
+          buildReadServerOperationStatusCommand(operation.statusFilePath, operation.tmuxSession),
+          operation,
+          credentials
         );
         const probe = parseRemoteOperationProbe(output);
         const status = probe.status?.id === operation.id ? probe.status : null;
@@ -1969,6 +2187,21 @@ export class SolverJobService {
             status.status === "completed" ? "Remote operation completed." : "Remote operation failed.",
             output
           );
+          if (status.status === "completed" && operation.type === "sync") {
+            const cleared = this.options.db.resolveParallelDispatchFailuresForServer(
+              operation.serverId,
+              new Date().toISOString(),
+              ["validation_failed"]
+            );
+            if (cleared > 0) {
+              this.recordOperationEvent(
+                operation.id,
+                "dispatch_validation_cleared",
+                `Successful Code Sync cleared ${cleared} incompatible-solver dispatch record(s).`,
+                null
+              );
+            }
+          }
           return;
         }
         if (!probe.tmuxAlive) {
@@ -2063,6 +2296,7 @@ export class SolverJobService {
       repoId: job.repoId,
       scenario: job.scenario,
       setting: job.setting,
+      settingPath: settingFilePathFromCommand(job.command) ?? undefined,
       rangePath: job.remoteRangePath,
       resultPath: job.remoteResultPath,
       settings: job.settings,
@@ -2100,6 +2334,20 @@ export class SolverJobService {
         preflight = await this.runDispatchPreflight(dispatchJob, server);
       }
       if (!preflight.ready) {
+        if (
+          dispatchJob.queueMode === "parallel" &&
+          dispatchJob.parallelSliceId &&
+          (preflight.reasonCode === "setting_file_unsupported" ||
+            preflight.reasonCode === "solver_python_unavailable")
+        ) {
+          const reason = preflight.reason ?? "remote solver runtime validation failed";
+          this.failAndRequeueParallelDispatch(
+            dispatchJob,
+            `Parallel dispatch validation failed on ${server.id}: ${reason}`,
+            "validation_failed"
+          );
+          return false;
+        }
         this.markJobDispatchPending(
           dispatchJob,
           `Dispatch pending: server ${server.id} is not ready${preflight.reason ? ` (${preflight.reason})` : ""}.`
@@ -2127,7 +2375,10 @@ export class SolverJobService {
     const output = await this.executor.run(
       server,
       this.options.credentials!,
-      buildDispatchPreflightCommand(statusFileFromJob(job), proxyUrl)
+      buildDispatchPreflightCommand(statusFileFromJob(job), proxyUrl, {
+        solverRoot: effectiveSolverRoot(server),
+        requireSettingFile: Boolean(settingFilePathFromCommand(job.command))
+      })
     );
     return parseDispatchPreflightOutput(output);
   }
@@ -2157,6 +2408,7 @@ export class SolverJobService {
       repoId: job.repoId,
       scenario: job.scenario,
       setting: job.setting,
+      settingPath: settingFilePathFromCommand(job.command) ?? undefined,
       rangePath: job.remoteRangePath,
       resultPath: job.remoteResultPath,
       settings,
@@ -2189,16 +2441,20 @@ export class SolverJobService {
     });
   }
 
-  private async assignAndStartNextParallelSliceIfReady(server: ServerRow): Promise<boolean> {
+  private async assignAndStartNextParallelSliceIfReady(
+    server: ServerRow,
+    dispatchSafety: ParallelDispatchSafetyState
+  ): Promise<boolean> {
     if (!server.enabled || !serverIsOnline(server)) return false;
+    if (dispatchSafety.activeQuarantines.has(server.id)) return false;
     if (this.options.db.getActiveSolverJobForServer(server.id)) return false;
     if (isPipelineActive(server.pipeline)) return false;
-    let candidate = this.nextQueuedParallelSliceForServer(server.id);
+    let candidate = this.nextQueuedParallelSliceForServer(server.id, dispatchSafety);
     while (candidate && parallelRunCanRefreshCoverageBeforeDispatch(candidate.run)) {
       const runId = candidate.run.id;
       const changed = await this.refreshQueuedParallelRunCoverageBeforeDispatch(candidate.run);
       if (!changed) break;
-      candidate = this.nextQueuedParallelSliceForServer(server.id);
+      candidate = this.nextQueuedParallelSliceForServer(server.id, dispatchSafety);
       if (candidate?.run.id === runId) break;
     }
     if (!candidate) return false;
@@ -2295,7 +2551,10 @@ export class SolverJobService {
     return true;
   }
 
-  private nextQueuedParallelSliceForServer(serverId: string): { run: ParallelSolverRun; slice: ParallelSolverSlice; job: SolverJob | null } | null {
+  private nextQueuedParallelSliceForServer(
+    serverId: string,
+    dispatchSafety: ParallelDispatchSafetyState
+  ): { run: ParallelSolverRun; slice: ParallelSolverSlice; job: SolverJob | null } | null {
     const runs = this.options.db.getParallelSolverRuns()
       .filter((run) => run.status === "queued" || run.status === "running")
       .sort(compareParallelRunQueue);
@@ -2304,6 +2563,7 @@ export class SolverJobService {
       for (const slice of slices) {
         if (slice.status !== "queued") continue;
         if (!slice.candidateServerIds.includes(serverId) && !run.autoIncludeNewServers) continue;
+        if (dispatchSafety.failedServerIdsBySlice.get(slice.id)?.has(serverId)) continue;
         if (!slice.job) return { run, slice, job: null };
         if (parallelSliceJobCanBeReassigned(slice)) return { run, slice, job: slice.job };
       }
@@ -2312,6 +2572,16 @@ export class SolverJobService {
   }
 
   private createJobForParallelSlice(run: ParallelSolverRun, slice: ParallelSolverSlice, server: ServerRow): SolverJob {
+    return this.options.db.runInPersistenceBatch(() =>
+      this.createJobForParallelSliceWithinPersistenceBatch(run, slice, server)
+    );
+  }
+
+  private createJobForParallelSliceWithinPersistenceBatch(
+    run: ParallelSolverRun,
+    slice: ParallelSolverSlice,
+    server: ServerRow
+  ): SolverJob {
     const now = new Date().toISOString();
     if (parallelSliceJobCanBeReassigned(slice) && slice.job) {
       this.options.db.updateSolverJob(slice.job.id, {
@@ -2325,6 +2595,7 @@ export class SolverJobService {
     const settings = { ...run.settings, rangeExpr: slice.rangeExpr };
     const solverRoot = effectiveSolverRoot(server);
     const remoteRangePath = jobScopedRemoteRangePath(jobId, run.datasetName, solverRoot);
+    const remoteSettingPath = jobScopedRemoteSettingPath(jobId, solverRoot);
     const remoteResultPath = jobScopedRemoteResultPath(jobId, run.datasetName, solverRoot);
     const statusFilePath = server.pipelineStatusFilePath?.trim() || this.defaultPipelineStatusFilePath;
     const command = buildRunPipelineCommand({
@@ -2332,6 +2603,7 @@ export class SolverJobService {
       repoId: run.repoId,
       scenario: run.scenario,
       setting: run.setting,
+      settingPath: remoteSettingPath,
       rangePath: remoteRangePath,
       resultPath: remoteResultPath,
       settings,
@@ -2388,6 +2660,40 @@ export class SolverJobService {
     return this.getHfProxySettings().hfProxyEnabled ? this.hfProxyUrl : null;
   }
 
+  private async cachedDatasetRepoExists(repoId: string): Promise<boolean> {
+    const proxyUrl = this.effectiveHfProxyUrl();
+    const key = `${proxyUrl ?? "direct"}:${repoId}`;
+    const cached = this.datasetRepoExistsCache.get(key);
+    if (cached && cached.expiresAt > Date.now()) return cached.value;
+    const exists = await huggingFaceDatasetRepoExists(repoId, this.hfToken, proxyUrl);
+    this.datasetRepoExistsCache.set(key, {
+      value: exists,
+      expiresAt: Date.now() + DATASET_REPO_CACHE_TTL_MS
+    });
+    return exists;
+  }
+
+  private setCachedDatasetRepoExists(repoId: string, exists: boolean): void {
+    const proxyUrl = this.effectiveHfProxyUrl();
+    this.datasetRepoExistsCache.set(`${proxyUrl ?? "direct"}:${repoId}`, {
+      value: exists,
+      expiresAt: Date.now() + DATASET_REPO_CACHE_TTL_MS
+    });
+  }
+
+  private async cachedRemoteBoardKeys(repoId: string): Promise<Set<string>> {
+    const proxyUrl = this.effectiveHfProxyUrl();
+    const key = `${proxyUrl ?? "direct"}:${repoId}`;
+    const cached = this.remoteBoardKeysCache.get(key);
+    if (cached && cached.expiresAt > Date.now()) return new Set(cached.value);
+    const keys = await fetchHuggingFaceDatasetBoardKeys(repoId, this.hfToken, proxyUrl);
+    this.remoteBoardKeysCache.set(key, {
+      value: new Set(keys),
+      expiresAt: Date.now() + REMOTE_BOARD_KEYS_CACHE_TTL_MS
+    });
+    return keys;
+  }
+
   private effectiveSolverHfProxyUrl(): string | null {
     return this.getHfProxySettings().solverHfProxyEnabled ? this.solverHfProxyUrl : null;
   }
@@ -2402,6 +2708,12 @@ export class SolverJobService {
     }
     const onlineServers = servers.filter(serverIsOnline);
     const targets = onlineServers.length > 0 ? onlineServers : servers;
+    const cacheKey = targets
+      .map((server) => [server.id, server.host, server.port, effectiveSolverRoot(server)].join("@"))
+      .sort()
+      .join("|");
+    const cached = this.solverCardsCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) return [...cached.value];
     const reads = await Promise.all(targets.map(async (server) => {
       const solverRoot = effectiveSolverRoot(server);
       try {
@@ -2449,6 +2761,10 @@ export class SolverJobService {
         `${baseline.server.id} contains ${baseline.cards.length}. Synchronize solver data before creating a parallel queue.`
       );
     }
+    this.solverCardsCache.set(cacheKey, {
+      value: [...baseline.cards],
+      expiresAt: Date.now() + SOLVER_CARDS_CACHE_TTL_MS
+    });
     return baseline.cards;
   }
 
@@ -2558,12 +2874,14 @@ export function buildSolverJobPreview({
   const tmuxSession = server.tmuxSession?.trim() || "solver";
   const pipelineStatusFilePath = server.pipelineStatusFilePath?.trim() || defaultPipelineStatusFilePath;
   const remoteRangePath = jobScopedRemoteRangePath("<job-id>", datasetName, solverRoot);
+  const remoteSettingPath = jobScopedRemoteSettingPath("<job-id>", solverRoot);
   const remoteResultPath = jobScopedRemoteResultPath("<job-id>", datasetName, solverRoot);
   const commandPreview = buildRunPipelineCommand({
     solverRoot,
     repoId,
     scenario,
     setting,
+    settingPath: remoteSettingPath,
     rangePath: remoteRangePath,
     resultPath: remoteResultPath,
     settings,
@@ -2774,6 +3092,7 @@ export function buildRunPipelineCommand({
   repoId,
   scenario,
   setting,
+  settingPath,
   rangePath,
   rangeFileName,
   oopRange,
@@ -2789,6 +3108,7 @@ export function buildRunPipelineCommand({
   repoId: string;
   scenario: SolverScenario;
   setting?: SolverSettingLibraryItem;
+  settingPath?: string;
   rangePath?: string;
   rangeFileName?: string;
   oopRange?: string;
@@ -2801,7 +3121,6 @@ export function buildRunPipelineCommand({
   redactSecrets?: boolean;
 }): string {
   const effectiveScenario = setting?.id ?? scenario;
-  const injectedSetting = setting && solverSettingRequiresRuntimeInjection(setting) ? setting : null;
   const args = [
     "python",
     "run_pipeline.py",
@@ -2821,8 +3140,11 @@ export function buildRunPipelineCommand({
     "--scenario",
     effectiveScenario
   ];
-  if (injectedSetting) {
-    args.push("--setting-snapshot", encodeSolverSettingSnapshot(injectedSetting));
+  if (setting && settingPath) {
+    args.push("--setting-file", settingPath);
+  } else if (setting && solverSettingRequiresRuntimeInjection(setting)) {
+    // Backward compatibility for jobs created before job-scoped Setting files.
+    args.push("--setting-snapshot", encodeSolverSettingSnapshot(setting));
   }
   if (resultPath) {
     args.push("--result-path", resultPath);
@@ -2876,6 +3198,15 @@ function encodeSolverSettingSnapshot(setting: SolverSettingLibraryItem): string 
   return Buffer.from(JSON.stringify(setting), "utf8").toString("base64");
 }
 
+function solverSettingRuntimePayload(setting: SolverSettingLibraryItem) {
+  return {
+    id: setting.id,
+    configTemplate: setting.configTemplate,
+    pot: setting.pot,
+    effectiveStack: setting.effectiveStack
+  };
+}
+
 function solverSettingRequiresRuntimeInjection(setting: SolverSettingLibraryItem): boolean {
   const builtIn = DEFAULT_SOLVER_SETTING_LIBRARY.find((candidate) => candidate.id === setting.id);
   return !builtIn ||
@@ -2886,7 +3217,7 @@ function solverSettingRequiresRuntimeInjection(setting: SolverSettingLibraryItem
 
 export function buildDeployRangeCommand(job: SolverJob): string {
   const tmpPath = `${job.remoteRangePath}.tmp`;
-  return [
+  const commands = [
     "set -e",
     `RANGE_PATH=${shellQuoteRemotePath(job.remoteRangePath)}`,
     `TMP_PATH=${shellQuoteRemotePath(tmpPath)}`,
@@ -2895,19 +3226,74 @@ export function buildDeployRangeCommand(job: SolverJob): string {
     job.solverRangeText.trimEnd(),
     "SOLVER_RANGE_EOF",
     `mv "$TMP_PATH" "$RANGE_PATH"`
-  ].join("\n");
+  ];
+  const settingPath = settingFilePathFromCommand(job.command);
+  if (settingPath) {
+    commands.push(
+      `SETTING_PATH=${shellQuoteRemotePath(settingPath)}`,
+      `SETTING_TMP_PATH=${shellQuoteRemotePath(`${settingPath}.tmp`)}`,
+      `mkdir -p ${shellQuoteRemotePath(dirnameRemote(settingPath))}`,
+      `cat > "$SETTING_TMP_PATH" <<'SOLVER_SETTING_EOF'`,
+      JSON.stringify(solverSettingRuntimePayload(job.setting)),
+      "SOLVER_SETTING_EOF",
+      `mv "$SETTING_TMP_PATH" "$SETTING_PATH"`
+    );
+  }
+  return commands.join("\n");
 }
 
 export function buildTmuxStartCommand(job: SolverJob, solverRoot: string, command = job.command): string {
+  const settingFileCheck = settingFilePathFromCommand(command)
+    ? [
+        `RUN_PIPELINE=${shellQuoteRemotePath(joinRemotePath(solverRoot, "run_pipeline.py"))}`,
+        `if [ ! -f "$RUN_PIPELINE" ] || ! grep -q -- '--setting-file' "$RUN_PIPELINE"; then echo "Remote solver does not support --setting-file; run Code Sync first." >&2; exit 1; fi`
+      ]
+    : [];
+  // Always execute the solver through a fresh interactive Bash. Remote hosts
+  // activate Conda from ~/.bashrc, while a long-lived tmux shell may predate
+  // that setup or may have had its first startup interrupted. Keeping this
+  // bootstrap outside the persisted job command also keeps command previews
+  // concise and makes old queued commands use the repaired runtime at launch.
+  const interactiveCommand = `bash -ic ${shellQuote(command)}`;
   return [
     "set -e",
     `STATUS_FILE=${shellQuoteRemotePath(statusFileFromJob(job))}`,
+    `JOB_ID=${shellQuote(job.id)}`,
+    `SESSION=${shellQuote(job.tmuxSession)}`,
+    ...settingFileCheck,
     // Remove the previous task's terminal status immediately before dispatch.
     // If the new command exits before writing its own status, inventory reports
     // IDLE instead of indefinitely presenting an unrelated completed task.
     `rm -f "$STATUS_FILE"`,
-    `tmux has-session -t ${shellQuote(job.tmuxSession)} 2>/dev/null || tmux new-session -d -s ${shellQuote(job.tmuxSession)} -c ${shellQuoteRemotePath(solverRoot)}`,
-    `tmux send-keys -t ${shellQuote(job.tmuxSession)} ${shellQuote(command)} C-m`
+    "SESSION_CREATED=0",
+    "if tmux has-session -t \"$SESSION\" 2>/dev/null; then",
+    "  SESSION_CREATED=0",
+    "else",
+    `  tmux new-session -d -s "$SESSION" -c ${shellQuoteRemotePath(solverRoot)}`,
+    "  SESSION_CREATED=1",
+    "fi",
+    `PANE_COMMAND=$(tmux display-message -p -t "$SESSION" '#{pane_current_command}')`,
+    `case "$PANE_COMMAND" in bash|sh|dash|zsh|fish) ;; *) echo "Solver tmux pane is busy with $PANE_COMMAND; refusing to replace it." >&2; exit 1 ;; esac`,
+    // A reused pane can be sitting at Bash's PS2 (`>`) continuation prompt, so
+    // clear pending input there. Never send Ctrl-C to a newly-created session:
+    // doing so can interrupt ~/.bashrc while it is activating Conda.
+    "if [ \"$SESSION_CREATED\" -eq 0 ]; then",
+    `  tmux send-keys -t "$SESSION" C-c`,
+    "  sleep 0.2",
+    "fi",
+    `tmux send-keys -t "$SESSION" ${shellQuote(interactiveCommand)} C-m`,
+    "LAUNCH_CONFIRMED=0",
+    "LAUNCH_CHECK=0",
+    "while [ \"$LAUNCH_CHECK\" -lt 20 ]; do",
+    "  if [ -s \"$STATUS_FILE\" ] && grep -Fq -- \"$JOB_ID\" \"$STATUS_FILE\"; then LAUNCH_CONFIRMED=1; break; fi",
+    "  LAUNCH_CHECK=$((LAUNCH_CHECK + 1))",
+    "  sleep 0.5",
+    "done",
+    "if [ \"$LAUNCH_CONFIRMED\" -ne 1 ]; then",
+    `  PANE_COMMAND=$(tmux display-message -p -t "$SESSION" '#{pane_current_command}' 2>/dev/null || echo missing)`,
+    "  echo \"Solver launch was not acknowledged for job $JOB_ID within 10 seconds (pane=$PANE_COMMAND).\" >&2",
+    "  exit 42",
+    "fi"
   ].join("\n");
 }
 
@@ -2935,19 +3321,25 @@ STASH_OUTPUT=$(git stash 2>&1)
 STASH_CODE=$?
 PULL_OUTPUT=$(git pull --rebase 2>&1)
 PULL_CODE=$?
+HEAD_COMMIT=$(git rev-parse --short HEAD 2>/dev/null || true)
+if [ -f run_pipeline.py ] && grep -q -- '--setting-file' run_pipeline.py; then
+  SETTING_FILE_SUPPORTED=1
+else
+  SETTING_FILE_SUPPORTED=0
+fi
 SYNC_FINISHED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-if [ "$STASH_CODE" -eq 0 ] && [ "$PULL_CODE" -eq 0 ]; then
+if [ "$STASH_CODE" -eq 0 ] && [ "$PULL_CODE" -eq 0 ] && [ "$SETTING_FILE_SUPPORTED" -eq 1 ]; then
   if printf '%s\n' "$PULL_OUTPUT" | grep -qi "Already up to date"; then SYNC_KIND=latest; else SYNC_KIND=synced; fi
 else
   SYNC_KIND=failed
 fi
 export STASH_OUTPUT PULL_OUTPUT
-python - "$OP_RESULT_FILE" "$SYNC_KIND" "$STASH_CODE" "$PULL_CODE" "$SYNC_STARTED_AT" "$SYNC_FINISHED_AT" <<'PY'
+python - "$OP_RESULT_FILE" "$SYNC_KIND" "$STASH_CODE" "$PULL_CODE" "$SETTING_FILE_SUPPORTED" "$HEAD_COMMIT" "$SYNC_STARTED_AT" "$SYNC_FINISHED_AT" <<'PY'
 import json
 import os
 import sys
 
-path, kind, stash_code, pull_code, started_at, finished_at = sys.argv[1:7]
+path, kind, stash_code, pull_code, setting_file_supported, head_commit, started_at, finished_at = sys.argv[1:9]
 stash_output = os.environ.get("STASH_OUTPUT", "")
 pull_output = os.environ.get("PULL_OUTPUT", "")
 result = {
@@ -2957,9 +3349,12 @@ result = {
         "failed": 1 if kind == "failed" else 0,
         "stash_code": int(stash_code),
         "pull_code": int(pull_code),
+        "setting_file_supported": int(setting_file_supported),
     },
     "details": [{
         "kind": kind,
+        "head_commit": head_commit,
+        "setting_file_supported": int(setting_file_supported),
         "started_at": started_at,
         "finished_at": finished_at,
         "stash_output": stash_output[-800:],
@@ -2971,7 +3366,8 @@ with open(path, "w", encoding="utf-8") as handle:
 PY
 printf '%s\n' "$STASH_OUTPUT"
 printf '%s\n' "$PULL_OUTPUT"
-if [ "$STASH_CODE" -ne 0 ] || [ "$PULL_CODE" -ne 0 ]; then exit 1; fi`;
+if [ "$SETTING_FILE_SUPPORTED" -ne 1 ]; then printf '%s\n' "run_pipeline.py does not support --setting-file"; fi
+if [ "$STASH_CODE" -ne 0 ] || [ "$PULL_CODE" -ne 0 ] || [ "$SETTING_FILE_SUPPORTED" -ne 1 ]; then exit 1; fi`;
 }
 
 export function buildServerNetworkSyncCommand({
@@ -3687,7 +4083,21 @@ export function buildStopServerOperationCommand(tmuxSession: string): string {
   ].join("\n");
 }
 
-export function buildDispatchPreflightCommand(statusFilePath: string, proxyUrl: string | null = null): string {
+export function buildDispatchPreflightCommand(
+  statusFilePath: string,
+  proxyUrl: string | null = null,
+  options: { solverRoot?: string; requireSettingFile?: boolean } = {}
+): string {
+  const settingFileCheck = options.requireSettingFile
+    ? String.raw`RUN_PIPELINE=${shellQuoteRemotePath(joinRemotePath(options.solverRoot ?? DEFAULT_SOLVER_ROOT, "run_pipeline.py"))}
+if [ ! -f "$RUN_PIPELINE" ] || ! grep -q -- '--setting-file' "$RUN_PIPELINE"; then
+  echo "DISPATCH_READY=0"
+  echo "DISPATCH_REASON_CODE=setting_file_unsupported"
+  echo "DISPATCH_REASON=solver does not support --setting-file; run Code Sync first"
+  exit 0
+fi
+`
+    : "";
   const networkCheck = proxyUrl
     ? String.raw`PROXY_URL=${shellQuote(proxyUrl)}
 if ! tmux has-session -t mihomo 2>/dev/null; then
@@ -3710,8 +4120,22 @@ if ! curl --silent --show-error --fail --output /dev/null --max-time 8 --proxy "
 fi
 `
     : "";
+  const solverRoot = options.solverRoot ?? DEFAULT_SOLVER_ROOT;
+  const interactiveRuntimeProbe = [
+    `cd ${shellQuoteRemotePath(solverRoot)}`,
+    "test -n \"${CONDA_PREFIX:-}\"",
+    "command -v python >/dev/null 2>&1",
+    "python --version >/dev/null 2>&1"
+  ].join(" && ");
+  const pythonRuntimeCheck = String.raw`if ! bash -ic ${shellQuote(interactiveRuntimeProbe)} >/dev/null 2>&1; then
+  echo "DISPATCH_READY=0"
+  echo "DISPATCH_REASON_CODE=solver_python_unavailable"
+  echo "DISPATCH_REASON=interactive Conda Python is unavailable; repair Conda initialization on the server"
+  exit 0
+fi
+`;
   return String.raw`set -e
-STATUS_FILE=${shellQuoteRemotePath(statusFilePath)}
+${settingFileCheck}${pythonRuntimeCheck}STATUS_FILE=${shellQuoteRemotePath(statusFilePath)}
 PID=""
 if [ -f "$STATUS_FILE" ]; then
   PID=$(grep -Eo '"pid"[[:space:]]*:[[:space:]]*[0-9]+' "$STATUS_FILE" | tail -1 | grep -Eo '[0-9]+$' || true)
@@ -3790,9 +4214,18 @@ fi`;
 }
 
 function statusFileFromJob(job: SolverJob): string {
-  const match = job.command.match(/--status-file\s+('([^']|'\\'')*'|"[^"]+"|\S+)/);
+  const match = job.command.match(/(?:--status-file|'--status-file'|"--status-file")\s+('([^']|'\\'')*'|"[^"]+"|\S+)/);
   const raw = match?.[1] ?? "~/run/solver_running_status.json";
   return raw.replace(/^'|'$/g, "").replace(/'\\''/g, "'");
+}
+
+function settingFilePathFromCommand(command: string): string | null {
+  const match = command.match(/(?:--setting-file|'--setting-file'|"--setting-file")\s+('([^']|'\\'')*'|"[^"]+"|\S+)/);
+  if (!match?.[1]) return null;
+  return match[1]
+    .replace(/^'|'$/g, "")
+    .replace(/^"|"$/g, "")
+    .replace(/'\\''/g, "'");
 }
 
 function stopCommandReportsRunning(output: string): boolean {
@@ -3972,6 +4405,94 @@ function uniqueServersById(servers: ServerRow[]): ServerRow[] {
     result.push(server);
   }
   return result;
+}
+
+function buildParallelDispatchSafetyState(
+  failures: ParallelDispatchFailureRecord[],
+  now = Date.now()
+): ParallelDispatchSafetyState {
+  const failedServerIdsBySlice = new Map<string, Set<string>>();
+  const failuresByServer = new Map<string, ParallelDispatchFailureRecord[]>();
+  for (const failure of failures) {
+    const failedServerIds = failedServerIdsBySlice.get(failure.sliceId) ?? new Set<string>();
+    failedServerIds.add(failure.serverId);
+    failedServerIdsBySlice.set(failure.sliceId, failedServerIds);
+    const serverFailures = failuresByServer.get(failure.serverId) ?? [];
+    serverFailures.push(failure);
+    failuresByServer.set(failure.serverId, serverFailures);
+  }
+
+  const activeQuarantines = new Map<string, ParallelDispatchQuarantine>();
+  for (const [serverId, serverFailures] of failuresByServer) {
+    const ordered = [...serverFailures].sort((left, right) => Date.parse(left.failedAt) - Date.parse(right.failedAt));
+    const latest = ordered.at(-1)!;
+    const latestAt = Date.parse(latest.failedAt);
+    const durationIndex = Math.min(
+      ordered.length - 1,
+      PARALLEL_DISPATCH_QUARANTINE_DURATIONS_MS.length - 1
+    );
+    const blockedUntilTimestamp = (Number.isFinite(latestAt) ? latestAt : now) +
+      PARALLEL_DISPATCH_QUARANTINE_DURATIONS_MS[durationIndex]!;
+    if (blockedUntilTimestamp <= now) continue;
+    activeQuarantines.set(serverId, {
+      serverId,
+      failureCount: ordered.length,
+      blockedUntil: new Date(blockedUntilTimestamp).toISOString(),
+      latestError: latest.error
+    });
+  }
+  return { activeQuarantines, failedServerIdsBySlice };
+}
+
+export function summarizeParallelSolverRun(run: ParallelSolverRun): ParallelSolverRunSummary {
+  const {
+    setting,
+    solverRangeText: _solverRangeText,
+    totalIndices: _totalIndices,
+    missingIndices: _missingIndices,
+    slices,
+    ...summary
+  } = run;
+  return {
+    ...summary,
+    setting: { id: setting.id, label: setting.label },
+    slices: slices.map((slice) => {
+      return {
+        id: slice.id,
+        serverId: slice.serverId,
+        candidateServerIds: slice.candidateServerIds,
+        status: slice.status,
+        completedCount: slice.completedCount,
+        failedCount: slice.failedCount,
+        lastError: slice.lastError,
+        assignedCount: slice.assignedIndices.length,
+        jobStatus: slice.job?.status ?? null,
+        jobLastError: slice.job?.lastError ?? null
+      };
+    })
+  };
+}
+
+export function summarizeSolverJob(job: SolverJob): SolverJobSummary {
+  const {
+    setting: _setting,
+    settings: _settings,
+    command: _command,
+    solverRangeText: _solverRangeText,
+    confirmUnstudied: _confirmUnstudied,
+    tmuxSession: _tmuxSession,
+    remoteRangePath: _remoteRangePath,
+    remoteResultPath: _remoteResultPath,
+    assignedIndices: _assignedIndices,
+    pipeline: _pipeline,
+    ...summary
+  } = job;
+  return summary;
+}
+
+export function summarizeSolverJobEvent(event: SolverJobEvent): SolverJobEventSummary {
+  const { commandPreview: _commandPreview, ...summary } = event;
+  return summary;
 }
 
 function uniqueStringList(values: string[]): string[] {
@@ -4198,6 +4719,23 @@ function parseRemoteOperationStatus(output: string): RemoteOperationStatus | nul
   } catch {
     return null;
   }
+}
+
+function isSshHandshakeTimeout(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /timed out while waiting for handshake/i.test(message);
+}
+
+function stableServerRetryJitter(serverId: string): number {
+  let hash = 0;
+  for (const character of serverId) {
+    hash = ((hash * 31) + character.charCodeAt(0)) >>> 0;
+  }
+  return hash % 1_000;
+}
+
+function waitFor(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 async function forEachWithConcurrency<T>(
@@ -4612,6 +5150,16 @@ function parallelSliceJobCanBeReassigned(slice: ParallelSolverSlice): boolean {
   );
 }
 
+function parallelSliceHasInterruptedReassignment(slice: ParallelSolverSlice): boolean {
+  return Boolean(
+    slice.status === "canceled" &&
+      slice.job?.status === "canceled" &&
+      !slice.job.startedAt &&
+      !slice.job.pipeline &&
+      slice.job.lastError?.startsWith("Parallel chunk reassigned to ")
+  );
+}
+
 function compareParallelRunQueue(left: ParallelSolverRun, right: ParallelSolverRun): number {
   const orderDelta = left.queueOrder - right.queueOrder;
   if (orderDelta !== 0) return orderDelta;
@@ -4679,6 +5227,10 @@ function effectiveSolverRoot(server?: Pick<ServerRow, "solverRoot"> | null): str
 
 function jobScopedRemoteRangePath(jobId: string, datasetName: string, solverRoot = DEFAULT_SOLVER_ROOT): string {
   return joinRemotePath(solverRoot, "job-ranges", jobId, `${datasetName}.txt`);
+}
+
+function jobScopedRemoteSettingPath(jobId: string, solverRoot = DEFAULT_SOLVER_ROOT): string {
+  return joinRemotePath(solverRoot, "job-settings", `${jobId}.json`);
 }
 
 function jobScopedRemoteResultPath(jobId: string, datasetName: string, solverRoot = DEFAULT_SOLVER_ROOT): string {
