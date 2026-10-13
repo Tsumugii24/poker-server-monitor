@@ -107,6 +107,30 @@ describe("monitor API", () => {
     expect(response.body.description).toContain("2 of 2 servers online");
   });
 
+  it("excludes disabled servers from Overview but retains them in Inventory Management", async () => {
+    const disabledServer: ServerConfig = {
+      id: "prod-02",
+      name: "Production 02",
+      host: "10.0.0.2",
+      port: 22,
+      enabled: false,
+      note: "TBD"
+    };
+    db.syncServers([...servers, disabledServer]);
+    db.insertSnapshot(snapshot({ id: "snap-2", serverId: "prod-02" }));
+    const app = createApp({ db, refreshService: service });
+
+    const overviewResponse = await request(app).get("/api/overview");
+    const inventoryResponse = await request(app).get("/api/servers");
+
+    expect(overviewResponse.body.summary).toMatchObject({ total: 1, online: 1 });
+    expect(overviewResponse.body.servers.map((server: ServerConfig) => server.id)).toEqual(["prod-01"]);
+    expect(inventoryResponse.body.map((server: ServerConfig) => [server.id, server.enabled])).toEqual([
+      ["prod-01", true],
+      ["prod-02", false]
+    ]);
+  });
+
   it("returns server detail and history", async () => {
     const response = await request(createApp({ db, refreshService: service })).get(
       "/api/servers/prod-01/history?hours=24"
@@ -187,7 +211,7 @@ describe("monitor API", () => {
 
     expect(response.status).toBe(201);
     expect(response.body).toMatchObject({
-      id: "10-0-0-2-2222",
+      id: "1",
       name: "10.0.0.2",
       host: "10.0.0.2",
       port: 2222,
@@ -198,13 +222,13 @@ describe("monitor API", () => {
       tmuxSession: "solver-b",
       pipelineStatusFilePath: "~/run/status-b.json"
     });
-    expect(db.getServer("10-0-0-2-2222")).toMatchObject({
+    expect(db.getServer("1")).toMatchObject({
       name: "10.0.0.2",
       host: "10.0.0.2",
       solverRoot: "/srv/solver"
     });
     expect(JSON.parse(fs.readFileSync(inventoryPath, "utf8"))[1]).toMatchObject({
-      id: "10-0-0-2-2222",
+      id: "1",
       name: "10.0.0.2",
       solverRoot: "/srv/solver"
     });
@@ -277,14 +301,23 @@ describe("monitor API", () => {
     expect(JSON.parse(fs.readFileSync(inventoryPath, "utf8"))[0].name).toBe("Production 01");
   });
 
-  it("deletes a server from the inventory file and database", async () => {
+  it("soft-deletes a server by disabling it in the inventory file and database", async () => {
     const response = await request(createApp({ db, refreshService: service, inventoryPath }))
       .delete("/api/servers/prod-01");
 
     expect(response.status).toBe(200);
-    expect(db.getServer("prod-01")).toBeNull();
-    expect(JSON.parse(fs.readFileSync(inventoryPath, "utf8"))).toEqual([]);
-    expect(response.body.servers).toEqual([]);
+    expect(response.body.server).toMatchObject({ id: "prod-01", enabled: false });
+    expect(db.getServer("prod-01")).toMatchObject({ enabled: false });
+    expect(JSON.parse(fs.readFileSync(inventoryPath, "utf8"))).toEqual([
+      expect.objectContaining({ id: "prod-01", enabled: false })
+    ]);
+    expect(response.body.servers).toEqual([
+      expect.objectContaining({ id: "prod-01", enabled: false })
+    ]);
+
+    const overview = await request(createApp({ db, refreshService: service, inventoryPath })).get("/api/overview");
+    expect(overview.body.summary).toMatchObject({ total: 0, online: 0 });
+    expect(overview.body.servers).toEqual([]);
   });
 
   it("rejects empty server note updates", async () => {

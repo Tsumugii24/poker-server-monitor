@@ -7586,7 +7586,13 @@ function summarizeFailurePoolDatasets(entries: ParallelFailurePoolEntry[]): Arra
 }
 
 function summarizeFailurePoolReasons(entries: ParallelFailurePoolEntry[]): Array<{ reason: ParallelFailureReason; count: number }> {
-  const order: ParallelFailureReason[] = ["abnormal_end", "skipped", "best_server_skipped", "unclassified"];
+  const order: ParallelFailureReason[] = [
+    "abnormal_end",
+    "skipped",
+    "best_server_skipped",
+    "server_disabled",
+    "unclassified"
+  ];
   const counts = new Map<ParallelFailureReason, number>();
   for (const entry of entries) {
     counts.set(entry.failureReason, (counts.get(entry.failureReason) ?? 0) + 1);
@@ -7611,6 +7617,8 @@ function failureReasonLabel(reason: ParallelFailureReason): string {
       return "Skipped";
     case "best_server_skipped":
       return "Terminal";
+    case "server_disabled":
+      return "Server disabled";
     default:
       return "Unclassified";
   }

@@ -184,7 +184,7 @@ export function createServerInventoryEntry(
 
   const { fullPath, raw } = readServerInventoryRaw(filename);
   const entry: Record<string, unknown> = {
-    id: generateServerId(raw, host, port),
+    id: generateServerId(raw),
     name: host,
     host,
     port,
@@ -278,16 +278,17 @@ export function updateServerInventoryEntry(
   return updated;
 }
 
-export function deleteServerInventoryEntry(filename: string, serverId: string): ServerConfig[] {
+export function disableServerInventoryEntry(filename: string, serverId: string): ServerConfig {
   const { fullPath, raw } = readServerInventoryRaw(filename);
-  const index = raw.findIndex((item) => isRecord(item) && item.id === serverId);
-  if (index === -1) {
+  const entry = findRawServerEntry(raw, serverId);
+
+  entry.enabled = false;
+  writeServerInventoryRaw(fullPath, raw);
+  const disabled = loadServerInventory(fullPath).find((server) => server.id === serverId);
+  if (!disabled) {
     throw new Error(`Server ${serverId} not found`);
   }
-
-  raw.splice(index, 1);
-  writeServerInventoryRaw(fullPath, raw);
-  return loadServerInventory(fullPath);
+  return disabled;
 }
 
 export function updateServerInventoryTiers(
@@ -372,21 +373,19 @@ function findRawServerEntry(raw: unknown[], serverId: string): Record<string, un
   return entry;
 }
 
-function generateServerId(raw: unknown[], host: string, port: number): string {
+function generateServerId(raw: unknown[]): string {
   const existing = new Set(
     raw.flatMap((item) => isRecord(item) && typeof item.id === "string" ? [item.id] : [])
   );
-  const hostId = host.toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  const base = `${hostId || "server"}${port === 22 ? "" : `-${port}`}`;
-  let id = base;
-  let suffix = 2;
-  while (existing.has(id)) {
-    id = `${base}-${suffix}`;
-    suffix += 1;
+  const numericIds = [...existing]
+    .filter((id) => /^\d+$/.test(id))
+    .map((id) => Number(id))
+    .filter((id) => Number.isSafeInteger(id) && id >= 0);
+  let nextId = numericIds.length > 0 ? Math.max(...numericIds) + 1 : 1;
+  while (existing.has(String(nextId))) {
+    nextId += 1;
   }
-  return id;
+  return String(nextId);
 }
 
 function requiredInventoryNote(value: unknown): string {

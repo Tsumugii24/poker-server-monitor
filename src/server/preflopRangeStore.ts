@@ -17,7 +17,7 @@ import {
   type PreflopRangeTreeItem,
   type PreflopRangeTreeResponse
 } from "../shared/preflopRange";
-import { datasetNameFromRangePath, scenarioFromRangePath } from "../shared/preflopDataset";
+import { datasetNameFromRangePath } from "../shared/preflopDataset";
 import {
   SOLVER_TOTAL_BOARD_COUNT,
   type ParallelSolverRun,
@@ -106,6 +106,17 @@ export function listPreflopRanges(rootPath: string, runtimeInput?: PreflopRangeR
     root,
     tree: buildTree(root, root, runtime)
   };
+}
+
+/** Return all Range files that resolve to one Hugging Face dataset name. */
+export function rangePathsForDatasetName(rootPath: string, datasetName: string): string[] {
+  const root = ensureRoot(rootPath);
+  const expected = datasetName.trim();
+  if (!expected) return [];
+  return walkRangeFiles(root)
+    .map((file) => relativeString(root, file))
+    .filter((rangePath) => canonicalDatasetName(rangePath) === expected)
+    .sort((left, right) => left.localeCompare(right));
 }
 
 export function readPreflopRangeFile(
@@ -668,7 +679,7 @@ function runtimeProgress(
 }
 
 function canonicalDatasetName(rangePath: string): string {
-  return datasetNameFromRangePath(rangePath, scenarioFromRangePath(rangePath));
+  return datasetNameFromRangePath(rangePath);
 }
 
 function ensureRoot(rootPath: string): string {

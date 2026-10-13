@@ -14,6 +14,7 @@ import {
   Moon,
   Pencil,
   Plus,
+  PowerOff,
   RefreshCw,
   Save,
   Server,
@@ -21,7 +22,6 @@ import {
   ShieldCheck,
   Signal,
   Sun,
-  Trash2,
   TriangleAlert,
   Workflow,
   X
@@ -178,6 +178,7 @@ const METRIC_ICONS: Record<string, ReactNode> = {
 export default function App() {
   const [route, setRoute] = useState<Route>(() => routeFromLocation());
   const [overview, setOverview] = useState<OverviewResponse | null>(null);
+  const [inventoryServers, setInventoryServers] = useState<ServerRow[]>([]);
   const [detail, setDetail] = useState<ServerDetailResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -615,6 +616,19 @@ export default function App() {
       setLoading(false);
       return;
     }
+    if (route.name === "inventory") {
+      void Promise.all([
+        fetchJson<OverviewResponse>("/api/overview"),
+        fetchJson<ServerRow[]>("/api/servers")
+      ])
+        .then(([overviewResponse, inventoryResponse]) => {
+          setOverview(overviewResponse);
+          setInventoryServers(inventoryResponse);
+        })
+        .catch((caught: unknown) => setError(caught instanceof Error ? caught.message : String(caught)))
+        .finally(() => setLoading(false));
+      return;
+    }
     const endpoint = route.name === "detail" ? `/api/servers/${route.id}` : "/api/overview";
     void fetchJson<OverviewResponse | ServerDetailResponse>(endpoint)
       .then((data) => {
@@ -669,6 +683,12 @@ export default function App() {
     return data;
   };
 
+  const reloadInventoryServers = async (): Promise<ServerRow[]> => {
+    const data = await fetchJson<ServerRow[]>("/api/servers");
+    setInventoryServers(data);
+    return data;
+  };
+
   const createServer = async (input: ServerInventoryCreateInput) => {
     setError(null);
     try {
@@ -677,7 +697,7 @@ export default function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(input)
       });
-      await reloadOverview();
+      await Promise.all([reloadOverview(), reloadInventoryServers()]);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
       throw caught;
@@ -693,20 +713,11 @@ export default function App() {
         body: JSON.stringify(patch)
       });
 
-      setOverview((current) =>
-        current
-          ? {
-              ...current,
-              servers: current.servers.map((server) =>
-                server.id === serverId ? { ...server, ...updated } : server
-              )
-            }
-          : current
-      );
+      await Promise.all([reloadOverview(), reloadInventoryServers()]);
       setDetail((current) =>
-        current && current.server.id === serverId
+        current && current.server.id === serverId && updated.enabled
           ? { ...current, server: { ...current.server, ...updated } }
-          : current
+          : current?.server.id === serverId ? null : current
       );
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
@@ -718,13 +729,13 @@ export default function App() {
     await updateServerInventory(serverId, { note });
   };
 
-  const removeServer = async (serverId: string) => {
+  const disableServer = async (serverId: string) => {
     setError(null);
     try {
-      await fetchJson<{ servers: ServerConfig[] }>(`/api/servers/${encodeURIComponent(serverId)}`, {
+      await fetchJson<{ server: ServerConfig; servers: ServerRow[] }>(`/api/servers/${encodeURIComponent(serverId)}`, {
         method: "DELETE"
       });
-      await reloadOverview();
+      await Promise.all([reloadOverview(), reloadInventoryServers()]);
       if (route.name === "detail" && route.id === serverId) {
         openOverview();
       }
@@ -813,13 +824,13 @@ export default function App() {
         />
       ) : null}
 
-      {!loading && route.name === "inventory" && overview ? (
+      {!loading && route.name === "inventory" ? (
         <InventoryManageView
-          servers={overview.servers}
+          servers={inventoryServers}
           onBack={openOverview}
           onCreateServer={createServer}
           onUpdateServer={updateServerInventory}
-          onRemoveServer={removeServer}
+          onDisableServer={disableServer}
         />
       ) : null}
 
@@ -1337,13 +1348,13 @@ function InventoryManageView({
   onBack,
   onCreateServer,
   onUpdateServer,
-  onRemoveServer
+  onDisableServer
 }: {
   servers: ServerRow[];
   onBack: () => void;
   onCreateServer: (input: ServerInventoryCreateInput) => Promise<void>;
   onUpdateServer: (serverId: string, patch: ServerInventoryUpdatePatch) => Promise<void>;
-  onRemoveServer: (serverId: string) => Promise<void>;
+  onDisableServer: (serverId: string) => Promise<void>;
 }) {
   const [showAddForm, setShowAddForm] = useState(false);
   const [newDraft, setNewDraft] = useState<ServerInventoryDraft>(emptyServerDraft);
@@ -1410,11 +1421,11 @@ function InventoryManageView({
     }
   };
 
-  const removeInventoryServer = async (server: ServerRow) => {
+  const disableInventoryServer = async (server: ServerRow) => {
     setInventoryError(null);
     setSavingId(server.id);
     try {
-      await onRemoveServer(server.id);
+      await onDisableServer(server.id);
       setConfirmDeleteId(null);
       if (editingServerId === server.id) {
         cancelEditingServer();
@@ -1436,7 +1447,7 @@ function InventoryManageView({
       <section className="section-heading inventory-manage-heading">
         <div>
           <h2>Inventory Management</h2>
-          <p>{servers.length} servers configured · {enabledCount} enabled</p>
+          <p>{servers.length} servers configured · {enabledCount} enabled · {servers.length - enabledCount} disabled</p>
         </div>
         <button
           className="icon-button primary"
@@ -1455,7 +1466,7 @@ function InventoryManageView({
         <div className="inventory-toolbar">
           <div className="inventory-toolbar-meta">
             <strong>Server List</strong>
-            <span className="inventory-generated-pill">ID and name are automatic</span>
+            <span className="inventory-generated-pill">Next numeric ID and name are automatic</span>
           </div>
         </div>
 
@@ -1660,14 +1671,20 @@ function InventoryManageView({
                             >
                               <Pencil size={15} />
                             </button>
-                            <button
-                              className="inventory-action-button danger"
-                              aria-label={`Delete server ${server.id}`}
-                              title={`Delete server ${server.id}`}
-                              onClick={() => setConfirmDeleteId(server.id)}
-                            >
-                              <Trash2 size={15} />
-                            </button>
+                            {server.enabled ? (
+                              <button
+                                className="inventory-action-button danger"
+                                aria-label={`Disable server ${server.id}`}
+                                title={`Disable server ${server.id}`}
+                                onClick={() => setConfirmDeleteId(server.id)}
+                              >
+                                <PowerOff size={15} />
+                              </button>
+                            ) : (
+                              <span className="inventory-enabled-badge disabled" title="Edit this server to re-enable it">
+                                Edit to re-enable
+                              </span>
+                            )}
                           </>
                         )}
                       </div>
@@ -1697,23 +1714,23 @@ function InventoryManageView({
               <TriangleAlert size={20} />
             </div>
             <div className="inventory-delete-copy">
-              <span className="inventory-delete-eyebrow">Safe removal check</span>
-              <h3 id="inventory-delete-title">Delete server {deleteTarget.id}?</h3>
+              <span className="inventory-delete-eyebrow">Safe disable check</span>
+              <h3 id="inventory-delete-title">Disable server {deleteTarget.id}?</h3>
               <p className="inventory-delete-primary-warning">
-                Running, deploying, or stopping chunks are not stopped or moved by deletion. Monitoring and later
-                Stop/Cancel controls for those chunks can become unavailable.
+                This keeps the inventory record and history, but hides the server from operational views and prevents
+                new task assignment. Running, deploying, or stopping chunks are not stopped or moved automatically.
               </p>
 
               {deleteTargetPipelineActive ? (
                 <div className="inventory-delete-active-warning" role="status">
                   Latest inventory status shows an active <strong>{deleteTarget.pipeline?.displayStatus}</strong> pipeline
                   {deleteTarget.pipeline?.datasetName ? <> for <strong>{deleteTarget.pipeline.datasetName}</strong></> : null}.
-                  Stop it or wait for it to finish before deleting this server.
+                  Stop it or wait for it to finish before disabling this server.
                 </div>
               ) : null}
 
               <div className="inventory-delete-section">
-                <strong>Recommended before deletion</strong>
+                <strong>Recommended before disabling</strong>
                 <ol>
                   <li>Stop or finish every Running, Deploying, or Stopping chunk on this server.</li>
                   <li>Run the single-server Scan + Upload action and confirm its local results are uploaded.</li>
@@ -1724,7 +1741,8 @@ function InventoryManageView({
               <div className="inventory-delete-queue-note">
                 <strong>Queued chunks:</strong> All Servers jobs can be claimed by another current eligible server at the
                 next queue reconciliation. Performance/Standard jobs can only use surviving servers from their original
-                candidate pool; with no survivor, the chunk remains queued.
+                candidate pool; with no survivor, the chunk remains queued. You can re-enable this server later from
+                Inventory Management.
               </div>
             </div>
             <div className="inventory-delete-actions">
@@ -1738,10 +1756,10 @@ function InventoryManageView({
               <button
                 className="icon-button danger compact"
                 disabled={savingId === deleteTarget.id}
-                onClick={() => void removeInventoryServer(deleteTarget)}
+                onClick={() => void disableInventoryServer(deleteTarget)}
               >
-                <Trash2 size={15} />
-                {savingId === deleteTarget.id ? "Deleting…" : "Delete server"}
+                <PowerOff size={15} />
+                {savingId === deleteTarget.id ? "Disabling…" : "Disable server"}
               </button>
             </div>
           </section>

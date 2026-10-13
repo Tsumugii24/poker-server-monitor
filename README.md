@@ -40,9 +40,14 @@ repositories. `SOLVER_HF_PROXY_URL` is exported into remote solver tmux commands
 enabled. After setting these values, enable the matching switches in Settings → Connection Check.
 If either the `.env` value is empty or the dashboard switch is off, that path connects directly.
 
-`SUBSCRIPTION_URL` is used only by the manual **Server Operations > Sync Network** action.
-It is sent directly to selected SSH servers; the UI, operation database, and command previews
-retain only the `$SUBSCRIPTION_URL` placeholder.
+`SUBSCRIPTION_URL` is used by **Server Operations > Sync Network** and by the automatic upload
+recovery monitor. After any newly observed upload completion/failure, the backend re-scans that
+server for retained result folders. If the proxy probe to Hugging Face fails, it runs Network
+Sync for that server, waits for completion, checks connectivity again, and then retries the
+upload. Scan/SSH/proxy failures use a bounded exponential retry (30 seconds to 15 minutes).
+The monitor runs inside the backend's 30-second reconciliation loop; no extra worker process is
+needed. The subscription URL is sent directly to selected SSH servers; the UI, operation database,
+and command previews retain only the `$SUBSCRIPTION_URL` placeholder.
 
 `GITEE_USERNAME` must be the Gitee login/personal-space name associated with the token.
 `GITEE_TOKEN` is used as the HTTPS Git password when Sync Network clones or pulls
@@ -74,6 +79,18 @@ cp config/servers.json.example config/servers.json
 ```
 
 Then edit `config/servers.json` with your real servers. Credentials are read only by the backend. Do not put passwords in `config/servers.json`.
+
+GitHub updates contain source, tests, build configuration, general documentation,
+and setup examples. Local `.env` files, actual files under `config/`, all runtime
+state under `data/`, solver exports, logs, and dated dataset audit/recovery reports
+are excluded by `.gitignore`. Keep the `config/*.example` templates versioned so
+a fresh checkout can be configured. Ignore rules do not remove files from earlier
+Git commits.
+
+Servers added through Inventory Management receive the next numeric ID. Disabling or deleting a
+server is a reversible soft delete: its configuration and history remain available in Inventory
+Management for re-enable, while it is excluded from Dashboard totals, operational server lists,
+refreshes, and new solver allocation.
 
 4. Optional: create local alert settings:
 

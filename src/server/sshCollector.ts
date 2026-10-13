@@ -19,7 +19,7 @@ export type SshCredentials = {
 };
 
 export type SshExecutor = {
-  run(server: ServerConfig, credentials: SshCredentials, command: string): Promise<string>;
+  run(server: ServerConfig, credentials: SshCredentials, command: string, stdin?: string): Promise<string>;
 };
 
 type SshTimeoutSource = Partial<SshTimeoutOptions> | (() => Partial<SshTimeoutOptions>);
@@ -90,7 +90,7 @@ export class Ssh2Executor implements SshExecutor {
     private readonly createClient: () => Client = () => new Client()
   ) {}
 
-  run(server: ServerConfig, credentials: SshCredentials, command: string): Promise<string> {
+  run(server: ServerConfig, credentials: SshCredentials, command: string, stdin?: string): Promise<string> {
     const configuredTimeouts = typeof this.timeoutSource === "function"
       ? this.timeoutSource()
       : this.timeoutSource;
@@ -144,6 +144,11 @@ export class Ssh2Executor implements SshExecutor {
             stream.stderr.on("data", (chunk: Buffer) => {
               stderr += chunk.toString("utf8");
             });
+
+            // Keep large operation payloads out of the SSH exec command itself.
+            // Sending them through the channel stdin avoids remote command/
+            // tmux argument limits while preserving the same command timeout.
+            if (stdin !== undefined) stream.end(stdin);
           });
         })
         .on("error", (error) => settle(error, true))

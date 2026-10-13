@@ -17,7 +17,7 @@ import type { PreflopRangeDocument } from "../shared/preflopRange";
 import { PREFLOP_REVIEW_STATUSES } from "../shared/preflopRange";
 import {
   createServerInventoryEntry,
-  deleteServerInventoryEntry,
+  disableServerInventoryEntry,
   loadAlertSettings,
   loadServerInventory,
   saveAlertSettings,
@@ -196,7 +196,7 @@ export function createApp({
   app.use(express.json({ limit: "25mb" }));
 
   app.get("/api/overview", (_request, response) => {
-    const servers = db.getServerRows();
+    const servers = db.getServerRows().filter((server) => server.enabled);
     const summary = buildSummary(servers);
     const body: OverviewResponse = {
       generatedAt: new Date().toISOString(),
@@ -211,7 +211,9 @@ export function createApp({
   });
 
   app.get("/api/servers", (_request, response) => {
-    response.json(db.getServers());
+    // Inventory Management is the only surface that receives disabled rows,
+    // allowing an operator to re-enable a soft-deleted server later.
+    response.json(db.getServerRows());
   });
 
   app.put("/api/servers/tiers", (request, response) => {
@@ -227,7 +229,7 @@ export function createApp({
     try {
       updateServerInventoryTiers(inventoryPath, request.body.performanceServerIds);
       syncServerInventory(db, refreshService, inventoryPath);
-      response.json({ servers: db.getServerRows() });
+      response.json({ servers: db.getServerRows().filter((server) => server.enabled) });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       response.status(400).json({ error: "invalid_server_tiers", message });
@@ -261,7 +263,7 @@ export function createApp({
 
   app.get("/api/servers/:id", (request, response) => {
     const server = db.getServer(request.params.id);
-    if (!server) {
+    if (!server?.enabled) {
       response.status(404).json({ error: "server_not_found" });
       return;
     }
@@ -276,7 +278,7 @@ export function createApp({
     response.json(body);
   });
 
-  app.patch("/api/servers/:id", (request, response) => {
+  app.patch("/api/servers/:id", async (request, response) => {
     if (!isRecord(request.body)) {
       response.status(400).json({ error: "invalid_server_update" });
       return;
@@ -290,6 +292,7 @@ export function createApp({
     }
 
     try {
+      const previous = db.getServer(request.params.id);
       const patch = serverUpdateInputFromBody(request.body);
       if (Object.keys(patch).length === 0) {
         response.status(400).json({ error: "invalid_server_update" });
@@ -297,6 +300,9 @@ export function createApp({
       }
       const updated = updateServerInventoryEntry(inventoryPath, request.params.id, patch);
       syncServerInventory(db, refreshService, inventoryPath);
+      if (previous?.enabled && updated.enabled === false) {
+        await solverJobService.handleServerDisabled(request.params.id);
+      }
       response.json(updated);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -316,18 +322,22 @@ export function createApp({
     }
   });
 
-  app.delete("/api/servers/:id", (request, response) => {
+  app.delete("/api/servers/:id", async (request, response) => {
     try {
-      deleteServerInventoryEntry(inventoryPath, request.params.id);
-      const servers = syncServerInventory(db, refreshService, inventoryPath);
-      response.json({ servers });
+      const previous = db.getServer(request.params.id);
+      const server = disableServerInventoryEntry(inventoryPath, request.params.id);
+      syncServerInventory(db, refreshService, inventoryPath);
+      if (previous?.enabled && server.enabled === false) {
+        await solverJobService.handleServerDisabled(request.params.id);
+      }
+      response.json({ server, servers: db.getServerRows() });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (/not found/i.test(message)) {
         response.status(404).json({ error: "server_not_found" });
         return;
       }
-      response.status(500).json({ error: "inventory_delete_failed", message });
+      response.status(500).json({ error: "inventory_disable_failed", message });
     }
   });
 
@@ -439,10 +449,11 @@ export function createApp({
     try {
       const kind = preflopRangePathKind(preflopRangesPath, request.body.path);
       const path = renamePreflopRangePath(preflopRangesPath, request.body.path, request.body.newName);
+      const relinked = db.relinkPreflopRangePath(request.body.path, path, kind === "folder");
       const settingLibrary = kind === "folder"
         ? renameSolverSettingRangeFolderLinks(effectiveSettingLibraryPath, request.body.path, path)
         : null;
-      response.json({ ok: true, path, settingLibrary });
+      response.json({ ok: true, path, settingLibrary, relinked });
     } catch (error) {
       respondPreflopRangeError(response, error, "preflop_range_rename_failed");
     }
@@ -457,10 +468,11 @@ export function createApp({
     try {
       const kind = preflopRangePathKind(preflopRangesPath, request.body.path);
       const path = movePreflopRangePath(preflopRangesPath, request.body.path, request.body.targetFolder);
+      const relinked = db.relinkPreflopRangePath(request.body.path, path, kind === "folder");
       const settingLibrary = kind === "folder"
         ? renameSolverSettingRangeFolderLinks(effectiveSettingLibraryPath, request.body.path, path)
         : null;
-      response.json({ ok: true, path, settingLibrary });
+      response.json({ ok: true, path, settingLibrary, relinked });
     } catch (error) {
       respondPreflopRangeError(response, error, "preflop_range_move_failed");
     }
@@ -1601,7 +1613,7 @@ export function createApp({
 
   app.get("/api/servers/:id/history", (request, response) => {
     const server = db.getServer(request.params.id);
-    if (!server) {
+    if (!server?.enabled) {
       response.status(404).json({ error: "server_not_found" });
       return;
     }
@@ -2107,7 +2119,7 @@ function respondSolverJobError(
   const message = error instanceof Error ? error.message : String(error);
   const status = /not found|does not exist/i.test(message)
     ? 404
-      : /already has active|active solver task|must be stopped|must be canceled|confirmation is required|must be approved|dataset repo is missing|online server|is offline|is unknown|only queued/i.test(message)
+      : /already has active|active solver task|must be stopped|must be canceled|confirmation is required|must be approved|dataset repo is missing|dataset collision|associated with another Range|online server|is offline|is unknown|only queued/i.test(message)
       ? 409
       : /missing|must have|required|invalid|outside|not marked studied|not linked to a Setting|ambiguous Setting links/i.test(message)
         ? 400

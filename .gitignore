@@ -1,33 +1,54 @@
+# Local credentials; keep the setup template.
 .env
 .env.*
 !.env.example
+
+# Dependencies, build outputs, and tool caches.
 node_modules/
 dist/
 build/
 coverage/
-*.log
+.vite/
+.cache/
+.pytest_cache/
+.venv/
 __pycache__/
-*.pyc
+*.py[cod]
 .superpowers/
 .playwright-mcp/
-data/*.sqlite
-data/*.sqlite-*
-data/*.sqlite.lock
-data/*.db
-data/*.db-*
-data/*.db.lock
-data/backups/
-data/wechat-accounts/
-.vite/
 
-/config/servers.json
-/config/alerts.json
-/config/solver-settings.json
-/config/solver-scenarios.json
-/config/preflop-ranges/
+# All runtime state, solver history, backups, audits, and account sessions.
+/data/
+/results/
+/backups/
+/audits/
+*.sqlite
+*.sqlite3
+*.db
+*.sqlite-*
+*.sqlite3-*
+*.db-*
+*.sqlite.lock
+*.sqlite3.lock
+*.db.lock
+*.parquet
+*.arrow
+*.feather
+*.jsonl
+*.log
+
+# Actual server/range/solver configuration is local. Version examples only.
+/config/*
+!/config/*.example
+.range_order.json
 .range_status.json
 .range_progress.json
-hf_dataset_progress.md
+hf_dataset_progress.*
+
+# Dataset-specific operational reports contain solver records and recovery IDs.
+/docs/*-audit-20*.md
+/docs/*-recovery-20*.md
+/docs/*-dataset-mapping-20*.md
 
 tmp/
 temp/

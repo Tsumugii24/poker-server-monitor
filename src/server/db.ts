@@ -99,6 +99,12 @@ export type ParallelDispatchFailureRecord = {
   resolvedAt: string | null;
 };
 
+export type PreflopRangeRelinkResult = {
+  solverJobs: number;
+  parallelRuns: number;
+  failurePoolEntries: number;
+};
+
 const ownedDatabaseFileLocks = new Map<string, string>();
 
 process.once("exit", () => {
@@ -157,6 +163,157 @@ export class MonitorDatabase {
         this.persist();
       }
     }
+  }
+
+  relinkPreflopRangePath(
+    previousPath: string,
+    nextPath: string,
+    includeDescendants = false
+  ): PreflopRangeRelinkResult {
+    const previous = normalizeStoredRangePath(previousPath);
+    const next = normalizeStoredRangePath(nextPath);
+    if (!previous || !next) throw new Error("Previous and next range paths are required.");
+    if (previous === next) {
+      return { solverJobs: 0, parallelRuns: 0, failurePoolEntries: 0 };
+    }
+
+    const matches = (candidate: string) => candidate === previous || (
+      includeDescendants && candidate.startsWith(`${previous}/`)
+    );
+    const replacement = (candidate: string) => `${next}${candidate.slice(previous.length)}`;
+    const jobRows = this.query<{ id: string; rangePath: string }>(
+      "SELECT id, range_path FROM solver_jobs",
+      [],
+      (row) => ({ id: String(row.id), rangePath: String(row.range_path) })
+    ).filter((row) => matches(row.rangePath));
+    const runRows = this.query<{ id: string; rangePath: string }>(
+      "SELECT id, range_path FROM parallel_solver_runs",
+      [],
+      (row) => ({ id: String(row.id), rangePath: String(row.range_path) })
+    ).filter((row) => matches(row.rangePath));
+    const failureRows = this.query<{ id: string; rangePath: string }>(
+      "SELECT id, range_path FROM parallel_failure_pool_entries",
+      [],
+      (row) => ({ id: String(row.id), rangePath: String(row.range_path) })
+    ).filter((row) => matches(row.rangePath));
+
+    this.database.run("BEGIN");
+    try {
+      for (const row of jobRows) {
+        const rangePath = replacement(row.rangePath);
+        this.database.run(
+          "UPDATE solver_jobs SET range_path = ?, range_name = ? WHERE id = ?",
+          [rangePath, path.posix.basename(rangePath), row.id]
+        );
+      }
+      for (const row of runRows) {
+        const rangePath = replacement(row.rangePath);
+        this.database.run(
+          "UPDATE parallel_solver_runs SET range_path = ?, range_name = ? WHERE id = ?",
+          [rangePath, path.posix.basename(rangePath), row.id]
+        );
+      }
+      for (const row of failureRows) {
+        this.database.run(
+          "UPDATE parallel_failure_pool_entries SET range_path = ? WHERE id = ?",
+          [replacement(row.rangePath), row.id]
+        );
+      }
+      this.database.run("COMMIT");
+    } catch (error) {
+      this.database.run("ROLLBACK");
+      throw error;
+    }
+    this.persist();
+
+    return {
+      solverJobs: jobRows.length,
+      parallelRuns: runRows.length,
+      failurePoolEntries: failureRows.length
+    };
+  }
+
+  /**
+   * Relink one Range's persisted dataset identity after a canonical-name fix.
+   * The Range path is part of the selector so a legacy shared repo cannot
+   * accidentally rename records belonging to another Range.
+   */
+  relinkPreflopRangeDataset(
+    rangePath: string,
+    previousDatasetName: string,
+    nextDatasetName: string,
+    nextRepoId: string
+  ): { solverJobs: number; parallelRuns: number; failurePoolEntries: number; pipelineSnapshots: number } {
+    const pathValue = normalizeStoredRangePath(rangePath);
+    const previous = previousDatasetName.trim();
+    const next = nextDatasetName.trim();
+    const repoId = nextRepoId.trim();
+    if (!pathValue || !previous || !next || !repoId) {
+      throw new Error("Range path, previous dataset, next dataset and repo id are required.");
+    }
+    if (previous === next) {
+      return { solverJobs: 0, parallelRuns: 0, failurePoolEntries: 0, pipelineSnapshots: 0 };
+    }
+
+    const count = (table: string, where: string, params: SqlValue[]): number => this.query<number>(
+      `SELECT COUNT(*) AS count FROM ${table} WHERE ${where}`,
+      params,
+      (row) => Number(row.count ?? 0)
+    )[0] ?? 0;
+    const solverJobs = count("solver_jobs", "range_path = ? AND dataset_name = ?", [pathValue, previous]);
+    const parallelRuns = count("parallel_solver_runs", "range_path = ? AND dataset_name = ?", [pathValue, previous]);
+    const failurePoolEntries = count("parallel_failure_pool_entries", "range_path = ? AND dataset_name = ?", [pathValue, previous]);
+    const pipelineSnapshots = count(
+      "pipeline_status_snapshots",
+      "dataset_name = ? AND repo_id = ?",
+      [previous, `Tsumugii/${previous}`]
+    );
+
+    this.database.run("BEGIN");
+    try {
+      this.database.run(
+        `UPDATE solver_jobs
+         SET dataset_name = ?, repo_id = ?,
+             remote_range_path = REPLACE(remote_range_path, ?, ?),
+             remote_result_path = REPLACE(remote_result_path, ?, ?),
+             command_text = REPLACE(command_text, ?, ?)
+         WHERE range_path = ? AND dataset_name = ?`,
+        [next, repoId, previous, next, previous, next, `Tsumugii/${previous}`, repoId, pathValue, previous]
+      );
+      this.database.run(
+        `UPDATE parallel_solver_runs
+         SET dataset_name = ?, repo_id = ?
+         WHERE range_path = ? AND dataset_name = ?`,
+        [next, repoId, pathValue, previous]
+      );
+      this.database.run(
+        `UPDATE parallel_failure_pool_entries
+         SET dataset_name = ?, repo_id = ?
+         WHERE range_path = ? AND dataset_name = ?`,
+        [next, repoId, pathValue, previous]
+      );
+      this.database.run(
+        `UPDATE pipeline_status_snapshots
+         SET dataset_name = ?, repo_id = ?
+         WHERE dataset_name = ? AND repo_id = ?`,
+        [next, repoId, previous, `Tsumugii/${previous}`]
+      );
+      this.database.run(
+        `UPDATE server_operations
+         SET items_json = REPLACE(REPLACE(items_json, ?, ?), ?, ?),
+             command_text = REPLACE(REPLACE(command_text, ?, ?), ?, ?)
+         WHERE items_json LIKE ? OR command_text LIKE ?`,
+        [previous, next, `Tsumugii/${previous}`, repoId,
+          `Tsumugii/${previous}`, repoId, previous, next,
+          `%${previous}%`, `%${previous}%`]
+      );
+      this.database.run("COMMIT");
+    } catch (error) {
+      this.database.run("ROLLBACK");
+      throw error;
+    }
+    this.persist();
+    return { solverJobs, parallelRuns, failurePoolEntries, pipelineSnapshots };
   }
 
   syncServers(servers: ServerConfig[]): void {
@@ -461,6 +618,8 @@ export class MonitorDatabase {
         AVG(metric_snapshots.memory_used_percent) AS average_memory,
         AVG(metric_snapshots.disk_used_percent) AS average_disk
       FROM metric_snapshots
+      INNER JOIN servers
+        ON servers.id = metric_snapshots.server_id
       LEFT JOIN refresh_runs
         ON metric_snapshots.collected_at >= refresh_runs.started_at
         AND (
@@ -469,6 +628,7 @@ export class MonitorDatabase {
         )
       WHERE metric_snapshots.collected_at >= ?
         AND metric_snapshots.connection_status = 'online'
+        AND servers.enabled = 1
       GROUP BY COALESCE(refresh_runs.started_at, metric_snapshots.collected_at)
       ORDER BY collected_at ASC`,
       [since],
@@ -573,6 +733,20 @@ export class MonitorDatabase {
     return this.query<SolverJob>(
       "SELECT * FROM solver_jobs ORDER BY created_at DESC",
       [],
+      (row) => mapSolverJob(row, this.getPipelineSnapshotForSolverJob(row))
+    );
+  }
+
+  getSolverJobsByStatuses(statuses: SolverJobStatus[], serverId?: string): SolverJob[] {
+    if (statuses.length === 0) return [];
+    const placeholders = statuses.map(() => "?").join(", ");
+    const serverFilter = serverId == null ? "" : " AND server_id = ?";
+    const parameters: SqlValue[] = [...statuses, ...(serverId == null ? [] : [serverId])];
+    return this.query<SolverJob>(
+      `SELECT * FROM solver_jobs
+       WHERE status IN (${placeholders})${serverFilter}
+       ORDER BY created_at DESC`,
+      parameters,
       (row) => mapSolverJob(row, this.getPipelineSnapshotForSolverJob(row))
     );
   }
@@ -798,6 +972,18 @@ export class MonitorDatabase {
     return this.query<ParallelSolverRun>(
       "SELECT * FROM parallel_solver_runs ORDER BY queue_order ASC, created_at DESC",
       [],
+      (row) => mapParallelSolverRun(row, this.getParallelSolverSlices(String(row.id)))
+    );
+  }
+
+  getParallelSolverRunsByStatuses(statuses: ParallelSolverRunStatus[]): ParallelSolverRun[] {
+    if (statuses.length === 0) return [];
+    const placeholders = statuses.map(() => "?").join(", ");
+    return this.query<ParallelSolverRun>(
+      `SELECT * FROM parallel_solver_runs
+       WHERE status IN (${placeholders})
+       ORDER BY queue_order ASC, created_at DESC`,
+      statuses,
       (row) => mapParallelSolverRun(row, this.getParallelSolverSlices(String(row.id)))
     );
   }
@@ -2589,11 +2775,16 @@ function normalizeParallelFailureReason(value: SqlValue): ParallelFailureReason 
     value === "abnormal_end" ||
     value === "skipped" ||
     value === "best_server_skipped" ||
+    value === "server_disabled" ||
     value === "unclassified"
   ) {
     return value;
   }
   return "unclassified";
+}
+
+function normalizeStoredRangePath(value: string): string {
+  return value.trim().replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
 }
 
 function parseParallelServerSelectionScope(value: SqlValue): ParallelServerSelectionScope | null {

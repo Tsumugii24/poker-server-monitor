@@ -60,7 +60,13 @@ export type ParallelSolverSliceStatus = (typeof PARALLEL_SOLVER_SLICE_STATUSES)[
 export const PARALLEL_FAILURE_POOL_STATUSES = ["pending", "queued", "running", "solved", "failed"] as const;
 export type ParallelFailurePoolStatus = (typeof PARALLEL_FAILURE_POOL_STATUSES)[number];
 
-export const PARALLEL_FAILURE_REASONS = ["abnormal_end", "skipped", "best_server_skipped", "unclassified"] as const;
+export const PARALLEL_FAILURE_REASONS = [
+  "abnormal_end",
+  "skipped",
+  "best_server_skipped",
+  "server_disabled",
+  "unclassified"
+] as const;
 export type ParallelFailureReason = (typeof PARALLEL_FAILURE_REASONS)[number];
 
 export const SOLVER_SETTING_IDS = DEFAULT_SOLVER_SETTING_LIBRARY.map((setting) => setting.id);
@@ -147,6 +153,7 @@ export type SolverJobPreview = {
   tmuxSession: string;
   pipelineStatusFilePath: string;
   settings: SolverJobSettings;
+  datasetCollisionPaths?: string[];
   warnings: string[];
   requiresConfirmation: boolean;
 };
@@ -305,6 +312,7 @@ export type ParallelSolverJobPreview = {
   coverage: ParallelSolverCoverageSummary | null;
   repoExists: boolean;
   tokenConfigured: boolean;
+  datasetCollisionPaths?: string[];
   requiresConfirmation: boolean;
   warnings: string[];
 };

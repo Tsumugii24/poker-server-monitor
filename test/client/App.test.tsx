@@ -222,6 +222,7 @@ describe("App", () => {
   beforeEach(() => {
     fakeStorage.clear();
     let currentOverview = structuredClone(overview);
+    let currentInventoryServers = structuredClone(overview.servers);
     vi.stubGlobal("localStorage", storageMock);
     vi.stubGlobal(
       "fetch",
@@ -304,6 +305,9 @@ describe("App", () => {
         if (url === "/api/settings/alerts/test" && init?.method === "POST") {
           return json({ accepted: true });
         }
+        if (url === "/api/servers" && !init?.method) {
+          return json(currentInventoryServers);
+        }
         if (url === "/api/servers" && init?.method === "POST") {
           const body = JSON.parse(String(init.body)) as {
             host: string;
@@ -312,7 +316,10 @@ describe("App", () => {
             enabled: boolean;
             note?: string;
           };
-          const generatedId = `${body.host.replace(/[^a-zA-Z0-9]+/g, "-").replace(/^-+|-+$/g, "")}-${body.port}`.toLowerCase();
+          const numericIds = currentInventoryServers
+            .map((server) => /^\d+$/.test(server.id) ? Number(server.id) : null)
+            .filter((id): id is number => id != null);
+          const generatedId = String(numericIds.length > 0 ? Math.max(...numericIds) + 1 : 1);
           const created = {
             id: generatedId,
             name: body.host,
@@ -325,11 +332,14 @@ describe("App", () => {
             pipeline: null,
             lastDatasetName: null
           } as typeof currentOverview.servers[number];
-          currentOverview = {
-            ...currentOverview,
-            servers: [...currentOverview.servers, created],
-            summary: { ...currentOverview.summary, total: currentOverview.summary.total + 1 }
-          };
+          currentInventoryServers = [...currentInventoryServers, created];
+          if (created.enabled) {
+            currentOverview = {
+              ...currentOverview,
+              servers: [...currentOverview.servers, created],
+              summary: { ...currentOverview.summary, total: currentOverview.summary.total + 1 }
+            };
+          }
           return json({
             id: created.id,
             name: created.name,
@@ -342,13 +352,25 @@ describe("App", () => {
         }
         if (url === "/api/servers/prod-02" && init?.method === "PATCH") {
           const body = JSON.parse(String(init.body)) as Partial<typeof overview.servers[number]>;
+          currentInventoryServers = currentInventoryServers.map((server) =>
+            server.id === "prod-02" ? { ...server, ...body } : server
+          );
+          const updated = currentInventoryServers.find((server) => server.id === "prod-02")!;
+          const wasVisible = currentOverview.servers.some((server) => server.id === "prod-02");
+          const nextOverviewServers = updated.enabled
+            ? [
+                ...currentOverview.servers.filter((server) => server.id !== "prod-02"),
+                updated
+              ]
+            : currentOverview.servers.filter((server) => server.id !== "prod-02");
           currentOverview = {
             ...currentOverview,
-            servers: currentOverview.servers.map((server) =>
-              server.id === "prod-02" ? { ...server, ...body } : server
-            )
+            servers: nextOverviewServers,
+            summary: {
+              ...currentOverview.summary,
+              total: currentOverview.summary.total + (updated.enabled && !wasVisible ? 1 : !updated.enabled && wasVisible ? -1 : 0)
+            }
           };
-          const updated = currentOverview.servers.find((server) => server.id === "prod-02")!;
           return json({
             id: updated.id,
             name: updated.name,
@@ -360,12 +382,17 @@ describe("App", () => {
           });
         }
         if (url === "/api/servers/prod-02" && init?.method === "DELETE") {
+          currentInventoryServers = currentInventoryServers.map((server) =>
+            server.id === "prod-02" ? { ...server, enabled: false } : server
+          );
+          const disabled = currentInventoryServers.find((server) => server.id === "prod-02")!;
+          const wasVisible = currentOverview.servers.some((server) => server.id === "prod-02");
           currentOverview = {
             ...currentOverview,
             servers: currentOverview.servers.filter((server) => server.id !== "prod-02"),
-            summary: { ...currentOverview.summary, total: currentOverview.summary.total - 1 }
+            summary: { ...currentOverview.summary, total: currentOverview.summary.total - (wasVisible ? 1 : 0) }
           };
-          return json({ servers: currentOverview.servers });
+          return json({ server: disabled, servers: currentInventoryServers });
         }
         if (url === "/api/servers/prod-02") return json(detail);
         if (url === "/api/refresh" && init?.method === "POST") {
@@ -603,7 +630,7 @@ describe("App", () => {
         body: expect.stringContaining('"name"')
       })
     );
-    expect(await screen.findByText("10-0-0-8-2222")).toBeInTheDocument();
+    await waitFor(() => expect(inventoryIds()).toContain("1"));
   });
 
   it("updates editable server inventory fields without sending id or name", async () => {
@@ -653,16 +680,16 @@ describe("App", () => {
     expect(await screen.findByText("10.0.0.9")).toBeInTheDocument();
   });
 
-  it("deletes a server from the inventory table", async () => {
+  it("soft-deletes a server and keeps it available for re-enable in Inventory Management", async () => {
     render(<App />);
 
     await userEvent.click(await screen.findByRole("button", { name: "Manage Inventory" }));
     expect(await screen.findByText("Inventory Management")).toBeInTheDocument();
-    await userEvent.click(await screen.findByRole("button", { name: "Delete server prod-02" }));
-    expect(screen.getByRole("dialog", { name: "Delete server prod-02?" })).toBeInTheDocument();
-    expect(screen.getByText(/Running, deploying, or stopping chunks are not stopped or moved/)).toBeInTheDocument();
+    await userEvent.click(await screen.findByRole("button", { name: "Disable server prod-02" }));
+    expect(screen.getByRole("dialog", { name: "Disable server prod-02?" })).toBeInTheDocument();
+    expect(screen.getByText(/Running, deploying, or stopping chunks are not stopped or moved automatically/)).toBeInTheDocument();
     expect(screen.getByText(/Performance\/Standard jobs can only use surviving servers/)).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "Delete server" }));
+    await userEvent.click(screen.getByRole("button", { name: "Disable server" }));
 
     await waitFor(() => {
       expect(fetch).toHaveBeenCalledWith(
@@ -670,22 +697,34 @@ describe("App", () => {
         expect.objectContaining({ method: "DELETE" })
       );
     });
-    await waitFor(() => expect(inventoryIds()).toEqual(["prod-01"]));
+    await waitFor(() => expect(inventoryIds()).toEqual(["prod-01", "prod-02"]));
+    expect(screen.getByText("Edit to re-enable")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Disable server prod-02" })).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Edit server prod-02" }));
+    await userEvent.click(screen.getByLabelText("Enabled for prod-02"));
+    await userEvent.click(screen.getByRole("button", { name: "Save server prod-02" }));
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Disable server prod-02" })).toBeInTheDocument());
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/servers/prod-02",
+      expect.objectContaining({ method: "PATCH", body: expect.stringContaining('"enabled":true') })
+    );
   });
 
   it("warns when the latest inventory snapshot shows an active solver pipeline", async () => {
     render(<App />);
 
     await userEvent.click(await screen.findByRole("button", { name: "Manage Inventory" }));
-    await userEvent.click(await screen.findByRole("button", { name: "Delete server prod-01" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Disable server prod-01" }));
 
-    expect(screen.getByRole("dialog", { name: "Delete server prod-01?" })).toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "Disable server prod-01?" })).toBeInTheDocument();
     expect(screen.getByText(/Latest inventory status shows an active/)).toHaveTextContent(
       "Latest inventory status shows an active solving pipeline for sia-45-sod-40."
     );
 
     await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
-    expect(screen.queryByRole("dialog", { name: "Delete server prod-01?" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "Disable server prod-01?" })).not.toBeInTheDocument();
     expect(vi.mocked(fetch).mock.calls.some(([url, init]) =>
       url === "/api/servers/prod-01" && init?.method === "DELETE"
     )).toBe(false);

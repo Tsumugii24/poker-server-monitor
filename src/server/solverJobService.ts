@@ -80,7 +80,7 @@ import type {
 } from "../shared/serverOperations";
 import type { MonitorDatabase, ParallelDispatchFailureRecord } from "./db";
 import { collectServerPipelineStatus } from "./pipelineStatusCollector";
-import { readPreflopRangeFile } from "./preflopRangeStore";
+import { rangePathsForDatasetName, readPreflopRangeFile } from "./preflopRangeStore";
 import type { SshCredentials, SshExecutor } from "./sshCollector";
 import { Ssh2Executor } from "./sshCollector";
 import { huggingFaceFetch } from "./huggingFaceHttp";
@@ -126,6 +126,8 @@ const DEFAULT_REMOTE_PROXY_URL = "http://127.0.0.1:7890";
 const ACTIVE_SERVER_OPERATION_STATUSES = new Set(["queued", "deploying", "running"]);
 const SERVER_OPERATION_SSH_CONCURRENCY = 2;
 const SERVER_OPERATION_HANDSHAKE_RETRY_DELAY_MS = 2_000;
+const AUTOMATIC_UPLOAD_RETRY_BASE_MS = 30_000;
+const AUTOMATIC_UPLOAD_RETRY_MAX_MS = 15 * 60_000;
 const ACTIVE_JOB_RECONCILE_GRACE_MS = 15_000;
 const PARALLEL_DISPATCH_QUARANTINE_DURATIONS_MS = [30 * 60_000, 2 * 60 * 60_000, 24 * 60 * 60_000] as const;
 const HUGGING_FACE_ORIGIN = "https://huggingface.co";
@@ -152,6 +154,23 @@ type ParallelDispatchSafetyState = {
   failedServerIdsBySlice: Map<string, Set<string>>;
 };
 
+type AutomaticUploadFollowup = {
+  serverId: string;
+  sourceOperationId: string;
+  phase: "scan" | "network_sync" | "upload";
+  operationId: string | null;
+  retryCount: number;
+  retryAtMs: number;
+  networkRecoveryAttempted: boolean;
+};
+
+type DisabledServerRecoverySummary = {
+  serverId: string;
+  failedJobCount: number;
+  requeuedSliceCount: number;
+  requeuedBoardCount: number;
+};
+
 export class SolverJobService {
   private readonly executor: SshExecutor;
   private readonly repoNamespace: string;
@@ -171,6 +190,9 @@ export class SolverJobService {
   private queueReconciliationTask: Promise<void> | null = null;
   private serverOperationReconciliationTask: Promise<void> | null = null;
   private readonly serverOperationStartTasks = new Map<string, Promise<void>>();
+  private automaticUploadMonitorInitialized = false;
+  private readonly automaticUploadHandledOperationIds = new Set<string>();
+  private readonly automaticUploadFollowups = new Map<string, AutomaticUploadFollowup>();
 
   constructor(private readonly options: SolverJobServiceOptions) {
     this.executor = options.executor ?? new Ssh2Executor(options.getSshTimeouts);
@@ -302,6 +324,7 @@ export class SolverJobService {
 
   async createParallel(input: ParallelSolverJobCreateRequest): Promise<ParallelSolverRun> {
     const preview = await this.buildParallelPreview(input, { createRepoIfConfirmed: Boolean(input.confirmDatasetName) });
+    this.ensureDatasetNameAvailable(preview);
     if (!preview.learned) {
       throw new Error("Range must be approved before submitting parallel solver jobs.");
     }
@@ -451,6 +474,7 @@ export class SolverJobService {
     const preview = await this.buildFailurePoolPreview(input, {
       createRepoIfConfirmed: Boolean(input.confirmDatasetName)
     });
+    this.ensureDatasetNameAvailable(preview);
     if (preview.missingIndices.length === 0) {
       throw new Error("Failure pool has no pending boards for this range after coverage reconciliation.");
     }
@@ -465,7 +489,7 @@ export class SolverJobService {
   }
 
   preview(input: SolverJobPreviewRequest): SolverJobPreview {
-    return buildSolverJobPreview({
+    const preview = buildSolverJobPreview({
       input,
       server: this.requireServer(input.serverId),
       preflopRangesPath: this.options.preflopRangesPath,
@@ -475,6 +499,7 @@ export class SolverJobService {
       solverHfProxyUrl: this.effectiveSolverHfProxyUrl(),
       settingLibrary: this.getSettingLibrary()
     });
+    return this.addHistoricalDatasetCollisions(preview);
   }
 
   async checkDatasetRepo(input: SolverJobPreviewRequest): Promise<SolverDatasetRepoStatus> {
@@ -495,6 +520,10 @@ export class SolverJobService {
 
   async ensureDatasetRepo(input: SolverDatasetRepoEnsureRequest): Promise<SolverDatasetRepoStatus> {
     const status = await this.checkDatasetRepo(input);
+    // Repo creation/use is a write boundary too.  Do the ownership check
+    // immediately before a caller can bind this Range to the repo, rather than
+    // relying only on the later solver-job submission check.
+    this.ensureDatasetNameAvailable(status.preview);
     if (status.exists) return status;
     if (!input.confirmDatasetName) {
       return {
@@ -520,6 +549,7 @@ export class SolverJobService {
   async create(input: SolverJobCreateRequest): Promise<SolverJob> {
     const preview = this.preview(input);
     this.ensureServerOnline(preview.server);
+    this.ensureDatasetNameAvailable(preview);
     if (!preview.learned) {
       throw new Error("Range must be approved before submitting to solver jobs.");
     }
@@ -594,6 +624,10 @@ export class SolverJobService {
     options: { deferOnDispatchFailure?: boolean; preflightChecked?: boolean } = {}
   ): Promise<SolverJob> {
     const job = this.requireJob(id);
+    // A queued/paused job may have been created before collision checks were
+    // introduced. Revalidate immediately before any remote deploy on resume or
+    // normal queue dispatch.
+    this.ensureDatasetNameAvailable(job);
     const server = this.requireServer(job.serverId);
     this.ensureServerOnline(server);
     this.ensureNoActiveJob(server.id, job.id);
@@ -939,6 +973,8 @@ export class SolverJobService {
       }
     }
 
+    this.ensureRetainedUploadItemsSafe(items);
+
     const itemsByServer = groupUploadItemsByServer(items, targetServers);
     const pendingStarts: Array<{ operation: ServerOperation; server: ServerRow }> = [];
     for (const server of targetServers) {
@@ -1007,6 +1043,9 @@ export class SolverJobService {
       : [];
     if (previous.type === "upload" && uploadItems.length === 0) {
       return this.startUploadOperation({ serverId: server.id });
+    }
+    if (previous.type === "upload") {
+      this.ensureRetainedUploadItemsSafe(uploadItems);
     }
 
     const retryId = randomUUID();
@@ -1107,7 +1146,23 @@ export class SolverJobService {
     }
   }
 
+  async handleServerDisabled(serverId: string): Promise<DisabledServerRecoverySummary> {
+    const server = this.options.db.getServerRows().find((candidate) => candidate.id === serverId);
+    if (!server) throw new Error(`Server ${serverId} not found`);
+    if (server.enabled) {
+      return { serverId, failedJobCount: 0, requeuedSliceCount: 0, requeuedBoardCount: 0 };
+    }
+    const summary = this.requeueJobsForDisabledServer(server);
+    if (summary.failedJobCount > 0 || summary.requeuedSliceCount > 0) {
+      await this.reconcileAndStartQueuedJobs();
+    }
+    return summary;
+  }
+
   private async runQueueReconciliation(): Promise<void> {
+    for (const server of this.options.db.getServerRows().filter((candidate) => !candidate.enabled)) {
+      this.requeueJobsForDisabledServer(server);
+    }
     await this.refreshUnconfirmedActiveJobPipelines();
     this.reconcileCompletedJobs();
     this.reconcileParallelRuns();
@@ -1126,6 +1181,127 @@ export class SolverJobService {
     }
     this.reconcileCompletedJobs();
     this.reconcileParallelRuns();
+  }
+
+  private requeueJobsForDisabledServer(server: ServerRow): DisabledServerRecoverySummary {
+    const summary: DisabledServerRecoverySummary = {
+      serverId: server.id,
+      failedJobCount: 0,
+      requeuedSliceCount: 0,
+      requeuedBoardCount: 0
+    };
+    const activeJobs = this.options.db.getSolverJobsByStatuses(
+      [...ACTIVE_JOB_STATUSES],
+      server.id
+    );
+    if (activeJobs.length === 0) return summary;
+    const disabledServerIds = new Set(
+      this.options.db.getServerRows()
+        .filter((candidate) => !candidate.enabled)
+        .map((candidate) => candidate.id)
+    );
+
+    this.options.db.runInPersistenceBatch(() => {
+      for (const job of activeJobs) {
+        const now = new Date().toISOString();
+        const slice = job.queueMode === "parallel" && job.parallelSliceId
+          ? this.options.db.getParallelSolverSlice(job.parallelSliceId)
+          : null;
+        const run = slice ? this.options.db.getParallelSolverRun(slice.runId) : null;
+        if (!slice || !run) {
+          const message = `Server ${server.id} was manually disabled while ${job.datasetName} was running; the job was marked failed and must be retried manually.`;
+          this.options.db.updateSolverJob(job.id, {
+            status: "failed",
+            finishedAt: now,
+            lastError: message
+          });
+          this.recordEvent(job.id, "server_disabled", message, null);
+          summary.failedJobCount += 1;
+          continue;
+        }
+
+        const assigned = [...slice.assignedIndices];
+        const completed = new Set((job.pipeline?.completedIndices ?? []).filter((index) => assigned.includes(index)));
+        const remaining = assigned.filter((index) => !completed.has(index));
+        const message = `Server ${server.id} was manually disabled while ${job.datasetName} was running; ${remaining.length} board(s) were requeued with failure reason server_disabled.`;
+        this.options.db.updateSolverJob(job.id, {
+          status: "failed",
+          finishedAt: now,
+          lastError: message
+        });
+        this.recordEvent(job.id, "server_disabled_requeued", message, null);
+        summary.failedJobCount += 1;
+
+        for (const boardIndex of remaining) {
+          const position = assigned.indexOf(boardIndex);
+          const boardName = slice.assignedBoardNames[position] ?? String(boardIndex);
+          this.options.db.upsertParallelFailurePoolEntry({
+            id: randomUUID(),
+            rangePath: run.rangePath,
+            datasetName: run.datasetName,
+            repoId: run.repoId,
+            scenario: run.scenario,
+            boardIndex,
+            boardName,
+            boardKey: boardKeyFromName(boardName),
+            status: "failed",
+            failureReason: "server_disabled",
+            attemptCount: 1,
+            lastRunId: run.id,
+            lastSliceId: slice.id,
+            lastServerId: server.id,
+            lastError: message,
+            createdAt: now,
+            updatedAt: now
+          });
+        }
+
+        if (remaining.length === 0) {
+          this.options.db.updateParallelSolverSlice(slice.id, {
+            status: "completed",
+            completedCount: assigned.length,
+            failedCount: 0,
+            finishedAt: now,
+            lastError: null
+          });
+          continue;
+        }
+
+        this.options.db.updateParallelSolverSlice(slice.id, {
+          status: "canceled",
+          completedCount: completed.size,
+          failedCount: 0,
+          finishedAt: now,
+          lastError: message
+        });
+        const remainingBoardNames = remaining.map((boardIndex) => {
+          const position = assigned.indexOf(boardIndex);
+          return slice.assignedBoardNames[position] ?? String(boardIndex);
+        });
+        this.options.db.insertParallelSolverSlice({
+          id: randomUUID(),
+          runId: run.id,
+          serverId: "",
+          candidateServerIds: slice.candidateServerIds.filter((candidateId) => !disabledServerIds.has(candidateId)),
+          jobId: null,
+          rangeExpr: compressIndices(remaining),
+          assignedIndices: remaining,
+          assignedBoardNames: remainingBoardNames,
+          status: "queued",
+          completedCount: 0,
+          failedCount: 0,
+          startedAt: null,
+          finishedAt: null,
+          createdAt: now,
+          updatedAt: now,
+          lastError: message,
+          job: null
+        });
+        summary.requeuedSliceCount += 1;
+        summary.requeuedBoardCount += remaining.length;
+      }
+    });
+    return summary;
   }
 
   private async buildParallelPreview(
@@ -1147,7 +1323,7 @@ export class SolverJobService {
       return server;
     });
 
-    const basePreview = buildSolverJobPreview({
+    const rawBasePreview = buildSolverJobPreview({
       input: {
         ...input,
         serverId: selectedServers[0]!.id
@@ -1160,6 +1336,8 @@ export class SolverJobService {
       solverHfProxyUrl: this.effectiveSolverHfProxyUrl(),
       settingLibrary: this.getSettingLibrary()
     });
+    const basePreview = this.addHistoricalDatasetCollisions(rawBasePreview);
+    if (options.createRepoIfConfirmed) this.ensureDatasetNameAvailable(basePreview);
 
     let repoExists = await this.cachedDatasetRepoExists(basePreview.repoId);
     if (!repoExists && options.createRepoIfConfirmed) {
@@ -1222,6 +1400,7 @@ export class SolverJobService {
       rangeName: basePreview.rangeName,
       learned: basePreview.learned,
       datasetName: basePreview.datasetName,
+      datasetCollisionPaths: basePreview.datasetCollisionPaths,
       repoId: basePreview.repoId,
       settingId: basePreview.settingId,
       setting: basePreview.setting,
@@ -1288,7 +1467,7 @@ export class SolverJobService {
       throw new Error("Failure pool has no retryable boards for this range.");
     }
 
-    const basePreview = buildSolverJobPreview({
+    const rawBasePreview = buildSolverJobPreview({
       input: {
         ...input,
         serverId: baseServer.id
@@ -1301,6 +1480,8 @@ export class SolverJobService {
       solverHfProxyUrl: this.effectiveSolverHfProxyUrl(),
       settingLibrary: this.getSettingLibrary()
     });
+    const basePreview = this.addHistoricalDatasetCollisions(rawBasePreview);
+    if (options.createRepoIfConfirmed) this.ensureDatasetNameAvailable(basePreview);
 
     let repoExists = await this.cachedDatasetRepoExists(basePreview.repoId);
     if (!repoExists && options.createRepoIfConfirmed) {
@@ -1385,6 +1566,7 @@ export class SolverJobService {
       rangeName: basePreview.rangeName,
       learned: basePreview.learned,
       datasetName: basePreview.datasetName,
+      datasetCollisionPaths: basePreview.datasetCollisionPaths,
       repoId: basePreview.repoId,
       settingId: basePreview.settingId,
       setting: basePreview.setting,
@@ -1409,6 +1591,122 @@ export class SolverJobService {
         ...(entries.length === 0 ? ["Failure pool has no retryable boards for this range."] : [])
       ]
     };
+  }
+
+  private ensureDatasetNameAvailable(preview: {
+    rangePath: string;
+    datasetName: string;
+    repoId?: string;
+    datasetCollisionPaths?: string[];
+  }): void {
+    const rangePath = preview.rangePath.trim();
+    const datasetName = preview.datasetName.trim();
+    const repoId = preview.repoId?.trim() || `${this.repoNamespace}/${datasetName}`;
+    const collisions = new Set(preview.datasetCollisionPaths ?? []);
+
+    // A caller may explicitly provide a datasetName, bypassing the canonical
+    // filename scan. Historical jobs/runs/failure-pool entries are the second
+    // source of truth for repository ownership, so include them in the same
+    // check before any repo/job mutation occurs.
+    for (const owner of this.datasetOwners(datasetName, repoId)) {
+      if (owner.rangePath && owner.rangePath !== rangePath) {
+        collisions.add(`${owner.source} (${owner.rangePath})`);
+      }
+    }
+    if (collisions.size === 0) return;
+    throw new Error(
+      `Dataset collision: ${repoId} is already associated with another Range: ` +
+      `${[...collisions].join(", ")}. Choose a unique dataset name before submitting this job.`
+    );
+  }
+
+  private addHistoricalDatasetCollisions<T extends {
+    rangePath: string;
+    datasetName: string;
+    repoId: string;
+    datasetCollisionPaths?: string[];
+    warnings: string[];
+  }>(preview: T): T {
+    const collisions = new Set(preview.datasetCollisionPaths ?? []);
+    for (const owner of this.datasetOwners(preview.datasetName, preview.repoId)) {
+      if (owner.rangePath !== preview.rangePath) {
+        collisions.add(`${owner.source} (${owner.rangePath})`);
+      }
+    }
+    if (collisions.size === (preview.datasetCollisionPaths?.length ?? 0)) return preview;
+    return {
+      ...preview,
+      datasetCollisionPaths: [...collisions],
+      warnings: [
+        ...preview.warnings,
+        `Dataset name ${preview.datasetName} is already associated with another Range. ` +
+        "Choose a unique dataset name before submitting."
+      ]
+    };
+  }
+
+  private datasetOwnersByRepo(
+    requestedOwnerKeys: Set<string>
+  ): Map<string, Array<{ source: string; rangePath: string }>> {
+    const ownersByRepo = new Map<string, Array<{ source: string; rangePath: string }>>();
+    if (requestedOwnerKeys.size === 0) return ownersByRepo;
+
+    const addOwner = (datasetName: string, repoId: string, source: string, rangePath: string) => {
+      const ownerKey = datasetRepoKey(datasetName, repoId);
+      if (!requestedOwnerKeys.has(ownerKey)) return;
+      const owners = ownersByRepo.get(ownerKey) ?? [];
+      owners.push({ source, rangePath });
+      ownersByRepo.set(ownerKey, owners);
+    };
+
+    for (const job of this.options.db.getSolverJobSummaries()) {
+      addOwner(job.datasetName, job.repoId, `solver job ${job.id}`, job.rangePath);
+    }
+    for (const run of this.options.db.getParallelSolverRunSummaries()) {
+      addOwner(run.datasetName, run.repoId, `parallel run ${run.id}`, run.rangePath);
+    }
+    for (const entry of this.options.db.getParallelFailurePoolEntries()) {
+      addOwner(entry.datasetName, entry.repoId, `failure pool ${entry.id}`, entry.rangePath);
+    }
+    return ownersByRepo;
+  }
+
+  private datasetOwners(datasetName: string, repoId: string): Array<{ source: string; rangePath: string }> {
+    const ownerKey = datasetRepoKey(datasetName, repoId);
+    return this.datasetOwnersByRepo(new Set([ownerKey])).get(ownerKey) ?? [];
+  }
+
+  private ensureRetainedUploadItemsSafe(items: ServerUploadItem[]): void {
+    const requestedOwnerKeys = new Set(
+      items
+        .filter((item) => item.datasetName.trim() && item.repoId.trim())
+        .map((item) => datasetRepoKey(item.datasetName.trim(), item.repoId.trim()))
+    );
+    const ownersByRepo = this.datasetOwnersByRepo(requestedOwnerKeys);
+
+    for (const item of items) {
+      const datasetName = item.datasetName.trim();
+      const repoId = item.repoId.trim();
+      if (!datasetName || !repoId) continue;
+
+      const knownJob = item.jobId ? this.options.db.getSolverJob(item.jobId) : null;
+      if (knownJob && datasetRepoKey(knownJob.datasetName, knownJob.repoId) !== datasetRepoKey(datasetName, repoId)) {
+        throw new Error(
+          `Dataset collision: retained upload ${item.resultsDir} identifies job ${item.jobId}, ` +
+          `but its recorded dataset is ${knownJob.repoId}.`
+        );
+      }
+
+      const allowedRangePath = knownJob?.rangePath ?? null;
+      const owners = (ownersByRepo.get(datasetRepoKey(datasetName, repoId)) ?? [])
+        .filter((owner) => !allowedRangePath || owner.rangePath !== allowedRangePath);
+      if (owners.length === 0) continue;
+      const ownerSummary = [...new Set(owners.map((owner) => `${owner.source} (${owner.rangePath})`))].join(", ");
+      throw new Error(
+        `Dataset collision: retained upload ${item.resultsDir} would write ${repoId}, ` +
+        `which is associated with another Range: ${ownerSummary}.`
+      );
+    }
   }
 
   private async createParallelRunFromPreview(
@@ -1505,7 +1803,7 @@ export class SolverJobService {
   }
 
   private reconcileParallelRunsWithinBatch(): void {
-    const runs = this.options.db.getParallelSolverRuns();
+    const runs = this.options.db.getParallelSolverRunsByStatuses(["queued", "running"]);
     for (const run of runs) {
       for (const slice of run.slices) {
         if (parallelSliceHasInterruptedReassignment(slice)) {
@@ -1593,7 +1891,7 @@ export class SolverJobService {
 
   private failurePoolEntries(input: ParallelFailurePoolPreviewRequest): ParallelFailurePoolEntry[] {
     const datasetName = input.datasetName?.trim()
-      || datasetNameFromRangePath(input.rangePath, input.scenario ?? scenarioFromRangePath(input.rangePath));
+      || datasetNameFromRangePath(input.rangePath);
     const entries = this.options.db.getParallelFailurePoolEntries(input.rangePath, datasetName)
       .filter((entry) =>
         (entry.status === "pending" || entry.status === "failed") &&
@@ -1704,8 +2002,7 @@ export class SolverJobService {
   private reconcileCompletedJobs(): void {
     this.options.db.runInPersistenceBatch(() => {
       this.reconcileStartedJobsFromPipelines();
-      for (const job of this.options.db.getSolverJobs()) {
-        if (!ACTIVE_JOB_STATUSES.has(job.status)) continue;
+      for (const job of this.options.db.getSolverJobsByStatuses([...ACTIVE_JOB_STATUSES])) {
         if (!job.pipeline || !pipelineIsNewEnoughForJob(job.pipeline, job)) continue;
         if (isPipelineActive(job.pipeline) && pipelineBelongsToJob(job.pipeline, job)) continue;
         if (!pipelineCanSettleActiveJob(job.pipeline, job)) continue;
@@ -1804,8 +2101,7 @@ export class SolverJobService {
     if (!this.options.credentials) return;
     const now = Date.now();
     const servers = new Map(this.options.db.getServerRows().map((server) => [server.id, server]));
-    const jobs = this.options.db.getSolverJobs().filter((job) => {
-      if (!ACTIVE_JOB_STATUSES.has(job.status)) return false;
+    const jobs = this.options.db.getSolverJobsByStatuses([...ACTIVE_JOB_STATUSES]).filter((job) => {
       const reference = Date.parse(job.startedAt ?? job.updatedAt ?? job.createdAt);
       if (!Number.isFinite(reference) || now - reference < ACTIVE_JOB_RECONCILE_GRACE_MS) return false;
       return !job.pipeline ||
@@ -1828,8 +2124,7 @@ export class SolverJobService {
   }
 
   private reconcileStartedJobsFromPipelines(): void {
-    for (const job of this.options.db.getSolverJobs()) {
-      if (job.status !== "queued" && job.status !== "deploying") continue;
+    for (const job of this.options.db.getSolverJobsByStatuses(["queued", "deploying"])) {
       if (!job.pipeline || !pipelineBelongsToJob(job.pipeline, job) || !isPipelineActive(job.pipeline)) continue;
       const startedAt = job.startedAt ?? job.pipeline.startedAt ?? job.pipeline.collectedAt ?? new Date().toISOString();
       const clearedDispatchFailures = job.queueMode === "parallel"
@@ -2018,7 +2313,6 @@ export class SolverJobService {
     const paths = serverOperationPaths(id);
     const body = buildServerUploadCommand({
       solverRoot,
-      items,
       hfToken: this.hfToken,
       proxyUrl: this.effectiveRemoteOperationProxyUrl(),
       redactSecrets: false
@@ -2054,10 +2348,11 @@ export class SolverJobService {
     server: ServerRow,
     command: string,
     operation?: ServerOperation,
-    credentials: SshCredentials = this.options.credentials!
+    credentials: SshCredentials = this.options.credentials!,
+    stdin?: string
   ): Promise<string> {
     try {
-      return await this.executor.run(server, credentials, command);
+      return await this.executor.run(server, credentials, command, stdin);
     } catch (error) {
       if (!isSshHandshakeTimeout(error)) throw error;
       const delayMs = this.serverOperationHandshakeRetryDelayMs === 0
@@ -2072,7 +2367,7 @@ export class SolverJobService {
         );
       }
       if (delayMs > 0) await waitFor(delayMs);
-      return this.executor.run(server, credentials, command);
+      return this.executor.run(server, credentials, command, stdin);
     }
   }
 
@@ -2080,9 +2375,38 @@ export class SolverJobService {
     this.options.db.updateServerOperation(operation.id, { status: "deploying", lastError: null });
     this.recordOperationEvent(operation.id, "deploying", `Starting ${operation.type} tmux session ${operation.tmuxSession}.`, null);
     try {
+      if (operation.type === "upload") {
+        // Operations can survive a process restart and predate the current
+        // collision policy.  Re-check immediately before staging any remote
+        // command so retained uploads cannot silently reuse an ambiguous repo.
+        this.ensureRetainedUploadItemsSafe(
+          normalizeUploadItems(operation.items.filter(isServerUploadOperationItem))
+        );
+      }
+      let commandFilePath: string | undefined;
+      if (operation.type === "upload") {
+        commandFilePath = serverOperationCommandPath(operation.id);
+        const plan = buildServerUploadPlan(normalizeUploadItems(operation.items.filter(isServerUploadOperationItem)));
+        await this.runServerOperationSsh(
+          server,
+          buildStageServerOperationFileCommand(serverOperationPlanPath(operation.id)),
+          operation,
+          this.options.credentials!,
+          plan
+        );
+      }
+      if (commandFilePath) {
+        await this.runServerOperationSsh(
+          server,
+          buildStageServerOperationFileCommand(commandFilePath),
+          operation,
+          this.options.credentials!,
+          executionCommand
+        );
+      }
       await this.runServerOperationSsh(
         server,
-        buildServerOperationTmuxStartCommand(operation, effectiveSolverRoot(server), executionCommand),
+        buildServerOperationTmuxStartCommand(operation, effectiveSolverRoot(server), executionCommand, commandFilePath),
         operation
       );
       const now = new Date().toISOString();
@@ -2138,12 +2462,13 @@ export class SolverJobService {
   }
 
   private async runServerOperationReconciliation(): Promise<void> {
+    this.initializeAutomaticUploadMonitor();
     const activeOperations = this.options.db.getServerOperations()
       .filter((operation) => ACTIVE_SERVER_OPERATION_STATUSES.has(operation.status));
-    if (activeOperations.length === 0 || !this.options.credentials) return;
     const credentials = this.options.credentials;
     const servers = new Map(this.options.db.getServerRows().map((server) => [server.id, server]));
-    await forEachWithConcurrency(activeOperations, SERVER_OPERATION_SSH_CONCURRENCY, async (operation) => {
+    if (credentials && activeOperations.length > 0) {
+      await forEachWithConcurrency(activeOperations, SERVER_OPERATION_SSH_CONCURRENCY, async (operation) => {
       const server = servers.get(operation.serverId);
       if (!server || server.latest?.connectionStatus !== "online") return;
       if (operation.status === "queued") {
@@ -2246,11 +2571,243 @@ export class SolverJobService {
       } catch {
         // A transient SSH failure must not erase an active operation.
       }
-    });
+      });
+    }
+    await this.reconcileAutomaticUploadFollowups(servers);
+  }
+
+  private initializeAutomaticUploadMonitor(): void {
+    if (this.automaticUploadMonitorInitialized) return;
+    for (const operation of this.options.db.getServerOperations()) {
+      if (operation.type === "upload" && !ACTIVE_SERVER_OPERATION_STATUSES.has(operation.status)) {
+        this.automaticUploadHandledOperationIds.add(operation.id);
+      }
+    }
+    this.automaticUploadMonitorInitialized = true;
+  }
+
+  private async reconcileAutomaticUploadFollowups(servers: Map<string, ServerRow>): Promise<void> {
+    if (!this.options.credentials || !this.hfToken) return;
+
+    for (const operation of this.options.db.getServerOperations()) {
+      if (
+        operation.type !== "upload" ||
+        (operation.status !== "completed" && operation.status !== "failed") ||
+        this.automaticUploadHandledOperationIds.has(operation.id)
+      ) {
+        continue;
+      }
+      this.automaticUploadHandledOperationIds.add(operation.id);
+      const existing = this.automaticUploadFollowups.get(operation.serverId);
+      if (existing?.operationId && ACTIVE_SERVER_OPERATION_STATUSES.has(
+        this.options.db.getServerOperation(existing.operationId)?.status ?? "failed"
+      )) {
+        continue;
+      }
+      this.automaticUploadFollowups.set(operation.serverId, {
+        serverId: operation.serverId,
+        sourceOperationId: operation.id,
+        phase: "scan",
+        operationId: null,
+        retryCount: 0,
+        retryAtMs: Date.now(),
+        networkRecoveryAttempted: false
+      });
+      this.recordOperationEvent(
+        operation.id,
+        "auto_upload_followup_queued",
+        `Upload ${operation.status}; queued an automatic retained-result scan for server ${operation.serverId}.`,
+        null
+      );
+    }
+
+    await forEachWithConcurrency(
+      [...this.automaticUploadFollowups.values()],
+      SERVER_OPERATION_SSH_CONCURRENCY,
+      async (followup) => {
+        if (followup.retryAtMs > Date.now()) return;
+        const server = servers.get(followup.serverId);
+        if (!server?.enabled || !serverIsOnline(server)) {
+          this.deferAutomaticUploadFollowup(followup, `Server ${followup.serverId} is not SSH-ready.`);
+          return;
+        }
+        if (followup.phase === "network_sync") {
+          this.reconcileAutomaticNetworkSync(followup);
+          return;
+        }
+        if (followup.phase === "upload") {
+          this.reconcileAutomaticUploadOperation(followup);
+          return;
+        }
+        await this.runAutomaticUploadScan(followup, server);
+      }
+    );
+  }
+
+  private reconcileAutomaticNetworkSync(followup: AutomaticUploadFollowup): void {
+    const operation = followup.operationId ? this.options.db.getServerOperation(followup.operationId) : null;
+    if (operation && ACTIVE_SERVER_OPERATION_STATUSES.has(operation.status)) return;
+    if (operation?.status === "completed") {
+      followup.phase = "scan";
+      followup.operationId = null;
+      followup.retryCount = 0;
+      followup.retryAtMs = Date.now();
+      this.recordOperationEvent(
+        followup.sourceOperationId,
+        "auto_network_sync_completed",
+        `Network Sync completed on server ${followup.serverId}; connectivity will be verified before upload.`,
+        null
+      );
+      return;
+    }
+    this.deferAutomaticUploadFollowup(
+      followup,
+      operation?.lastError ?? `Network Sync did not complete on server ${followup.serverId}.`
+    );
+    followup.phase = "scan";
+    followup.operationId = null;
+  }
+
+  private reconcileAutomaticUploadOperation(followup: AutomaticUploadFollowup): void {
+    const operation = followup.operationId ? this.options.db.getServerOperation(followup.operationId) : null;
+    if (operation && ACTIVE_SERVER_OPERATION_STATUSES.has(operation.status)) return;
+    if (operation?.status === "canceled") {
+      this.automaticUploadFollowups.delete(followup.serverId);
+      return;
+    }
+    followup.phase = "scan";
+    followup.operationId = null;
+    followup.retryAtMs = Date.now();
+    if (operation?.status === "completed" || operation?.result?.summary.upload_success) {
+      followup.retryCount = 0;
+    } else {
+      this.deferAutomaticUploadFollowup(
+        followup,
+        operation?.lastError ?? `Automatic upload did not complete on server ${followup.serverId}.`
+      );
+    }
+  }
+
+  private async runAutomaticUploadScan(followup: AutomaticUploadFollowup, server: ServerRow): Promise<void> {
+    try {
+      const latestUpload = this.options.db.getLatestServerOperation(server.id, "upload");
+      if (latestUpload && ACTIVE_SERVER_OPERATION_STATUSES.has(latestUpload.status)) {
+        followup.phase = "upload";
+        followup.operationId = latestUpload.id;
+        this.automaticUploadHandledOperationIds.add(latestUpload.id);
+        return;
+      }
+
+      const scan = await this.scanUploadCandidates(server.id);
+      const sourceOperation = this.options.db.getServerOperation(followup.sourceOperationId);
+      const scannedItems = normalizeUploadItems(scan.candidates.flatMap(serverUploadItemsFromCandidate));
+      const sourceItems = normalizeUploadItems(
+        sourceOperation?.items.filter(isServerUploadOperationItem)
+      );
+      const items = sourceItems.length > 0
+        ? retainUploadItemsFromSource(scannedItems, sourceItems)
+        : scannedItems;
+      if (items.length === 0) {
+        this.recordOperationEvent(
+          followup.sourceOperationId,
+          "auto_upload_scan_empty",
+          `Automatic scan found no retained result files on server ${server.id}.`,
+          null
+        );
+        this.automaticUploadFollowups.delete(server.id);
+        return;
+      }
+
+      const networkRecoveryRequired = sourceOperation?.result?.summary.network_recovery_required;
+      if (
+        !followup.networkRecoveryAttempted &&
+        (networkRecoveryRequired === true || networkRecoveryRequired === 1)
+      ) {
+        followup.networkRecoveryAttempted = true;
+        await this.startAutomaticNetworkSync(
+          followup,
+          server,
+          "the upload watchdog detected a stalled or interrupted Hugging Face transfer"
+        );
+        return;
+      }
+
+      const connectivityOutput = await this.runServerOperationSsh(
+        server,
+        buildServerHfConnectivityProbeCommand(this.effectiveRemoteOperationProxyUrl())
+      );
+      const connectivity = parseServerHfConnectivityProbe(connectivityOutput);
+      if (!connectivity.connected) {
+        await this.startAutomaticNetworkSync(followup, server, connectivity.reason);
+        return;
+      }
+
+      await this.startUploadOperation({ serverId: server.id, items });
+      const operation = this.options.db.getLatestServerOperation(server.id, "upload");
+      if (!operation || !ACTIVE_SERVER_OPERATION_STATUSES.has(operation.status)) {
+        throw new Error(`Automatic upload was not created for server ${server.id}.`);
+      }
+      this.automaticUploadHandledOperationIds.add(operation.id);
+      followup.phase = "upload";
+      followup.operationId = operation.id;
+      followup.retryAtMs = Date.now();
+      this.recordOperationEvent(
+        followup.sourceOperationId,
+        "auto_upload_started",
+        `Automatic scan found ${items.length} upload item(s); started ${operation.id} on server ${server.id}.`,
+        null
+      );
+    } catch (error) {
+      this.deferAutomaticUploadFollowup(
+        followup,
+        error instanceof Error ? error.message : String(error)
+      );
+    }
+  }
+
+  private async startAutomaticNetworkSync(
+    followup: AutomaticUploadFollowup,
+    server: ServerRow,
+    reason: string
+  ): Promise<void> {
+    const active = this.options.db.getLatestServerOperation(server.id, "network_sync");
+    if (active && ACTIVE_SERVER_OPERATION_STATUSES.has(active.status)) {
+      followup.phase = "network_sync";
+      followup.operationId = active.id;
+      return;
+    }
+    await this.startNetworkSyncOperations({ serverIds: [server.id] });
+    const operation = this.options.db.getLatestServerOperation(server.id, "network_sync");
+    if (!operation || !ACTIVE_SERVER_OPERATION_STATUSES.has(operation.status)) {
+      throw new Error(`Network Sync was not created for server ${server.id}.`);
+    }
+    followup.phase = "network_sync";
+    followup.operationId = operation.id;
+    followup.retryAtMs = Date.now();
+    this.recordOperationEvent(
+      followup.sourceOperationId,
+      "auto_network_sync_started",
+      `Hugging Face connectivity failed on server ${server.id} (${reason}); started Network Sync ${operation.id}.`,
+      null
+    );
+  }
+
+  private deferAutomaticUploadFollowup(followup: AutomaticUploadFollowup, reason: string): void {
+    followup.retryCount += 1;
+    const delayMs = Math.min(
+      AUTOMATIC_UPLOAD_RETRY_MAX_MS,
+      AUTOMATIC_UPLOAD_RETRY_BASE_MS * (2 ** Math.min(5, followup.retryCount - 1))
+    );
+    followup.retryAtMs = Date.now() + delayMs;
+    this.recordOperationEvent(
+      followup.sourceOperationId,
+      "auto_upload_deferred",
+      `Automatic upload follow-up for server ${followup.serverId} will retry in ${Math.round(delayMs / 1000)}s: ${reason}`,
+      null
+    );
   }
 
   private buildUploadOperationExecutionCommand(operation: ServerOperation, server: ServerRow): string {
-    const items = normalizeUploadItems(operation.items.filter(isServerUploadOperationItem));
     return buildTrackedServerOperationCommand({
       id: operation.id,
       type: operation.type,
@@ -2258,7 +2815,6 @@ export class SolverJobService {
       logFilePath: operation.logFilePath,
       bodyCommand: buildServerUploadCommand({
         solverRoot: effectiveSolverRoot(server),
-        items,
         hfToken: this.hfToken,
         proxyUrl: this.effectiveRemoteOperationProxyUrl(),
         redactSecrets: false
@@ -2308,6 +2864,19 @@ export class SolverJobService {
 
   private async startQueuedJobIfDispatchReady(job: SolverJob): Promise<boolean> {
     if (job.status !== "queued") return false;
+    try {
+      this.ensureDatasetNameAvailable(job);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!message.startsWith("Dataset collision:")) throw error;
+      this.options.db.updateSolverJob(job.id, {
+        status: "failed",
+        finishedAt: new Date().toISOString(),
+        lastError: message
+      });
+      this.recordEvent(job.id, "dataset_collision", message, null);
+      return false;
+    }
     const server = this.requireServer(job.serverId);
     if (!server.enabled) {
       this.markJobDispatchPending(job, `Dispatch pending: server ${server.id} is disabled.`);
@@ -2365,6 +2934,15 @@ export class SolverJobService {
       return started.status === "running";
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      if (message.startsWith("Dataset collision:")) {
+        const failed = this.options.db.updateSolverJob(dispatchJob.id, {
+          status: "failed",
+          finishedAt: new Date().toISOString(),
+          lastError: message
+        });
+        this.recordEvent(failed.id, "dataset_collision", message, null);
+        return false;
+      }
       this.markJobDispatchPending(dispatchJob, `Dispatch pending: ${message}`);
       return false;
     }
@@ -2458,6 +3036,33 @@ export class SolverJobService {
       if (candidate?.run.id === runId) break;
     }
     if (!candidate) return false;
+    try {
+      // Parallel runs are persisted before dispatch. Re-check their ownership
+      // here as well, including runs created by an older server version.
+      this.ensureDatasetNameAvailable(candidate.run);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!message.startsWith("Dataset collision:")) throw error;
+      this.options.db.updateParallelSolverRun(candidate.run.id, {
+        status: "failed",
+        finishedAt: new Date().toISOString(),
+        lastError: message
+      });
+      this.options.db.updateParallelSolverSlice(candidate.slice.id, {
+        status: "failed",
+        finishedAt: new Date().toISOString(),
+        lastError: message
+      });
+      if (candidate.job) {
+        this.options.db.updateSolverJob(candidate.job.id, {
+          status: "failed",
+          finishedAt: new Date().toISOString(),
+          lastError: message
+        });
+        this.recordEvent(candidate.job.id, "dataset_collision", message, null);
+      }
+      return false;
+    }
     const cardsCheck = await this.validateServerCardsForSlice(server, candidate.slice);
     if (!cardsCheck.ready) {
       const now = new Date().toISOString();
@@ -2868,7 +3473,11 @@ export function buildSolverJobPreview({
     useIsomorphism: setting.parameters.useIsomorphism ? 1 as const : 0 as const
   };
   const scenario = setting.id;
-  const datasetName = normalizeDatasetName(input.datasetName) ?? datasetNameFromRangePath(input.rangePath, setting.id);
+  const datasetName = normalizeDatasetName(input.datasetName) ?? datasetNameFromRangePath(input.rangePath);
+  const datasetCollisionPaths = rangePathsForDatasetName(preflopRangesPath, datasetName)
+    .filter((rangePath) => rangePath !== input.rangePath && !rangePathsAreIdenticalAliases(
+      preflopRangesPath, input.rangePath, rangePath, datasetName, library, setting.id
+    ));
   const repoId = `${repoNamespace}/${datasetName}`;
   const solverRangeText = solverRangeTextFromDocument(file.summary.data);
   const tmuxSession = server.tmuxSession?.trim() || "solver";
@@ -2895,6 +3504,12 @@ export function buildSolverJobPreview({
   if (!learned) {
     warnings.push("Range must be approved before solver job submission.");
   }
+  if (datasetCollisionPaths.length > 0) {
+    warnings.push(
+      `Dataset name ${datasetName} is also used by: ${datasetCollisionPaths.join(", ")}. ` +
+      "Choose a unique dataset name before submitting."
+    );
+  }
 
   return {
     server,
@@ -2913,6 +3528,7 @@ export function buildSolverJobPreview({
     tmuxSession,
     pipelineStatusFilePath,
     settings,
+    datasetCollisionPaths,
     warnings,
     requiresConfirmation: !learned
   };
@@ -2956,6 +3572,31 @@ export function solverRangeTextFromDocument(document: PreflopRangeDocument): str
   ].join("\n");
 }
 
+/** Ignore duplicate library copies only when both ranges and their Setting match. */
+export function rangePathsAreIdenticalAliases(
+  root: string,
+  firstPath: string,
+  secondPath: string,
+  datasetName: string,
+  library: SolverSettingLibraryItem[],
+  selectedSettingId: SolverSettingLibraryItem["id"]
+): boolean {
+  if (datasetNameFromRangePath(firstPath) !== datasetName ||
+      datasetNameFromRangePath(secondPath) !== datasetName) return false;
+  const firstSettings = linkedSolverSettingsForRangePath(library, firstPath);
+  const secondSettings = linkedSolverSettingsForRangePath(library, secondPath);
+  if (firstSettings.length !== 1 || secondSettings.length !== 1 ||
+      firstSettings[0]!.id !== selectedSettingId ||
+      secondSettings[0]!.id !== selectedSettingId) return false;
+  try {
+    const first = readPreflopRangeFile(root, firstPath).summary.data;
+    const second = readPreflopRangeFile(root, secondPath).summary.data;
+    return solverRangeTextFromDocument(first) === solverRangeTextFromDocument(second);
+  } catch {
+    return false;
+  }
+}
+
 function settingFromPreviewInput(
   input: SolverJobPreviewRequest,
   settingLibrary: SolverSettingLibraryItem[]
@@ -2991,6 +3632,13 @@ function normalizeDatasetName(value: unknown): string | null {
     throw new Error("Dataset name must use letters, numbers, '.', '_' or '-' and cannot start/end with '.' or '-'.");
   }
   return normalized;
+}
+
+function datasetRepoKey(datasetName: string, repoId: string): string {
+  // Hugging Face repository ids are effectively case-insensitive for the
+  // ownership purpose here. Lower-casing prevents `MyRange` and `myrange`
+  // from becoming two apparent owners of the same remote dataset.
+  return `${repoId.trim() || datasetName.trim()}`.toLowerCase();
 }
 
 async function huggingFaceDatasetRepoExists(
@@ -3297,11 +3945,19 @@ export function buildTmuxStartCommand(job: SolverJob, solverRoot: string, comman
   ].join("\n");
 }
 
-export function buildServerOperationTmuxStartCommand(operation: ServerOperation, solverRoot: string, command = operation.command): string {
+export function buildServerOperationTmuxStartCommand(
+  operation: ServerOperation,
+  solverRoot: string,
+  command = operation.command,
+  commandFilePath?: string
+): string {
+  const paneCommand = commandFilePath
+    ? `bash ${shellQuoteRemotePath(commandFilePath)}; OP_COMMAND_CODE=\$?; rm -f -- ${shellQuoteRemotePath(commandFilePath)}; unset OP_COMMAND_CODE`
+    : command;
   return [
     "set -e",
     `tmux has-session -t ${shellQuote(operation.tmuxSession)} 2>/dev/null || tmux new-session -d -s ${shellQuote(operation.tmuxSession)} -c ${shellQuoteRemotePath(solverRoot)}`,
-    `tmux send-keys -t ${shellQuote(operation.tmuxSession)} ${shellQuote(command)} C-m`
+    `tmux send-keys -t ${shellQuote(operation.tmuxSession)} ${shellQuote(paneCommand)} C-m`
   ].join("\n");
 }
 
@@ -3560,6 +4216,15 @@ else
 fi
 if [ "$VALIDATE_CODE" -eq 0 ]; then
   tmux kill-session -t mihomo 2>/dev/null || true
+  # Old tmux servers can leave detached mihomo children behind. They keep the
+  # proxy port bound, so a newly-created session appears healthy while traffic
+  # is still served by stale processes.
+  pkill -TERM -x mihomo 2>/dev/null || true
+  for _ in 1 2 3 4 5; do
+    if ! pgrep -x mihomo >/dev/null 2>&1; then break; fi
+    sleep 1
+  done
+  pkill -KILL -x mihomo 2>/dev/null || true
   tmux new-session -d -s mihomo -c "$REPO_DIR" "exec ./mihomo -d ."
   START_CODE=$?
   sleep 1
@@ -3683,39 +4348,47 @@ printf '%s\n' "$CHECK_OUTPUT"
 if [ "$CHECK_KIND" != "connected" ]; then exit 1; fi`;
 }
 
+export function buildServerHfConnectivityProbeCommand(
+  proxyUrl = DEFAULT_REMOTE_PROXY_URL
+): string {
+  return String.raw`set +e
+PROXY_URL=${shellQuote(proxyUrl)}
+PROBE_ERROR_FILE="/tmp/server-hf-probe-${"$"}${"$"}.err"
+HTTP_CODE=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' --connect-timeout 10 --max-time 25 --proxy "$PROXY_URL" https://huggingface.co/ 2>"$PROBE_ERROR_FILE")
+CURL_CODE=$?
+PROBE_ERROR=$(tail -c 400 "$PROBE_ERROR_FILE" 2>/dev/null)
+rm -f "$PROBE_ERROR_FILE"
+if [ "$CURL_CODE" -eq 0 ] && [ "$HTTP_CODE" != "000" ]; then CONNECTED=1; else CONNECTED=0; fi
+printf 'HF_PROXY_CONNECTED=%s\n' "$CONNECTED"
+printf 'HF_PROXY_CURL_CODE=%s\n' "$CURL_CODE"
+printf 'HF_PROXY_HTTP_CODE=%s\n' "$HTTP_CODE"
+printf 'HF_PROXY_ERROR=%s\n' "$PROBE_ERROR"
+exit 0`;
+}
+
 export function buildServerUploadCommand({
   solverRoot,
-  items,
   hfToken,
   proxyUrl = DEFAULT_REMOTE_PROXY_URL,
   redactSecrets = false
 }: {
   solverRoot: string;
-  items: ServerUploadItem[];
   hfToken?: string | null;
   proxyUrl?: string;
   redactSecrets?: boolean;
 }): string {
   const token = hfToken?.trim();
   if (!token) throw new Error("HF_TOKEN is required for upload operations.");
-  const plan = JSON.stringify(items.map((item) => ({
-    datasetName: item.datasetName,
-    repoId: item.repoId,
-    jobId: item.jobId ?? "",
-    resultsDir: item.resultsDir,
-    fileFormat: item.fileFormat,
-    fileCount: item.fileCount ?? 0
-  })));
   return String.raw`set -e
 cd ${shellQuoteRemotePath(solverRoot)}
 export http_proxy=${shellQuote(proxyUrl)}
 export https_proxy=${shellQuote(proxyUrl)}
 ${redactSecrets ? "export HF_TOKEN=$HF_TOKEN" : `export HF_TOKEN=${shellQuote(token)}`}
-cat > "$OP_UPLOAD_PLAN_FILE" <<'SERVER_UPLOAD_PLAN_JSON'
-${plan}
-SERVER_UPLOAD_PLAN_JSON
 python - "$OP_UPLOAD_PLAN_FILE" "$OP_RESULT_FILE" <<'PY'
 import json
+import os
+import selectors
+import signal
 import subprocess
 import sys
 import time
@@ -3734,6 +4407,9 @@ summary = {
     "attempts_remaining": len(items),
     "upload_success": 0,
     "upload_failed": 0,
+    "upload_timeouts": 0,
+    "upload_retry_attempts": 0,
+    "network_recovery_required": 0,
     "files_requested": sum(int(item.get("fileCount") or 0) for item in items),
     "files_found": 0,
     "files_uploaded": 0,
@@ -3743,6 +4419,9 @@ summary = {
     "current_results_dir": "",
     "current_file_format": "",
     "current_item_index": 0,
+    "current_attempt": 0,
+    "current_idle_timeout_seconds": 0,
+    "current_hard_timeout_seconds": 0,
     "no_files": 1 if not items else 0,
     "duration_seconds": 0,
 }
@@ -3783,6 +4462,155 @@ def write_progress():
         json.dump({"summary": summary, "details": details}, handle, ensure_ascii=True)
     temporary.replace(target)
 
+def bounded_env_int(name, default, minimum, maximum):
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(maximum, value))
+
+UPLOAD_IDLE_TIMEOUT_SECONDS = bounded_env_int("SERVER_UPLOAD_IDLE_TIMEOUT_SECONDS", 600, 1, 3600)
+UPLOAD_HARD_BASE_SECONDS = bounded_env_int("SERVER_UPLOAD_HARD_BASE_SECONDS", 900, 1, 7200)
+UPLOAD_HARD_PER_FILE_SECONDS = bounded_env_int("SERVER_UPLOAD_HARD_PER_FILE_SECONDS", 45, 1, 300)
+UPLOAD_HARD_MAX_SECONDS = bounded_env_int("SERVER_UPLOAD_HARD_MAX_SECONDS", 7200, 1, 21600)
+UPLOAD_TERMINATE_GRACE_SECONDS = bounded_env_int("SERVER_UPLOAD_TERMINATE_GRACE_SECONDS", 5, 1, 30)
+UPLOAD_MAX_ATTEMPTS = bounded_env_int("SERVER_UPLOAD_MAX_ATTEMPTS", 3, 1, 5)
+
+def descendant_pids(root_pid):
+    children = {}
+    try:
+        proc_entries = list(Path("/proc").iterdir())
+    except OSError:
+        return []
+    for entry in proc_entries:
+        if not entry.name.isdigit():
+            continue
+        try:
+            stat = (entry / "stat").read_text(encoding="utf-8")
+            fields = stat.rsplit(")", 1)[1].split()
+            parent_pid = int(fields[1])
+            children.setdefault(parent_pid, []).append(int(entry.name))
+        except (OSError, ValueError, IndexError):
+            continue
+    descendants = []
+    pending = list(children.get(root_pid, []))
+    while pending:
+        pid = pending.pop()
+        descendants.append(pid)
+        pending.extend(children.get(pid, []))
+    return descendants
+
+def signal_pid(pid, sig):
+    try:
+        os.kill(pid, sig)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+def terminate_process_tree(process):
+    tracked_descendants = descendant_pids(process.pid)
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        signal_pid(process.pid, signal.SIGTERM)
+    for pid in reversed(tracked_descendants):
+        signal_pid(pid, signal.SIGTERM)
+    try:
+        process.wait(timeout=UPLOAD_TERMINATE_GRACE_SECONDS)
+    except subprocess.TimeoutExpired:
+        pass
+    if process.poll() is None:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            signal_pid(process.pid, signal.SIGKILL)
+    for pid in reversed(tracked_descendants):
+        signal_pid(pid, signal.SIGKILL)
+    try:
+        process.wait(timeout=UPLOAD_TERMINATE_GRACE_SECONDS)
+    except subprocess.TimeoutExpired:
+        signal_pid(process.pid, signal.SIGKILL)
+
+def run_upload_attempt(command, idle_timeout, hard_timeout):
+    environment = os.environ.copy()
+    environment["PYTHONUNBUFFERED"] = "1"
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        env=environment,
+        start_new_session=True,
+    )
+    selector = selectors.DefaultSelector()
+    assert process.stdout is not None
+    selector.register(process.stdout, selectors.EVENT_READ)
+    started_at = time.monotonic()
+    last_output_at = started_at
+    output_tail = ""
+    timeout_reason = ""
+
+    while process.poll() is None:
+        for key, _ in selector.select(timeout=1):
+            try:
+                chunk = os.read(key.fd, 65536)
+            except OSError:
+                chunk = b""
+            if chunk:
+                last_output_at = time.monotonic()
+                text = chunk.decode("utf-8", errors="replace")
+                output_tail = (output_tail + text)[-32768:]
+                print(text, end="", flush=True)
+            else:
+                try:
+                    selector.unregister(key.fileobj)
+                except (KeyError, ValueError):
+                    pass
+
+        now = time.monotonic()
+        if now - last_output_at >= idle_timeout:
+            timeout_reason = "idle_timeout"
+        elif now - started_at >= hard_timeout:
+            timeout_reason = "hard_timeout"
+        if timeout_reason:
+            message = (
+                "[Upload] watchdog %s after %ss idle / %ss total; "
+                "terminating the upload process group\n"
+            ) % (timeout_reason, round(now - last_output_at), round(now - started_at))
+            output_tail = (output_tail + message)[-32768:]
+            print(message, end="", flush=True)
+            terminate_process_tree(process)
+            break
+
+    if process.poll() is None:
+        terminate_process_tree(process)
+    try:
+        remainder = process.stdout.read() if process.poll() is not None else b""
+    except OSError:
+        remainder = b""
+    if remainder:
+        text = remainder.decode("utf-8", errors="replace")
+        output_tail = (output_tail + text)[-32768:]
+        print(text, end="", flush=True)
+    selector.close()
+    return_code = process.returncode if process.returncode is not None else 137
+    return (124 if timeout_reason else return_code, output_tail, timeout_reason)
+
+def is_network_failure(output, timeout_reason):
+    if timeout_reason:
+        return True
+    lowered = output.lower()
+    return any(marker in lowered for marker in (
+        "unexpected_eof_while_reading",
+        "connecterror",
+        "connection reset",
+        "connection aborted",
+        "network is unreachable",
+        "timed out",
+        "timeout",
+        "502 bad gateway",
+        "503 service unavailable",
+        "504 gateway timeout",
+    ))
+
 write_progress()
 
 for item_index, item in enumerate(items):
@@ -3809,12 +4637,64 @@ for item_index, item in enumerate(items):
     ]
     item_started = time.time()
     print("[Upload]", item["repoId"], "<-", item["resultsDir"], flush=True)
-    process = subprocess.run(command, text=True, capture_output=True)
-    output = (process.stdout or "") + (process.stderr or "")
-    if output:
-        print(output, end="" if output.endswith("\n") else "\n", flush=True)
+    # A single transient proxy/Hugging Face failure must not consume the whole
+    # batch. Probe the configured proxy before each retry and retry the item in
+    # place; the operation remains observable and progress continues updating.
+    process_returncode = 1
+    output_parts = []
+    timeout_reason = ""
+    network_failure_detected = False
+    idle_timeout = UPLOAD_IDLE_TIMEOUT_SECONDS
+    hard_timeout = min(
+        UPLOAD_HARD_MAX_SECONDS,
+        max(idle_timeout * 2, UPLOAD_HARD_BASE_SECONDS + files_before * UPLOAD_HARD_PER_FILE_SECONDS),
+    )
+    for attempt in range(1, UPLOAD_MAX_ATTEMPTS + 1):
+        summary["current_attempt"] = attempt
+        summary["current_idle_timeout_seconds"] = idle_timeout
+        summary["current_hard_timeout_seconds"] = hard_timeout
+        if attempt > 1:
+            summary["upload_retry_attempts"] += 1
+        write_progress()
+        if attempt > 1:
+            probe = subprocess.run(
+                ["curl", "--silent", "--show-error", "--output", "/dev/null",
+                 "--write-out", "%{http_code}", "--connect-timeout", "10",
+                 "--max-time", "25", "--proxy", os.environ.get("https_proxy", ""),
+                 "https://huggingface.co/"],
+                text=True, capture_output=True,
+            )
+            print("[Upload] proxy check attempt", attempt, "code", probe.returncode,
+                  "http", (probe.stdout or "").strip(), flush=True)
+            if probe.returncode != 0:
+                print("[Upload] proxy unavailable; ending this operation so automatic Network Sync can recover it", flush=True)
+                network_failure_detected = True
+                break
+        print(
+            "[Upload] attempt %d/%d (idle timeout %ss, hard timeout %ss)" %
+            (attempt, UPLOAD_MAX_ATTEMPTS, idle_timeout, hard_timeout),
+            flush=True,
+        )
+        process_returncode, attempt_output, timeout_reason = run_upload_attempt(
+            command,
+            idle_timeout,
+            hard_timeout,
+        )
+        output_parts.append("[attempt %d]\n%s" % (attempt, attempt_output))
+        if timeout_reason:
+            summary["upload_timeouts"] += 1
+        if is_network_failure(attempt_output, timeout_reason):
+            network_failure_detected = True
+        if process_returncode == 0:
+            break
+        print("[Upload] failed attempt", attempt, "for", item["repoId"], flush=True)
+        if attempt < UPLOAD_MAX_ATTEMPTS:
+            time.sleep(min(30, 5 * attempt))
+    output = "\n".join(output_parts)
     duration = max(0, round(time.time() - item_started))
-    success = process.returncode == 0
+    success = process_returncode == 0
+    if not success and network_failure_detected:
+        summary["network_recovery_required"] = 1
     files_after = len(list(result_dir.glob(pattern))) if result_dir.is_dir() else 0
     files_deleted = max(0, files_before - files_after)
     files_uploaded = files_before if success else 0
@@ -3839,8 +4719,10 @@ for item_index, item in enumerate(items):
         "files_uploaded": files_uploaded,
         "files_deleted": files_deleted,
         "files_remaining": files_after,
-        "exit_code": process.returncode,
+        "exit_code": process_returncode,
         "success": success,
+        "timed_out": bool(timeout_reason),
+        "timeout_reason": timeout_reason or None,
         "duration_seconds": duration,
         "output_tail": output[-1600:],
     })
@@ -3848,11 +4730,42 @@ for item_index, item in enumerate(items):
     summary["current_results_dir"] = ""
     summary["current_file_format"] = ""
     summary["current_item_index"] = 0
+    summary["current_attempt"] = 0
+    summary["current_idle_timeout_seconds"] = 0
+    summary["current_hard_timeout_seconds"] = 0
     write_progress()
+    if not success:
+        # Finish promptly so the backend can run its retained-result scan,
+        # restart the proxy, verify Hugging Face, and launch a fresh upload.
+        break
 
 write_progress()
 sys.exit(0 if summary["upload_failed"] == 0 else 1)
 PY`;
+}
+
+export function buildServerUploadPlan(items: ServerUploadItem[]): string {
+  return JSON.stringify(items.map((item) => ({
+    datasetName: item.datasetName,
+    repoId: item.repoId,
+    jobId: item.jobId ?? "",
+    resultsDir: item.resultsDir,
+    fileFormat: item.fileFormat,
+    fileCount: item.fileCount ?? 0
+  })));
+}
+
+export function buildStageServerOperationFileCommand(remotePath: string): string {
+  const target = shellQuoteRemotePath(remotePath);
+  return String.raw`set -e
+TARGET=${target}
+mkdir -p "$(dirname "$TARGET")"
+umask 077
+TEMP="${"$"}{TARGET}.tmp.${"$"}${"$"}"
+trap 'rm -f -- "$TEMP"' EXIT
+cat > "$TEMP"
+mv -f -- "$TEMP" "$TARGET"
+trap - EXIT`;
 }
 
 export function buildDeleteUploadCandidateCommand(solverRoot: string, resultsDir: string): string {
@@ -3902,7 +4815,7 @@ LOG_FILE=${shellQuoteRemotePath(logFilePath)}
 OP_RESULT_FILE="${"$"}{STATUS_FILE}.result"
 OP_UPLOAD_PLAN_FILE="${"$"}{STATUS_FILE}.upload-plan.json"
 mkdir -p "$(dirname "$STATUS_FILE")" "$(dirname "$LOG_FILE")"
-rm -f "$OP_RESULT_FILE" "$OP_UPLOAD_PLAN_FILE"
+rm -f "$OP_RESULT_FILE"
 OP_STARTED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 printf '{"id":"%s","type":"%s","status":"running","started_at":"%s","updated_at":"%s","exit_code":null,"log_file":"%s","result":null}\n' "$OP_ID" "$OP_TYPE" "$OP_STARTED_AT" "$OP_STARTED_AT" "$LOG_FILE" > "$STATUS_FILE"
 set +e
@@ -3914,6 +4827,7 @@ OP_FINISHED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 if [ "$OP_CODE" -eq 0 ]; then OP_STATUS=completed; else OP_STATUS=failed; fi
 if [ -s "$OP_RESULT_FILE" ]; then OP_RESULT_JSON=$(cat "$OP_RESULT_FILE"); else OP_RESULT_JSON='{"summary":{},"details":[]}'; fi
 printf '{"id":"%s","type":"%s","status":"%s","started_at":"%s","finished_at":"%s","updated_at":"%s","exit_code":%s,"log_file":"%s","result":%s}\n' "$OP_ID" "$OP_TYPE" "$OP_STATUS" "$OP_STARTED_AT" "$OP_FINISHED_AT" "$OP_FINISHED_AT" "$OP_CODE" "$LOG_FILE" "$OP_RESULT_JSON" > "$STATUS_FILE"
+rm -f "$OP_UPLOAD_PLAN_FILE"
 exit "$OP_CODE"`;
 }
 
@@ -3953,7 +4867,12 @@ else
   echo "OP_TMUX_ALIVE=0"
 fi
 if [ -f "$STATUS_FILE" ]; then
-python - "$STATUS_FILE" "$RESULT_FILE" "$PLAN_FILE" "$TMUX_ALIVE" <<'PY'
+PYTHON_BIN=$(command -v python 2>/dev/null || command -v python3 2>/dev/null || true)
+if [ -z "$PYTHON_BIN" ] && [ -x "$HOME/miniconda3/bin/python" ]; then
+  PYTHON_BIN="$HOME/miniconda3/bin/python"
+fi
+if [ -n "$PYTHON_BIN" ]; then
+"$PYTHON_BIN" - "$STATUS_FILE" "$RESULT_FILE" "$PLAN_FILE" "$TMUX_ALIVE" <<'PY'
 import json
 import sys
 from datetime import datetime, timezone
@@ -4072,6 +4991,9 @@ elif status.get("type") == "upload" and status.get("status") == "running":
 print(json.dumps(status, ensure_ascii=True, separators=(",", ":")))
 PY
 if [ "$?" -ne 0 ]; then cat "$STATUS_FILE"; fi
+else
+  cat "$STATUS_FILE"
+fi
 fi`;
 }
 
@@ -4611,6 +5533,14 @@ function normalizeUploadItems(items: ServerUploadItem[] | undefined): ServerUplo
   return normalized;
 }
 
+function retainUploadItemsFromSource(
+  scannedItems: ServerUploadItem[],
+  sourceItems: ServerUploadItem[]
+): ServerUploadItem[] {
+  const sourceKeys = new Set(sourceItems.map((item) => `${item.resultsDir}\u0000${item.repoId}\u0000${item.fileFormat}`));
+  return scannedItems.filter((item) => sourceKeys.has(`${item.resultsDir}\u0000${item.repoId}\u0000${item.fileFormat}`));
+}
+
 function uniqueUploadCandidateDeleteRequests(
   items: ServerUploadCandidateDeleteRequest[]
 ): ServerUploadCandidateDeleteRequest[] {
@@ -4721,6 +5651,26 @@ function parseRemoteOperationStatus(output: string): RemoteOperationStatus | nul
   }
 }
 
+export function parseServerHfConnectivityProbe(output: string): { connected: boolean; reason: string } {
+  const values = new Map<string, string>();
+  for (const line of output.split(/\r?\n/)) {
+    const separator = line.indexOf("=");
+    if (separator <= 0) continue;
+    values.set(line.slice(0, separator).trim(), line.slice(separator + 1).trim());
+  }
+  const connected = values.get("HF_PROXY_CONNECTED") === "1";
+  if (connected) {
+    return { connected: true, reason: `HTTP ${values.get("HF_PROXY_HTTP_CODE") ?? "unknown"}` };
+  }
+  const curlCode = values.get("HF_PROXY_CURL_CODE") ?? "unknown";
+  const httpCode = values.get("HF_PROXY_HTTP_CODE") ?? "000";
+  const error = values.get("HF_PROXY_ERROR") ?? "proxy probe failed";
+  return {
+    connected: false,
+    reason: `curl=${curlCode}, http=${httpCode}${error ? `, ${error}` : ""}`
+  };
+}
+
 function isSshHandshakeTimeout(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return /timed out while waiting for handshake/i.test(message);
@@ -4793,6 +5743,14 @@ function serverOperationPaths(id: string): { statusFilePath: string; logFilePath
     statusFilePath: `~/run/server_operation_${id}.json`,
     logFilePath: `~/run/server_operation_${id}.log`
   };
+}
+
+function serverOperationPlanPath(id: string): string {
+  return `~/run/server_operation_${id}.json.upload-plan.json`;
+}
+
+function serverOperationCommandPath(id: string): string {
+  return `~/run/server_operation_${id}.json.command.sh`;
 }
 
 function safeTmuxName(value: string): string {

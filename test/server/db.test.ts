@@ -2,6 +2,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { DEFAULT_SOLVER_JOB_SETTINGS } from "../../src/shared/solverJobs";
+import { DEFAULT_SOLVER_SETTING_LIBRARY } from "../../src/shared/solverSettings";
 import type { ConnectionStatus, HealthLevel, MetricSnapshot, ServerConfig } from "../../src/shared/types";
 import { MonitorDatabase } from "../../src/server/db";
 
@@ -117,6 +119,114 @@ describe("MonitorDatabase", () => {
     expect(db.getServerRows().find((row) => row.id === "prod-01")?.lastDatasetName).toBe("sia-45-sod-40");
   });
 
+  it("relinks solver history and failure-pool records after a range folder rename", () => {
+    const setting = DEFAULT_SOLVER_SETTING_LIBRARY[0]!;
+    const previousPath = "SOA EP/SOA 15.8 vs SOD 11.5.json";
+    const nextPath = "SIA VS SB CC/SOA 15.8 vs SOD 11.5.json";
+    const now = "2026-09-04T00:00:00.000Z";
+    db.insertParallelSolverRun({
+      id: "parallel-rename",
+      sourceType: "parallel",
+      rangePath: previousPath,
+      rangeName: path.posix.basename(previousPath),
+      datasetName: "soa-15.8-sod-11.5",
+      repoId: "Tsumugii/soa-15.8-sod-11.5",
+      settingId: setting.id,
+      setting,
+      scenario: setting.id,
+      settings: DEFAULT_SOLVER_JOB_SETTINGS,
+      solverRangeText: "AA",
+      status: "completed",
+      reportCleared: false,
+      queueOrder: 0,
+      serverIds: ["prod-01"],
+      autoIncludeNewServers: false,
+      serverScope: "all",
+      totalIndices: [1],
+      missingIndices: [1],
+      createdAt: now,
+      updatedAt: now,
+      startedAt: now,
+      finishedAt: now,
+      lastError: null,
+      slices: [],
+      report: {
+        totalBoards: 1,
+        completedBoards: 1,
+        failedBoards: 0,
+        queuedBoards: 0,
+        runningBoards: 0,
+        successRate: 1,
+        durationSeconds: 0
+      }
+    });
+    db.insertSolverJob({
+      id: "job-rename",
+      serverId: "prod-01",
+      rangePath: previousPath,
+      rangeName: path.posix.basename(previousPath),
+      datasetName: "soa-15.8-sod-11.5",
+      settingId: setting.id,
+      setting,
+      scenario: setting.id,
+      repoId: "Tsumugii/soa-15.8-sod-11.5",
+      settings: DEFAULT_SOLVER_JOB_SETTINGS,
+      command: "python run_pipeline.py",
+      solverRangeText: "AA",
+      status: "completed",
+      queueMode: "manual",
+      confirmUnstudied: false,
+      tmuxSession: "solver",
+      remoteRangePath: "/srv/solver/range.txt",
+      remoteResultPath: "/srv/solver/results/job-rename",
+      parallelRunId: "parallel-rename",
+      parallelSliceId: null,
+      assignedIndices: [1],
+      sourceType: "parallel",
+      createdAt: now,
+      updatedAt: now,
+      startedAt: now,
+      finishedAt: now,
+      lastError: null,
+      pipeline: null
+    });
+    db.upsertParallelFailurePoolEntry({
+      id: "failure-rename",
+      rangePath: previousPath,
+      datasetName: "soa-15.8-sod-11.5",
+      repoId: "Tsumugii/soa-15.8-sod-11.5",
+      scenario: setting.id,
+      boardIndex: 1,
+      boardName: "Ac,Ad,Ah",
+      boardKey: "acadah",
+      status: "solved",
+      failureReason: "abnormal_end",
+      attemptCount: 1,
+      lastRunId: "parallel-rename",
+      lastSliceId: null,
+      lastServerId: "prod-01",
+      lastError: null,
+      createdAt: now,
+      updatedAt: now
+    });
+
+    const relinked = db.relinkPreflopRangePath("SOA EP", "SIA VS SB CC", true);
+
+    expect(relinked).toEqual({ solverJobs: 1, parallelRuns: 1, failurePoolEntries: 1 });
+    expect(db.getSolverJob("job-rename")).toMatchObject({
+      rangePath: nextPath,
+      rangeName: path.posix.basename(nextPath)
+    });
+    expect(db.getParallelSolverRun("parallel-rename")).toMatchObject({
+      rangePath: nextPath,
+      rangeName: path.posix.basename(nextPath)
+    });
+    expect(db.getParallelFailurePoolEntries(nextPath, "soa-15.8-sod-11.5"))
+      .toHaveLength(1);
+    expect(db.getParallelFailurePoolEntries(previousPath, "soa-15.8-sod-11.5"))
+      .toHaveLength(0);
+  });
+
   it("records refresh runs and returns the latest run", () => {
     db.insertRefreshRun({
       id: "run-1",
@@ -160,6 +270,29 @@ describe("MonitorDatabase", () => {
         averageCpu: 30,
         averageMemory: 50,
         averageDisk: 70
+      }
+    ]);
+  });
+
+  it("excludes disabled server snapshots from overall history", () => {
+    db.syncServers([
+      servers[0]!,
+      { ...servers[1]!, enabled: false }
+    ]);
+    db.insertSnapshot(snapshot("prod-01", "2026-05-12T10:00:00.000Z"));
+    db.insertSnapshot({
+      ...snapshot("prod-02", "2026-05-12T10:00:00.000Z"),
+      cpuUsedPercent: 100,
+      memoryUsedPercent: 100,
+      diskUsedPercent: 100
+    });
+
+    expect(db.getOverallHistory(24, "2026-05-12T11:00:00.000Z")).toEqual([
+      {
+        collectedAt: "2026-05-12T10:00:00.000Z",
+        averageCpu: 20,
+        averageMemory: 40,
+        averageDisk: 60
       }
     ]);
   });

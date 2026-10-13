@@ -4,7 +4,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   createServerInventoryEntry,
-  deleteServerInventoryEntry,
+  disableServerInventoryEntry,
   loadAlertSettings,
   loadRuntimeConfig,
   loadServerInventory,
@@ -154,7 +154,7 @@ describe("server inventory loading", () => {
 
   it("creates a server with generated id and generated initial name", () => {
     const file = path.join(tempDir, "servers.json");
-    fs.writeFileSync(file, JSON.stringify([{ id: "10-0-0-1", name: "Production 01", host: "10.0.0.1" }]));
+    fs.writeFileSync(file, JSON.stringify([{ id: "7", name: "Production 01", host: "10.0.0.1" }]));
 
     const created = createServerInventoryEntry(file, {
       host: "10.0.0.1",
@@ -165,7 +165,7 @@ describe("server inventory loading", () => {
     });
 
     expect(created).toMatchObject({
-      id: "10-0-0-1-2222",
+      id: "8",
       name: "10.0.0.1",
       host: "10.0.0.1",
       port: 2222,
@@ -174,7 +174,7 @@ describe("server inventory loading", () => {
       note: "Secondary solver"
     });
     expect(JSON.parse(fs.readFileSync(file, "utf8"))[1]).toMatchObject({
-      id: "10-0-0-1-2222",
+      id: "8",
       name: "10.0.0.1"
     });
   });
@@ -208,7 +208,7 @@ describe("server inventory loading", () => {
     ]);
   });
 
-  it("deletes a server from the inventory file", () => {
+  it("soft-deletes a server by disabling its inventory entry", () => {
     const file = path.join(tempDir, "servers.json");
     fs.writeFileSync(
       file,
@@ -218,10 +218,11 @@ describe("server inventory loading", () => {
       ])
     );
 
-    const remaining = deleteServerInventoryEntry(file, "prod-01");
+    const disabled = disableServerInventoryEntry(file, "prod-01");
 
-    expect(remaining.map((server) => server.id)).toEqual(["prod-02"]);
+    expect(disabled).toMatchObject({ id: "prod-01", enabled: false });
     expect(JSON.parse(fs.readFileSync(file, "utf8"))).toEqual([
+      { id: "prod-01", name: "Production 01", host: "10.0.0.1", enabled: false },
       { id: "prod-02", name: "Production 02", host: "10.0.0.2" }
     ]);
   });

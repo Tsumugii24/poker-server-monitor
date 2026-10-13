@@ -24,6 +24,11 @@ class FakeSshClient extends EventEmitter {
   }
 }
 
+class FakeSshStream extends EventEmitter {
+  readonly stderr = new EventEmitter();
+  readonly end = vi.fn();
+}
+
 afterEach(() => {
   vi.useRealTimers();
 });
@@ -51,5 +56,25 @@ describe("Ssh2Executor", () => {
 
     await rejected;
     expect(client.end).toHaveBeenCalledOnce();
+  });
+
+  it("writes an optional stdin payload without adding it to the exec command", async () => {
+    const client = new FakeSshClient();
+    const stream = new FakeSshStream();
+    client.exec.mockImplementation((_command, callback) => {
+      callback(null, stream as never);
+      queueMicrotask(() => stream.emit("close", 0));
+    });
+    const executor = new Ssh2Executor(
+      () => ({ connectTimeoutMs: 1_234, commandTimeoutMs: 1_000 }),
+      () => client as unknown as Client
+    );
+
+    const result = executor.run(server, { username: "root", password: "secret" }, "cat > plan.json", "large-plan");
+    client.emit("ready");
+
+    await expect(result).resolves.toBe("");
+    expect(client.exec).toHaveBeenCalledWith("cat > plan.json", expect.any(Function));
+    expect(stream.end).toHaveBeenCalledWith("large-plan");
   });
 });
